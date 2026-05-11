@@ -116,16 +116,18 @@ func processDBJob(ctx context.Context, db *sql.DB, payload []byte, maxRetries in
 		persistErr = persistPreviewAllocations(ctx, tx, job)
 	}
 	if err := persistErr; err != nil {
-		if _, ok := err.(errStaleScheduleData); !ok && attempt < maxRetries {
-			_, _ = tx.ExecContext(ctx, `
-				UPDATE schedule_jobs
-				SET status = 'queued', message = $2, updated_at = NOW()
-				WHERE id = $1
-			`, job.ID, "排程任務暫時失敗，等待重試。")
-			if commitErr := tx.Commit(); commitErr != nil {
-				return commitErr
+		if _, ok := err.(errStaleScheduleData); !ok {
+			if _, ok := err.(errScheduleConflicts); !ok && attempt < maxRetries {
+				_, _ = tx.ExecContext(ctx, `
+					UPDATE schedule_jobs
+					SET status = 'queued', message = $2, updated_at = NOW()
+					WHERE id = $1
+				`, job.ID, "排程任務暫時失敗，等待重試。")
+				if commitErr := tx.Commit(); commitErr != nil {
+					return commitErr
+				}
+				return err
 			}
-			return err
 		}
 		_, _ = tx.ExecContext(ctx, `
 			UPDATE schedule_jobs
@@ -234,15 +236,33 @@ func persistLineSchedule(ctx context.Context, tx *sql.Tx, job domain.ScheduleJob
 func persistPreviewAllocations(ctx context.Context, tx *sql.Tx, job domain.ScheduleJob) error {
 	var revision int64
 	var allocationsJSON []byte
+	var conflictsJSON []byte
+	var requestJSON []byte
 	if err := tx.QueryRowContext(ctx, `
-		SELECT line_revision, allocations
+		SELECT line_revision, allocations, conflicts, request
 		FROM schedule_previews
 		WHERE id = $1 AND line_id = $2 AND expires_at > NOW()
-	`, job.PreviewID, job.LineID).Scan(&revision, &allocationsJSON); err != nil {
+	`, job.PreviewID, job.LineID).Scan(&revision, &allocationsJSON, &conflictsJSON, &requestJSON); err != nil {
 		if err == sql.ErrNoRows {
 			return errStaleScheduleData{}
 		}
 		return err
+	}
+	if len(conflictsJSON) > 0 {
+		var conflicts []scheduler.Conflict
+		if err := json.Unmarshal(conflictsJSON, &conflicts); err != nil {
+			return err
+		}
+		if len(conflicts) > 0 {
+			var previewRequest schedulePreviewRequest
+			if err := json.Unmarshal(requestJSON, &previewRequest); err != nil {
+				return err
+			}
+			if previewRequest.ManualForce {
+				return errScheduleConflicts{message: "人工強制仍有衝突，請先調整受影響的既有訂單再送出。"}
+			}
+			return errScheduleConflicts{message: "排程結果仍有衝突，請重新檢查後再送出。"}
+		}
 	}
 	var currentRevision int64
 	if err := tx.QueryRowContext(ctx, "SELECT schedule_revision FROM production_lines WHERE id = $1 FOR UPDATE", job.LineID).Scan(&currentRevision); err != nil {
@@ -291,6 +311,18 @@ type errStaleScheduleData struct{}
 
 func (errStaleScheduleData) Error() string {
 	return "排程資料已變更，請重新試排。"
+}
+
+type errScheduleConflicts struct {
+	message string
+}
+
+func (err errScheduleConflicts) Error() string {
+	return err.message
+}
+
+type schedulePreviewRequest struct {
+	ManualForce bool `json:"manualForce"`
 }
 
 func env(key, fallback string) string {

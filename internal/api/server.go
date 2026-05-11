@@ -1151,9 +1151,13 @@ func (s *MemoryStore) ExecuteScheduleJob(id string) domain.ScheduleJob {
 		s.jobs[id] = job
 		return job
 	}
-	if len(result.Conflicts) > 0 && !canPersistConflicts(req, result.Conflicts) {
+	if len(result.Conflicts) > 0 {
 		job.Status = domain.JobFailed
-		job.Message = "排程結果仍有衝突，請重新檢查後再送出。"
+		if req.ManualForce {
+			job.Message = "人工強制仍有衝突，請先調整受影響的既有訂單再送出。"
+		} else {
+			job.Message = "排程結果仍有衝突，請重新檢查後再送出。"
+		}
 		job.UpdatedAt = time.Now().UTC()
 		s.jobs[id] = job
 		return job
@@ -1584,18 +1588,6 @@ func (s *MemoryStore) planLocked(req scheduleRequest, claims auth.Claims) (sched
 		ForceReason:         req.Reason,
 		AllowLateCompletion: req.AllowLateCompletion,
 	})
-}
-
-func canPersistConflicts(req scheduleRequest, conflicts []scheduler.Conflict) bool {
-	if !req.ManualForce || strings.TrimSpace(req.Reason) == "" {
-		return false
-	}
-	for _, conflict := range conflicts {
-		if conflict.Reason != "existing allocations require manual review or reschedule" {
-			return false
-		}
-	}
-	return true
 }
 
 func (s *MemoryStore) persistAllocationsLocked(allocations []scheduler.Allocation) {

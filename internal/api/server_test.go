@@ -921,8 +921,8 @@ func TestManualForceConflictCanCreateScheduleJobWithAudit(t *testing.T) {
 	if err := json.Unmarshal(res.Body.Bytes(), &job); err != nil {
 		t.Fatalf("decode job response: %v", err)
 	}
-	if job.Status != domain.JobCompleted {
-		t.Fatalf("expected completed manual job, got %+v", job)
+	if job.Status != domain.JobFailed {
+		t.Fatalf("expected failed manual job due to conflicts, got %+v", job)
 	}
 	foundAudit := false
 	for _, audit := range store.audits {

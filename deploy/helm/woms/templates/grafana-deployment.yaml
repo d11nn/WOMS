@@ -1,0 +1,70 @@
+{{- if and .Values.monitoring.enabled .Values.monitoring.grafana.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "woms.fullname" . }}-grafana
+  labels:
+    {{- include "woms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: grafana
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: grafana
+    spec:
+      containers:
+        - name: grafana
+          image: "{{ .Values.monitoring.grafana.image.repository }}:{{ .Values.monitoring.grafana.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: {{ .Values.monitoring.grafana.env.anonymousEnabled | quote }}
+            - name: GF_AUTH_ANONYMOUS_ORG_ROLE
+              value: {{ .Values.monitoring.grafana.env.anonymousOrgRole | quote }}
+            - name: GF_SECURITY_ALLOW_EMBEDDING
+              value: {{ .Values.monitoring.grafana.env.allowEmbedding | quote }}
+            - name: GF_SECURITY_COOKIE_SAMESITE
+              value: "disabled"
+            - name: GF_SECURITY_COOKIE_SECURE
+              value: "false"
+          volumeMounts:
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources
+            - name: dashboard-provider
+              mountPath: /etc/grafana/provisioning/dashboards
+            - name: dashboards
+              mountPath: /var/lib/grafana/dashboards
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.monitoring.grafana.resources | nindent 12 }}
+      volumes:
+        - name: datasources
+          configMap:
+            name: {{ include "woms.fullname" . }}-grafana-datasources
+        - name: dashboard-provider
+          configMap:
+            name: {{ include "woms.fullname" . }}-grafana-dashboard-provider
+        - name: dashboards
+          configMap:
+            name: {{ include "woms.fullname" . }}-grafana-dashboards
+{{- end }}

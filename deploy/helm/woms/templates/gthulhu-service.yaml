@@ -1,0 +1,17 @@
+{{- if and .Values.monitoring.enabled .Values.monitoring.gthulhu.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "woms.fullname" . }}-gthulhu
+  labels:
+    {{- include "woms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gthulhu
+spec:
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: gthulhu
+  ports:
+    - name: metrics
+      port: {{ .Values.monitoring.gthulhu.metricsPort }}
+      targetPort: metrics
+{{- end }}

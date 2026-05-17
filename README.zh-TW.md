@@ -304,6 +304,27 @@ kubectl port-forward svc/woms-woms-web 8081:8080 -n woms
 ssh -L 8081:127.0.0.1:8081 ubuntu@192.168.56.101
 ```
 
+### 監控
+
+Helm chart 內建整合監控堆疊，包含 Prometheus 與 Grafana，預設透過 `monitoring.enabled=true` 啟用。Gthulhu 可用但預設關閉 (`monitoring.gthulhu.enabled=false`)。
+
+Prometheus 會 scrape WOMS API 的 `/metrics` endpoint。啟用 Gthulhu 後，Prometheus 也會 scrape Gthulhu 的 `9091` port。
+
+Grafana 已預設配置 Prometheus datasource 與 WOMS Monitoring dashboard，並啟用匿名唯讀存取以支援 iframe 嵌入。
+
+本機或 VM demo 可用 port-forward 開啟 Grafana 與 Prometheus：
+
+```bash
+kubectl port-forward svc/woms-woms-grafana 3000:3000 -n woms
+kubectl port-forward svc/woms-woms-prometheus 9090:9090 -n woms
+```
+
+開啟 `http://localhost:3000` 即可存取 Grafana（匿名 Viewer 存取，無需登入），`http://localhost:9090` 可存取 Prometheus。
+
+Web 監控頁面 `/monitor.html` 會以 iframe 嵌入 Grafana dashboard。若 Grafana 無法連線，會顯示 fallback 面板，提供 Docker Compose 與 Kubernetes 兩種部署的操作說明。
+
+`monitoring/` 目錄中的舊 Docker Compose 監控設定保留作為本機 Docker 開發的 fallback。
+
 ### Scheduler Worker HPA Demo
 
 WOMS 的 HPA 情境是 scheduler-worker backlog。月底排程或急單復原時，API 會把大量排程任務送到 Kafka topic `woms.schedule.jobs`。scheduler workers 共用 consumer group `woms-scheduler-workers`；當 lag 超過 `keda.kafka.lagThreshold`，KEDA 會建立並驅動 deployment `woms-woms-worker` 的 HPA `woms-woms-worker-hpa`。CPU utilization 保留為第二 trigger，用來支援排程計算尖峰。

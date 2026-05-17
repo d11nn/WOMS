@@ -39,11 +39,22 @@
           <p class="eyebrow">Dashboard</p>
           <h2>Grafana 儀表板尚未啟動</h2>
         </div>
+
+        <!-- Docker Compose 部署 -->
+        <h3>Docker Compose 部署</h3>
         <p>
           監控儀表板需要 Grafana 服務。請確認 <code>docker compose up</code> 已包含
           <strong>prometheus</strong>、<strong>grafana</strong> 與 <strong>gthulhu</strong> 服務。
         </p>
         <code>docker compose up -d postgres redis kafka api scheduler-worker web gthulhu prometheus grafana</code>
+
+        <!-- Kubernetes 部署 -->
+        <h3>Kubernetes 部署</h3>
+        <p>
+          若使用 Kubernetes 部署，請先執行 port-forward 將 Grafana 服務轉發至本機：
+        </p>
+        <code>kubectl port-forward svc/woms-woms-grafana 3000:3000 -n woms</code>
+
         <p>
           Grafana 預設在 <strong>localhost:3000</strong> 運行，已設定為匿名唯讀存取。
           當 Grafana 就緒後，重新整理此頁面即可載入儀表板。

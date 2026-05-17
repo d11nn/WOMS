@@ -1,0 +1,39 @@
+{{- if and .Values.monitoring.enabled .Values.monitoring.gthulhu.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "woms.fullname" . }}-gthulhu
+  labels:
+    {{- include "woms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gthulhu
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: gthulhu
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: gthulhu
+    spec:
+      containers:
+        - name: gthulhu
+          image: "{{ .Values.monitoring.gthulhu.image.repository }}:{{ .Values.monitoring.gthulhu.image.tag }}"
+          imagePullPolicy: {{ .Values.monitoring.gthulhu.image.pullPolicy }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.monitoring.gthulhu.metricsPort }}
+          env:
+            - name: GTHULHU_POSTGRES_DSN
+              value: {{ .Values.monitoring.gthulhu.env.postgresDsn | quote }}
+            - name: GTHULHU_REDIS_ADDR
+              value: {{ .Values.monitoring.gthulhu.env.redisAddr | quote }}
+            - name: GTHULHU_KAFKA_BROKERS
+              value: {{ .Values.monitoring.gthulhu.env.kafkaBrokers | quote }}
+            - name: GTHULHU_METRICS_PORT
+              value: {{ .Values.monitoring.gthulhu.metricsPort | quote }}
+          resources:
+            {{- toYaml .Values.monitoring.gthulhu.resources | nindent 12 }}
+{{- end }}

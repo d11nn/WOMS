@@ -300,6 +300,23 @@ If the browser runs on a Windows host and WOMS runs on VM `192.168.56.101`, crea
 ```powershell
 ssh -L 8081:127.0.0.1:8081 ubuntu@192.168.56.101
 ```
+### Monitoring
+
+The Helm chart includes an integrated monitoring stack with Prometheus and Grafana, enabled by default via `monitoring.enabled=true`. Gthulhu is available but disabled by default (`monitoring.gthulhu.enabled=false`).
+
+Prometheus scrapes the WOMS API `/metrics` endpoint. When Gthulhu is enabled, Prometheus also scrapes Gthulhu on port `9091`.
+
+Grafana is provisioned with the Prometheus datasource and the WOMS Monitoring dashboard. Anonymous read-only access is enabled for iframe embedding.
+
+For a local or VM demo, expose Grafana with port-forward:
+
+```bash
+kubectl port-forward svc/woms-woms-grafana 3000:3000 -n woms
+```
+
+Open `http://localhost:3000` for Grafana (anonymous viewer access, no login required).
+
+The web monitoring page at `/monitor.html` embeds the Grafana dashboard in an iframe. If Grafana is unreachable, a fallback panel shows instructions for both Docker Compose and Kubernetes deployments.
 
 ### Scheduler Worker HPA Demo
 

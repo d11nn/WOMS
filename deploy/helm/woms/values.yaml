@@ -96,7 +96,7 @@ keda:
     targetUtilization: "70"
   gthulhu:
     enabled: false
-    prometheusServerAddress: "http://monitoring-kube-prometheus-prometheus.monitoring:9090"
+    prometheusServerAddress: "http://{{ include \"woms.fullname\" . }}-prometheus:9090"
     metricName: woms_worker_gthulhu_involuntary_ctx_switches_rate
     threshold: "20"
     query: |-
@@ -191,31 +191,32 @@ monitoring:
   enabled: true
 
   # Gthulhu: infrastructure metrics agent (Postgres, Redis, Kafka, K8s)
-  # gthulhu:
-  #   enabled: true
-  #   image:
-  #     repository: ghcr.io/gthulhu/gthulhu
-  #     tag: latest
-  #     pullPolicy: IfNotPresent
-  #   metricsPort: 9091
-  #   env:
-  #     postgresDsn: postgres://woms:woms@postgres:5432/woms?sslmode=disable
-  #     redisAddr: redis-master:6379
-  #     kafkaBrokers: kafka:9092
-  #   resources:
-  #     requests:
-  #       cpu: 50m
-  #       memory: 64Mi
-  #     limits:
-  #       cpu: 200m
-  #       memory: 128Mi
+  gthulhu:
+    enabled: true
+    image:
+      repository: ghcr.io/gthulhu/gthulhu
+      tag: "latest"
+      pullPolicy: IfNotPresent
+    metricsPort: 9091
+    env:
+      postgresDsn: postgres://woms:woms@postgres:5432/woms?sslmode=disable
+      redisAddr: redis-master:6379
+      kafkaBrokers: kafka:9092
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 128Mi
 
   # Prometheus scrape annotations (ServiceMonitor or pod annotations)
   prometheus:
     enabled: true
     image:
       repository: prom/prometheus
-      tag: "2.53.0"
+      tag: "v2.53.0"
+      pullPolicy: IfNotPresent
     scrape:
       # API pods: scrape /metrics on port 8080
       api:
@@ -223,17 +224,18 @@ monitoring:
         port: "8080"
         interval: 15s
       # Gthulhu pods: scrape /metrics on port 9091
-      # gthulhu:
-      #   path: /metrics
-      #   port: "9091"
-      #   interval: 15s
+      gthulhu:
+        path: /metrics
+        port: "9091"
+        interval: 15s
 
   # Grafana deployment with anonymous viewer access for iframe embedding
   grafana:
     enabled: true
     image:
       repository: grafana/grafana
-      tag: "11.1.0"
+      tag: "10.4.7"
+      pullPolicy: IfNotPresent
     env:
       anonymousEnabled: "true"
       anonymousOrgRole: Viewer

@@ -262,9 +262,9 @@ The chart generates or reuses a JWT signing secret when `api.jwtSecret` is unset
 kubectl get secret woms-woms-api -n woms -o jsonpath='{.data.JWT_SECRET}' | base64 -d
 ```
 
-The chart now deploys bundled PostgreSQL, Redis, and Kafka dependencies by default for local or VM demos, including their stateful workloads and storage. Production deployments should instead use a custom values file with explicit external service endpoints, credentials, `api.jwtSecret`, and, for forked image builds, `imageRegistry`.
+The chart now bundles PostgreSQL, Redis, and Kafka by default for local or VM demos, so installs can create dependency StatefulSets and PVC-backed storage as part of the release. Production deployments should use a custom values file with explicit external service endpoints, credentials, `api.jwtSecret`, and, for forked image builds, `imageRegistry`.
 
-The chart pins the Bitnami dependency image tags used by the dependency chart versions. Docker Hub no longer serves those retained tags from `bitnami/*`, so the default values override PostgreSQL, Redis, Kafka, and the Kafka topic hook to `bitnamilegacy/*`.
+The bundled dependency chart versions pin specific Bitnami image tags. Docker Hub no longer serves those retained tags from `bitnami/*`, so the default values override PostgreSQL, Redis, Kafka, and the Kafka topic hook to `bitnamilegacy/*`.
 
 For the single-node MicroK8s demo, the chart also sets Kafka internal topic replication values to `1`, including `offsets.topic.replication.factor`. Without that, `__consumer_offsets` defaults to replication factor `3`, the scheduler worker cannot create `woms-scheduler-workers`, and KEDA cannot read the Kafka lag metric.
 
@@ -300,6 +300,26 @@ If the browser runs on a Windows host and WOMS runs on VM `192.168.56.101`, crea
 ```powershell
 ssh -L 8081:127.0.0.1:8081 ubuntu@192.168.56.101
 ```
+### Monitoring
+
+The Helm chart includes an integrated monitoring stack with Prometheus and Grafana, enabled by default via `monitoring.enabled=true`. Gthulhu is available but disabled by default (`monitoring.gthulhu.enabled=false`).
+
+Prometheus scrapes the WOMS API `/metrics` endpoint. When Gthulhu is enabled, Prometheus also scrapes Gthulhu on port `9091`.
+
+Grafana is provisioned with the Prometheus datasource and the WOMS Monitoring dashboard. Anonymous read-only access is enabled for iframe embedding.
+
+For a local or VM demo, expose Grafana and Prometheus with port-forward:
+
+```bash
+kubectl port-forward svc/woms-woms-grafana 3000:3000 -n woms
+kubectl port-forward svc/woms-woms-prometheus 9090:9090 -n woms
+```
+
+Open `http://localhost:3000` for Grafana (anonymous viewer access, no login required) and `http://localhost:9090` for Prometheus.
+
+The web monitoring page at `/monitor.html` embeds the Grafana dashboard in an iframe. If Grafana is unreachable, a fallback panel shows instructions for both Docker Compose and Kubernetes deployments.
+
+The old Docker Compose monitoring configurations in the `monitoring/` directory are retained as a fallback for local Docker-based development.
 
 ### Scheduler Worker HPA Demo
 

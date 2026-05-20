@@ -26,6 +26,8 @@ const hpaDemoLastLine = 200
 const hpaDemoOrdersPerLine = 5
 const unacceptableDueDateMessage = "無法被接受的交期"
 const defaultLineTimezone = "Asia/Taipei"
+const orderIDDigits = 7
+const orderIDModulo int64 = 10000000
 
 var nowUTC = func() time.Time {
 	return time.Now().UTC()
@@ -793,7 +795,7 @@ func (s *MemoryStore) createOrderLocked(req createOrderRequest, actorID string) 
 		return domain.Order{}, err
 	}
 
-	id := "ORD-" + strconv.Itoa(s.nextOrderID)
+	id := orderIDFromSequence(s.nextOrderID)
 	s.nextOrderID++
 	order := domain.Order{
 		ID:        id,
@@ -2240,6 +2242,14 @@ func readJSON(r *http.Request, target any) error {
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	return decoder.Decode(target)
+}
+
+func orderIDFromSequence(seq int) string {
+	return fmt.Sprintf("ORD-%0*d", orderIDDigits, seq)
+}
+
+func orderIDFromTime(now time.Time) string {
+	return fmt.Sprintf("ORD-%0*d", orderIDDigits, now.UnixNano()%orderIDModulo)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

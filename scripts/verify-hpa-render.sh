@@ -6,6 +6,7 @@ NAMESPACE="${NAMESPACE:-woms}"
 CHART="${CHART:-./deploy/helm/woms}"
 RENDERED_MANIFEST="${RENDERED_MANIFEST:-}"
 GTHULHU_ENABLED="${GTHULHU_ENABLED:-false}"
+VALUES_FILE="${VALUES_FILE:-}"
 
 if [ -n "$RENDERED_MANIFEST" ]; then
   rendered="$RENDERED_MANIFEST"
@@ -13,10 +14,17 @@ else
   rendered="$(mktemp)"
   trap 'rm -f "$rendered"' EXIT
 
+  values_args=""
+  if [ -n "$VALUES_FILE" ]; then
+    values_args="-f $VALUES_FILE"
+  fi
+
   if [ "$GTHULHU_ENABLED" = "true" ]; then
-    helm template "$RELEASE" "$CHART" --dependency-update --namespace "$NAMESPACE" --set keda.gthulhu.enabled=true >"$rendered"
+    # shellcheck disable=SC2086
+    helm template "$RELEASE" "$CHART" --dependency-update --namespace "$NAMESPACE" $values_args --set keda.gthulhu.enabled=true >"$rendered"
   else
-    helm template "$RELEASE" "$CHART" --dependency-update --namespace "$NAMESPACE" >"$rendered"
+    # shellcheck disable=SC2086
+    helm template "$RELEASE" "$CHART" --dependency-update --namespace "$NAMESPACE" $values_args >"$rendered"
   fi
 fi
 
@@ -34,12 +42,12 @@ grep -q 'lagThreshold: "10"' "$rendered"
 grep -q "type: cpu" "$rendered"
 grep -q "metricType: Utilization" "$rendered"
 grep -q 'value: "70"' "$rendered"
-prometheus_triggers="$(grep -c "type: prometheus" "$rendered" || true)"
 gthulhu_metrics="$(grep -c 'metricName: "woms_worker_gthulhu_involuntary_ctx_switches_rate"' "$rendered" || true)"
+prometheus_triggers="$gthulhu_metrics"
 if [ "$GTHULHU_ENABLED" = "true" ]; then
   [ "$prometheus_triggers" -eq 1 ]
   [ "$gthulhu_metrics" -eq 1 ]
-  grep -q 'serverAddress: "http://monitoring-kube-prometheus-prometheus.monitoring:9090"' "$rendered"
+  grep -Eq "serverAddress: \"http://(monitoring-kube-prometheus-prometheus.monitoring|${RELEASE}-woms-prometheus.${NAMESPACE}):9090\"" "$rendered"
   expected_query="query: \"avg(rate(gthulhu_pod_involuntary_ctx_switches_total{exported_namespace=\\\"${NAMESPACE}\\\",pod_name=~\\\"${RELEASE}-woms-worker-.*\\\"}[2m]))\""
   grep -Fq "$expected_query" "$rendered"
   grep -q 'threshold: "20"' "$rendered"
@@ -55,5 +63,14 @@ grep -q "kind: PodDisruptionBudget" "$rendered"
 grep -q "name: ${RELEASE}-woms-api" "$rendered"
 grep -q "name: ${RELEASE}-woms-web" "$rendered"
 grep -q "minAvailable: 1" "$rendered"
+
+if [ -n "$VALUES_FILE" ]; then
+  grep -q "kind: DaemonSet" "$rendered"
+  grep -q "name: ${RELEASE}-gthulhu-scheduler" "$rendered"
+  grep -q "name: monitor-metrics" "$rendered"
+  grep -q "kind: PodSchedulingMetrics" "$rendered"
+  grep -q "name: ${RELEASE}-woms-prometheus" "$rendered"
+  grep -q "name: ${RELEASE}-woms-grafana" "$rendered"
+fi
 
 echo "HPA/KEDA render verification passed"

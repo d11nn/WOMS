@@ -1,0 +1,58 @@
+{{- if .Values.scheduler.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "gthulhu.fullname" . }}-scheduler-config{{- with .Values.scheduler.config.nameSuffix }}-{{ . }}{{- end }}
+  labels:
+    {{- include "gthulhu.labels" . | nindent 4 }}
+    app.kubernetes.io/component: scheduler
+data:
+  jwt_public_key.pem: |
+    -----BEGIN PUBLIC KEY-----
+    MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAny28YMC2/+yYj3T29lz6
+    0uryNz8gNVrqD7lTJuHQ3DMTE6ADqnERy8VgHve0tWzhJc5ZBZ1Hduvj+z/kNqbc
+    U81YGhmfOrQ3iFNYBlSAseIHdAw39HGyC6OKzTXI4HRpc8CwcF6hKExkyWlkALr5
+    i+IQDfimvarjjZ6Nm368L0Rthv3KOkI5CqRZ6bsVwwBug7GcdkvFs3LiRSKlMBpH
+    2tCkZ5ZZE8VyuK7VnlwV7n6EHzN5BqaHq8HVLw2KzvibSi+/5wIZV2Yx33tViLbh
+    OsZqLt6qQCGGgKzNX4TGwRLGAiVV1NCpgQhimZ4YP2thqSsqbaISOuvFlYq+QGP1
+    bcvcHB7UhT1ZnHSDYcbT2qiD3VoqytXVKLB1X5XCD99YLSP9B32f1lvZD4MhDtE4
+    IhAuqn15MGB5ct4yj/uMldFScs9KhqnWcwS4K6Qx3IfdB+ZxT5hEOWJLEcGqe/CS
+    XITNG7oS9mrSAJJvHSLz++4R/Sh1MnT2YWjyDk6qeeqAwut0w5iDKWt7qsGEcHFP
+    IVVlos+xLfrPDtgHQk8upjslUcMyMDTf21Y3RdJ3k1gTR9KHEwzKeiNlLjen9ekF
+    WupF8jik1aYRWL6h54ZyGxwKEyMYi9o18G2pXPzvVaPYtU+TGXdO4QwiES72TNCD
+    bNaGj75Gj0sN+LfjjQ4A898CAwEAAQ==
+    -----END PUBLIC KEY-----
+
+  config.yaml: |
+    # Gthulhu Scheduler Configuration
+    # This configuration file allows you to adjust scheduler parameters before eBPF program loading
+    scheduler:
+      # Default time slice in nanoseconds (default: 5000000 = 5ms)
+      slice_ns_default: 20000000
+      
+      # Minimum time slice in nanoseconds (default: 500000 = 0.5ms)
+      slice_ns_min: 1000000
+
+      # Mode could be: none, simple, scx, gthulhu
+      mode: {{ .Values.scheduler.config.mode | quote }}
+      kernel_mode: {{ .Values.scheduler.config.kernelMode }}
+      max_time_watchdog: {{ .Values.scheduler.config.maxTimeWatchdog }}
+    monitor:
+      enabled: {{ .Values.scheduler.monitor.enabled }}
+      bpf_object_path: {{ .Values.scheduler.monitor.bpfObjectPath | quote }}
+      collection_interval_sec: {{ .Values.scheduler.monitor.collectionIntervalSec }}
+      monitor_all: {{ .Values.scheduler.monitor.monitorAll }}
+      stream_events: {{ .Values.scheduler.monitor.streamEvents }}
+      prometheus_port: {{ .Values.scheduler.monitor.prometheusPort }}
+      enable_crd_watcher: {{ .Values.scheduler.monitor.enableCRDWatcher }}
+      kubeconfig_path: {{ .Values.scheduler.monitor.kubeConfigPath | quote }}
+    api:
+      enabled: {{ .Values.scheduler.api.enabled }}
+      auth_enabled: {{ .Values.scheduler.api.authEnabled }}
+      url: http://localhost:{{ .Values.scheduler.sidecar.port }}
+      interval: {{ .Values.scheduler.api.interval }}
+      public_key_path: /etc/gthulhu/jwt_public_key.pem
+    debug: false
+    early_processing: {{ .Values.scheduler.config.earlyProcessing }}
+    builtin_idle: {{ .Values.scheduler.config.builtinIdle }}
+{{- end }}

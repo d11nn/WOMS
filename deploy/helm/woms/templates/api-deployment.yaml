@@ -46,6 +46,10 @@ spec:
               value: {{ .Values.api.env.scheduleTopic | quote }}
             - name: KAFKA_PUBLISH_ENABLED
               value: {{ .Values.api.env.kafkaPublishEnabled | quote }}
+            - name: API_DEPENDENCY_RETRY_TIMEOUT_MS
+              value: {{ .Values.api.env.dependencyRetryTimeoutMs | quote }}
+            - name: API_DEPENDENCY_RETRY_INTERVAL_MS
+              value: {{ .Values.api.env.dependencyRetryIntervalMs | quote }}
           readinessProbe:
             httpGet:
               path: /readyz

@@ -50,15 +50,15 @@ flowchart LR
 2. The web UI calls the Go API. The API validates JWT/RBAC, reads and writes PostgreSQL, uses Redis for scheduling locks, and publishes schedule jobs to Kafka.
 3. Scheduler workers consume `woms.schedule.jobs` as the `woms-scheduler-workers` consumer group, compute deterministic allocations, update PostgreSQL, and write audit records.
 4. KEDA scales the worker deployment from the existing WOMS `ScaledObject`. Kafka lag is the primary trigger, CPU utilization is the secondary trigger, and Gthulhu can optionally add one Prometheus trigger for pod scheduling pressure.
-5. Gthulhu is not deployed by the WOMS chart. When enabled, a separate Gthulhu deployment observes worker pods, Prometheus scrapes its metrics, and WOMS reads the Prometheus query through KEDA.
+5. The WOMS chart can optionally deploy the vendored `gthulhu` subchart in monitor-only mode. Gthulhu observes worker pods, the bundled or Alan Prometheus scrape target reads `/metrics` from `woms-gthulhu-scheduler-sidecar:9090`, and WOMS reads that Prometheus query through KEDA.
 
 ### Deployable Units
 
 - `web`: vanilla HTML/CSS/JS frontend served by NGINX.
 - `api`: Go REST API for JWT, RBAC, orders, schedule preview, schedule jobs, production confirmation, and audit logs.
 - `scheduler-worker`: Go worker, prepared for Kafka consumer scheduling jobs.
-- `deploy/helm/woms`: Kubernetes Helm chart for API, worker, web, Ingress, and KEDA.
-- Optional Gthulhu integration: Gthulhu and Prometheus stay outside the WOMS chart. When `keda.gthulhu.enabled=true`, WOMS adds one Prometheus trigger to the existing worker `ScaledObject`.
+- `deploy/helm/woms`: Kubernetes Helm chart for API, worker, web, Ingress, KEDA, Prometheus/Grafana, and the optional `gthulhu` subchart.
+- Optional Gthulhu integration: `gthulhu.enabled=false` by default. Use `deploy/helm/woms/values-gthulhu-monitor.yaml` to enable monitor-only Gthulhu, the worker `PodSchedulingMetrics` selector, Alan-compatible Prometheus/Grafana wiring, and the third KEDA Prometheus trigger.
 
 ## Prerequisites
 
@@ -74,7 +74,7 @@ Install these tools first:
 - NGINX Ingress Controller
 - KEDA
 - metrics-server, required for CPU autoscaling verification
-- Optional for Gthulhu scheduling-pressure autoscaling: Gthulhu monitor and a Prometheus stack that scrapes it
+- Optional for Gthulhu scheduling-pressure autoscaling: a Gthulhu monitor image built from `/home/ubuntu/Gthulhu` and Prometheus/Grafana, either bundled by this chart or supplied by Alan/kube-prometheus-stack
 
 Check your tools:
 
@@ -104,8 +104,10 @@ Important settings:
 - `KAFKA_BROKERS`: Kafka broker list.
 - `KAFKA_SCHEDULE_TOPIC`: schedule job topic.
 - `KAFKA_PUBLISH_ENABLED`: controls whether the API publishes schedule jobs to Kafka. Defaults to `true`.
+- `API_DEPENDENCY_RETRY_TIMEOUT_MS` / `API_DEPENDENCY_RETRY_INTERVAL_MS`: API startup retry window and interval for PostgreSQL/Kafka readiness checks.
 - `WORKER_MIN_JOB_DURATION_MS`: demo minimum worker time per job. Production deployments can set it to `0`.
 - `WORKER_MAX_RETRIES`: maximum worker retries for transient DB/Kafka errors.
+- `WORKER_DEPENDENCY_RETRY_TIMEOUT_MS` / `WORKER_DEPENDENCY_RETRY_INTERVAL_MS`: scheduler-worker startup retry window and interval for PostgreSQL/Kafka readiness checks.
 - `DOCKERHUB_NAMESPACE`: Docker Hub namespace.
 - `WOMS_IMAGE_TAG`: Docker image tag used by Docker Compose. Defaults to `latest` so Compose builds and local runs stay aligned with the Docker Hub `latest` tag.
 - `API_UPSTREAM`: web NGINX upstream for API proxying. Docker Compose sets this to `api:8080`.
@@ -264,7 +266,9 @@ kubectl get secret woms-woms-api -n woms -o jsonpath='{.data.JWT_SECRET}' | base
 
 The chart now bundles PostgreSQL, Redis, and Kafka by default for local or VM demos, so installs can create dependency StatefulSets and PVC-backed storage as part of the release. Production deployments should use a custom values file with explicit external service endpoints, credentials, `api.jwtSecret`, and, for forked image builds, `imageRegistry`.
 
-The bundled dependency chart versions pin specific Bitnami image tags. Docker Hub no longer serves those retained tags from `bitnami/*`, so the default values override PostgreSQL, Redis, Kafka, and the Kafka topic hook to `bitnamilegacy/*`.
+API and scheduler-worker containers use bounded startup retry/backoff for PostgreSQL and Kafka readiness. Helm defaults retry for up to 120 seconds with a 2-second interval through `api.env.dependencyRetryTimeoutMs`, `api.env.dependencyRetryIntervalMs`, `worker.env.dependencyRetryTimeoutMs`, and `worker.env.dependencyRetryIntervalMs`.
+
+The chart pins the Bitnami dependency image tags used by the dependency chart versions. Docker Hub no longer serves those retained tags from `bitnami/*`, so the default values override PostgreSQL, Redis, Kafka, and the Kafka topic hook to `bitnamilegacy/*`.
 
 For the single-node MicroK8s demo, the chart also sets Kafka internal topic replication values to `1`, including `offsets.topic.replication.factor`. Without that, `__consumer_offsets` defaults to replication factor `3`, the scheduler worker cannot create `woms-scheduler-workers`, and KEDA cannot read the Kafka lag metric.
 
@@ -341,7 +345,55 @@ NAMESPACE=woms ./scripts/verify-k8s.sh
 
 HPA does not create pods named `hpa-*`. It is an autoscaling resource that changes `Deployment/woms-woms-worker` replicas. A successful demo shows multiple `woms-woms-worker-*` pods, and `kubectl describe hpa woms-woms-worker-hpa -n woms` shows `SuccessfulRescale` events with the external metric above target.
 
-The chart also includes an optional Gthulhu Prometheus trigger under `keda.gthulhu`, disabled by default. When it is explicitly enabled after Gthulhu and Prometheus are installed, it is rendered into the same worker `ScaledObject` as the Kafka and CPU triggers instead of creating a second scaler for `woms-woms-worker`. The default query uses `exported_namespace="woms"` because the kube-prometheus scrape target owns the `namespace` label and preserves Gthulhu's original pod namespace label as `exported_namespace`.
+The chart also includes an optional Gthulhu monitor-only integration. `values.yaml` keeps `gthulhu.enabled=false` and `keda.gthulhu.enabled=false`; `deploy/helm/woms/values-gthulhu-monitor.yaml` enables the vendored `gthulhu` subchart, sets `scheduler.config.mode=none`, exposes `/metrics` on `woms-gthulhu-scheduler-sidecar:9090`, deploys a worker `PodSchedulingMetrics` selector, and adds one Prometheus trigger to the existing worker `ScaledObject`. The PoC overlay sets `scheduler.monitor.monitorAll=true` and uses a suffixed Gthulhu scheduler ConfigMap name so config changes are remounted cleanly. Kafka, CPU, and Gthulhu triggers have independent switches at `keda.kafka.enabled`, `keda.cpu.enabled`, and `keda.gthulhu.enabled`.
+
+Build Gthulhu verification images from the source repo and pass the tag at install time:
+
+When upgrading a VM that has already deployed an older Gthulhu integration, clear the old immutable scheduler ConfigMap before running Helm:
+
+```bash
+kubectl delete configmap woms-gthulhu-scheduler-config -n woms --ignore-not-found
+```
+
+```bash
+REGISTRY=docker.io/d11nn PUSH=true ./scripts/build-push-gthulhu-images.sh
+helm upgrade --install woms ./deploy/helm/woms \
+  --namespace woms --create-namespace \
+  -f ./deploy/helm/woms/values-gthulhu-monitor.yaml \
+  --set gthulhu.scheduler.image.tag=woms-integration-<gthulhu-short-sha> \
+  --set gthulhu.scheduler.sidecar.image.tag=woms-integration-<gthulhu-short-sha> \
+  --set gthulhu.manager.image.tag=woms-integration-<gthulhu-short-sha>
+```
+
+If Docker Hub credentials are unavailable, use the MicroK8s registry instead:
+
+```bash
+REGISTRY=localhost:32000 PUSH=true ./scripts/build-push-gthulhu-images.sh
+helm upgrade --install woms ./deploy/helm/woms \
+  --namespace woms --create-namespace \
+  -f ./deploy/helm/woms/values-gthulhu-monitor.yaml \
+  --set gthulhu.scheduler.image.repository=localhost:32000/gthulhu-scx \
+  --set gthulhu.scheduler.image.tag=woms-integration-<gthulhu-short-sha> \
+  --set gthulhu.scheduler.sidecar.image.repository=localhost:32000/gthulhu-api \
+  --set gthulhu.scheduler.sidecar.image.tag=woms-integration-<gthulhu-short-sha> \
+  --set gthulhu.manager.image.repository=localhost:32000/gthulhu-api \
+  --set gthulhu.manager.image.tag=woms-integration-<gthulhu-short-sha>
+```
+
+Alan integration contract: scrape path `/metrics`, service `woms-gthulhu-scheduler-sidecar`, port `9090`. The dashboard includes `Worker Involuntary Context Switch Rate`, `Worker Run Queue Wait Time Rate`, and `Tracked Worker Process Count` panels. The bundled Prometheus target adds its own `namespace` label, so Gthulhu's original pod namespace is queried as `exported_namespace="woms"`.
+
+Verify each scaler path independently:
+
+```bash
+./scripts/verify-gthulhu-monitoring.sh
+HPA_SCENARIO=cpu ./scripts/verify-hpa-behavior.sh
+HPA_SCENARIO=kafka ./scripts/verify-hpa-behavior.sh
+HPA_SCENARIO=gthulhu ./scripts/verify-hpa-behavior.sh
+```
+
+`verify-hpa-behavior.sh` defaults `GTHULHU_IMAGE_TAG` to `woms-integration-f71f78a`; set `GTHULHU_IMAGE_TAG=woms-integration-<gthulhu-short-sha>` when validating a different image tag.
+
+For GKE Standard, keep Gthulhu on Linux node pools that allow the required eBPF/hostPID/privileged/hostPath settings, keep monitor-only mode unless scheduler handoff is explicitly approved, and use release image tags such as `vX.Y.Z` instead of verification tags.
 
 Before changing the Gthulhu branch or image used with WOMS, follow the [Gthulhu and WOMS deployment alignment guide](docs/gthulhu-woms-deployment.en.md). The validated WOMS PoC baseline is Gthulhu `d11nn/feat/woms-poc`; any newer upstream image must be rebuilt and revalidated before it can be treated as equivalent.
 

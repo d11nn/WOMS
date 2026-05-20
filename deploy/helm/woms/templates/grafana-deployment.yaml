@@ -33,7 +33,7 @@ spec:
             - name: GF_SECURITY_ALLOW_EMBEDDING
               value: {{ .Values.monitoring.grafana.env.allowEmbedding | quote }}
             - name: GF_SECURITY_COOKIE_SAMESITE
-              value: "disabled"
+              value: disabled
             - name: GF_SECURITY_COOKIE_SECURE
               value: "false"
           volumeMounts:

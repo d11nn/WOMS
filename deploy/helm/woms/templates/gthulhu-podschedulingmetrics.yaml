@@ -1,0 +1,27 @@
+{{- if and .Values.gthulhu.enabled .Values.gthulhu.podSchedulingMetrics.enabled }}
+apiVersion: gthulhu.io/v1alpha1
+kind: PodSchedulingMetrics
+metadata:
+  name: {{ tpl .Values.gthulhu.podSchedulingMetrics.name . }}
+  namespace: {{ tpl (.Values.gthulhu.podSchedulingMetrics.namespace | default .Release.Namespace) . }}
+  labels:
+    {{- include "woms.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gthulhu-monitor-target
+spec:
+  enabled: true
+  collectionIntervalSeconds: {{ .Values.gthulhu.podSchedulingMetrics.collectionIntervalSeconds }}
+  k8sNamespaces:
+    {{- range .Values.gthulhu.podSchedulingMetrics.k8sNamespaces }}
+    - {{ tpl . $ }}
+    {{- end }}
+  labelSelectors:
+    {{- range .Values.gthulhu.podSchedulingMetrics.labelSelectors }}
+    - key: {{ .key }}
+      value: {{ tpl .value $ }}
+    {{- end }}
+  {{- with .Values.gthulhu.podSchedulingMetrics.commandRegex }}
+  commandRegex: {{ . | quote }}
+  {{- end }}
+  metrics:
+    {{- toYaml .Values.gthulhu.podSchedulingMetrics.metrics | nindent 4 }}
+{{- end }}

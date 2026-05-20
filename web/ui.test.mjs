@@ -93,7 +93,7 @@ test("schedule preview uses API currentDate as the confirmation payload source",
 });
 
 const order = {
-  id: "ORD-1",
+  id: "ORD-0000001",
   customer: "ACME Silicon",
   lineId: "A",
   status: "待排程",
@@ -102,7 +102,7 @@ const order = {
 
 test("matchesOrder filters by id, customer, line, status, and priority", () => {
   assert.equal(matchesOrder(order, "acme"), true);
-  assert.equal(matchesOrder(order, "ORD-1".toLowerCase()), true);
+  assert.equal(matchesOrder(order, "ORD-0000001".toLowerCase()), true);
   assert.equal(matchesOrder(order, "待排程"), true);
   assert.equal(matchesOrder(order, "missing"), false);
 });
@@ -118,9 +118,9 @@ test("statusClass maps WOMS statuses to stable CSS classes", () => {
 
 test("exactFilterOrders applies OR within fields and AND across fields", () => {
   const orders = [
-    { id: "ORD-1", customer: "ACME", lineId: "A", status: "待排程", priority: "high" },
-    { id: "ORD-2", customer: "ACME", lineId: "B", status: "已排程", priority: "low" },
-    { id: "ORD-3", customer: "Orion", lineId: "A", status: "待排程", priority: "low" },
+    { id: "ORD-0000001", customer: "ACME", lineId: "A", status: "待排程", priority: "high" },
+    { id: "ORD-0000002", customer: "ACME", lineId: "B", status: "已排程", priority: "low" },
+    { id: "ORD-0000003", customer: "Orion", lineId: "A", status: "待排程", priority: "low" },
   ];
   const result = exactFilterOrders(orders, {
     customers: new Set(["ACME"]),
@@ -128,13 +128,13 @@ test("exactFilterOrders applies OR within fields and AND across fields", () => {
     status: "待排程",
     priorities: new Set(),
   });
-  assert.deepEqual(result.map((item) => item.id), ["ORD-1"]);
+  assert.deepEqual(result.map((item) => item.id), ["ORD-0000001"]);
 });
 
 test("exactFilterOrders treats status as single-select", () => {
   const orders = [
-    { id: "ORD-1", customer: "ACME", lineId: "A", status: "待排程", priority: "high" },
-    { id: "ORD-2", customer: "ACME", lineId: "A", status: "已排程", priority: "low" },
+    { id: "ORD-0000001", customer: "ACME", lineId: "A", status: "待排程", priority: "high" },
+    { id: "ORD-0000002", customer: "ACME", lineId: "A", status: "已排程", priority: "low" },
   ];
   const result = exactFilterOrders(orders, {
     customers: new Set(),
@@ -142,14 +142,14 @@ test("exactFilterOrders treats status as single-select", () => {
     status: "已排程",
     priorities: new Set(),
   });
-  assert.deepEqual(result.map((item) => item.id), ["ORD-2"]);
+  assert.deepEqual(result.map((item) => item.id), ["ORD-0000002"]);
 });
 
 test("customerFilterValues follows the active exact filters except customer", () => {
   const orders = [
-    { id: "ORD-1", customer: "TSMC Demo", status: "pending", priority: "high" },
-    { id: "ORD-2", customer: "ACME", status: "scheduled", priority: "low" },
-    { id: "ORD-3", customer: "ACME Silicon", status: "pending", priority: "low" },
+    { id: "ORD-0000001", customer: "TSMC Demo", status: "pending", priority: "high" },
+    { id: "ORD-0000002", customer: "ACME", status: "scheduled", priority: "low" },
+    { id: "ORD-0000003", customer: "ACME Silicon", status: "pending", priority: "low" },
   ];
   assert.deepEqual(customerFilterValues(orders, {
     customers: new Set(),
@@ -165,13 +165,13 @@ test("customerFilterValues follows the active exact filters except customer", ()
 
 test("sortOrdersForWorkstation sorts by workflow, due date, and natural order number", () => {
   const orders = [
-    { id: "ORD-10", status: "待排程", dueDate: "2026-04-30", priority: "low" },
-    { id: "ORD-2", status: "已排程", dueDate: "2026-05-04", priority: "low" },
-    { id: "ORD-7", status: "待排程", dueDate: "2026-04-30", priority: "low" },
-    { id: "ORD-1", status: "已完成", dueDate: "2026-04-29", priority: "high" },
-    { id: "ORD-6", status: "待排程", dueDate: "2026-04-30", priority: "low" },
+    { id: "ORD-0000010", status: "待排程", dueDate: "2026-04-30", priority: "low" },
+    { id: "ORD-0000002", status: "已排程", dueDate: "2026-05-04", priority: "low" },
+    { id: "ORD-0000007", status: "待排程", dueDate: "2026-04-30", priority: "low" },
+    { id: "ORD-0000001", status: "已完成", dueDate: "2026-04-29", priority: "high" },
+    { id: "ORD-0000006", status: "待排程", dueDate: "2026-04-30", priority: "low" },
   ];
-  assert.deepEqual(sortOrdersForWorkstation(orders).map((item) => item.id), ["ORD-6", "ORD-7", "ORD-10", "ORD-2", "ORD-1"]);
+  assert.deepEqual(sortOrdersForWorkstation(orders).map((item) => item.id), ["ORD-0000006", "ORD-0000007", "ORD-0000010", "ORD-0000002", "ORD-0000001"]);
 });
 
 test("uniqueValues and statusCounts provide sidebar/filter data", () => {
@@ -196,12 +196,12 @@ test("defaultLine chooses the lexicographically lowest production line", () => {
 
 test("lineScopedOrders limits status counts and tables to the selected line", () => {
   const orders = [
-    { id: "ORD-1", lineId: "A", status: "待排程" },
-    { id: "ORD-2", lineId: "B", status: "已排程" },
-    { id: "ORD-3", lineId: "A", status: "已完成" },
+    { id: "ORD-0000001", lineId: "A", status: "待排程" },
+    { id: "ORD-0000002", lineId: "B", status: "已排程" },
+    { id: "ORD-0000003", lineId: "A", status: "已完成" },
   ];
   const scoped = lineScopedOrders(orders, "A");
-  assert.deepEqual(scoped.map((item) => item.id), ["ORD-1", "ORD-3"]);
+  assert.deepEqual(scoped.map((item) => item.id), ["ORD-0000001", "ORD-0000003"]);
   assert.deepEqual(statusCounts(scoped), {
     "待排程": 1,
     "已排程": 0,
@@ -220,27 +220,27 @@ test("monthGrid builds a stable six-week calendar grid", () => {
 
 test("groupAllocationsByDate groups calendar allocations by ISO date", () => {
   const groups = groupAllocationsByDate([
-    { orderId: "ORD-1", date: "2026-05-02T00:00:00Z" },
-    { orderId: "ORD-2", date: "2026-05-02T00:00:00Z" },
-    { orderId: "ORD-3", date: "2026-05-03T00:00:00Z" },
+    { orderId: "ORD-0000001", date: "2026-05-02T00:00:00Z" },
+    { orderId: "ORD-0000002", date: "2026-05-02T00:00:00Z" },
+    { orderId: "ORD-0000003", date: "2026-05-03T00:00:00Z" },
   ]);
-  assert.deepEqual(groups["2026-05-02"].map((item) => item.orderId), ["ORD-1", "ORD-2"]);
-  assert.deepEqual(groups["2026-05-03"].map((item) => item.orderId), ["ORD-3"]);
+  assert.deepEqual(groups["2026-05-02"].map((item) => item.orderId), ["ORD-0000001", "ORD-0000002"]);
+  assert.deepEqual(groups["2026-05-03"].map((item) => item.orderId), ["ORD-0000003"]);
 });
 
 test("mergePreviewCalendarAllocations replaces touched orders with preview entries", () => {
   const calendar = [
-    { orderId: "ORD-1", date: "2026-05-15", quantity: 2500, status: "已排程" },
-    { orderId: "ORD-2", date: "2026-05-15", quantity: 2500, status: "已排程" },
+    { orderId: "ORD-0000001", date: "2026-05-15", quantity: 2500, status: "已排程" },
+    { orderId: "ORD-0000002", date: "2026-05-15", quantity: 2500, status: "已排程" },
   ];
   const preview = [
-    { orderId: "ORD-1", date: "2026-05-16", quantity: 2500 },
-    { orderId: "ORD-3", date: "2026-05-15", quantity: 2500 },
+    { orderId: "ORD-0000001", date: "2026-05-16", quantity: 2500 },
+    { orderId: "ORD-0000003", date: "2026-05-15", quantity: 2500 },
   ];
-  const merged = mergePreviewCalendarAllocations(preview, calendar, ["ORD-2"]);
+  const merged = mergePreviewCalendarAllocations(preview, calendar, ["ORD-0000002"]);
 
-  assert.equal(merged.some((item) => item.orderId === "ORD-1" && item.date === "2026-05-15"), false);
-  assert.equal(merged.some((item) => item.orderId === "ORD-2"), false);
+  assert.equal(merged.some((item) => item.orderId === "ORD-0000001" && item.date === "2026-05-15"), false);
+  assert.equal(merged.some((item) => item.orderId === "ORD-0000002"), false);
   assert.equal(merged.filter((item) => item.preview).length, 2);
 });
 

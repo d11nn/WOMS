@@ -13,22 +13,44 @@ data:
       evaluation_interval: 15s
 
     scrape_configs:
-      # ── Go API service metrics ──────────────────────────────────────
       - job_name: woms-api
         metrics_path: {{ .Values.monitoring.prometheus.scrape.api.path }}
-        static_configs:
-          - targets:
-              - {{ include "woms.fullname" . }}-api:{{ .Values.monitoring.prometheus.scrape.api.port }}
-            labels:
-              service: woms-api
-      {{- if and .Values.monitoring.gthulhu.enabled .Values.monitoring.prometheus.scrape.gthulhu }}
-      # ── Gthulhu infrastructure metrics (Postgres/Redis/Kafka) ──────
-      - job_name: gthulhu
-        metrics_path: {{ .Values.monitoring.prometheus.scrape.gthulhu.path | default "/metrics" }}
-        static_configs:
-          - targets:
-              - {{ include "woms.fullname" . }}-gthulhu:{{ .Values.monitoring.prometheus.scrape.gthulhu.port | default "9091" }}
-            labels:
-              service: gthulhu
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names:
+                - {{ .Release.Namespace }}
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            action: keep
+            regex: {{ include "woms.fullname" . }}-api
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: http
+          - target_label: service
+            replacement: woms-api
+          - target_label: namespace
+            replacement: {{ .Release.Namespace }}
+
+      {{- if and .Values.gthulhu.enabled .Values.gthulhu.scheduler.monitor.enabled .Values.monitoring.prometheus.scrape.gthulhu.enabled }}
+      - job_name: gthulhu-monitor
+        metrics_path: {{ .Values.monitoring.prometheus.scrape.gthulhu.path }}
+        scrape_interval: {{ .Values.monitoring.prometheus.scrape.gthulhu.interval }}
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names:
+                - {{ .Release.Namespace }}
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            action: keep
+            regex: {{ tpl .Values.monitoring.prometheus.scrape.gthulhu.service . }}
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: monitor-metrics
+          - target_label: service
+            replacement: gthulhu-monitor
+          - target_label: namespace
+            replacement: {{ .Release.Namespace }}
       {{- end }}
 {{- end }}

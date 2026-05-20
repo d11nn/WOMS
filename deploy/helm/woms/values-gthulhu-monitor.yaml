@@ -1,0 +1,70 @@
+gthulhu:
+  enabled: true
+  scheduler:
+    runtimeMode: scheduler
+    image:
+      repository: docker.io/d11nn/gthulhu-scx
+      tag: "vX.Y.Z"
+      pullPolicy: IfNotPresent
+    sidecar:
+      enabled: false
+    config:
+      nameSuffix: woms-poc
+      mode: none
+      kernelMode: false
+      maxTimeWatchdog: false
+    monitor:
+      enabled: true
+      bpfObjectPath: /gthulhu/sched_monitor.bpf.o
+      collectionIntervalSec: 10
+      monitorAll: true
+      streamEvents: false
+      prometheusPort: 9090
+      enableCRDWatcher: true
+  manager:
+    enabled: false
+  mongodb:
+    enabled: false
+  monitoring:
+    enabled: true
+    serviceMonitor:
+      enabled: false
+      interval: 15s
+  podSchedulingMetrics:
+    enabled: true
+    namespace: '{{ .Release.Namespace }}'
+    k8sNamespaces:
+      - '{{ .Release.Namespace }}'
+    labelSelectors:
+      - key: app.kubernetes.io/component
+        value: scheduler-worker
+      - key: app.kubernetes.io/instance
+        value: '{{ .Release.Name }}'
+
+keda:
+  enabled: true
+  kafka:
+    enabled: true
+  cpu:
+    enabled: true
+  gthulhu:
+    enabled: true
+    prometheusServerAddress: "http://{{ include \"woms.fullname\" . }}-prometheus.{{ .Release.Namespace }}:9090"
+    metricName: woms_worker_gthulhu_involuntary_ctx_switches_rate
+    threshold: "20"
+    query: |-
+      avg(rate(gthulhu_pod_involuntary_ctx_switches_total{exported_namespace="{{ .Release.Namespace }}",pod_name=~"{{ include "woms.fullname" . }}-worker-.*"}[2m]))
+
+monitoring:
+  enabled: true
+  prometheus:
+    enabled: true
+    scrape:
+      gthulhu:
+        enabled: true
+        path: /metrics
+        service: '{{ .Release.Name }}-gthulhu-scheduler-sidecar'
+        port: "9090"
+        interval: 15s
+  grafana:
+    enabled: true

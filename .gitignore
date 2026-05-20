@@ -24,6 +24,9 @@ kubeconfig*
 *.kubeconfig
 *.tgz
 charts/
+!deploy/helm/woms/charts/
+!deploy/helm/woms/charts/gthulhu/
+!deploy/helm/woms/charts/gthulhu/**
 
 # Logs and runtime files
 *.log

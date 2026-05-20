@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -23,6 +24,10 @@ type PostgresStore struct {
 }
 
 func NewPostgresStore(databaseURL string, seedDemo bool) (*PostgresStore, error) {
+	return NewPostgresStoreContext(context.Background(), databaseURL, seedDemo)
+}
+
+func NewPostgresStoreContext(ctx context.Context, databaseURL string, seedDemo bool) (*PostgresStore, error) {
 	if databaseURL == "" {
 		return nil, errors.New("DATABASE_URL 不可為空")
 	}
@@ -30,7 +35,7 @@ func NewPostgresStore(databaseURL string, seedDemo bool) (*PostgresStore, error)
 	if err != nil {
 		return nil, err
 	}
-	if err := db.Ping(); err != nil {
+	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -147,7 +152,7 @@ func (s *PostgresStore) CreateOrder(req createOrderRequest, actorID string) (dom
 		return domain.Order{}, err
 	}
 	now := time.Now().UTC()
-	id := "ORD-" + strconv.FormatInt(now.UnixNano(), 10)
+	id := orderIDFromTime(now)
 	order := domain.Order{
 		ID:        id,
 		Customer:  req.Customer,
@@ -403,11 +408,11 @@ func (s *PostgresStore) DeleteOrders(req deleteOrdersRequest, claims auth.Claims
 	revisions := map[string]bool{}
 	for _, id := range req.OrderIDs {
 		order, err := s.order(id)
-		if errors.Is(err, sql.ErrNoRows) || strings.Contains(err.Error(), "找不到") {
-			result.SkippedOrderIDs = append(result.SkippedOrderIDs, id)
-			continue
-		}
 		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) || strings.Contains(err.Error(), "找不到") || strings.Contains(err.Error(), "order not found") {
+				result.SkippedOrderIDs = append(result.SkippedOrderIDs, id)
+				continue
+			}
 			return deleteOrdersResponse{}, err
 		}
 		if claims.Role == domain.RoleSales && order.CreatedBy != claims.Subject {

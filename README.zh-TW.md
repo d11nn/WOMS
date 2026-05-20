@@ -50,15 +50,15 @@ flowchart LR
 2. Web UI 呼叫 Go API。API 會驗證 JWT/RBAC，讀寫 PostgreSQL，使用 Redis 做排程鎖，並把排程任務 publish 到 Kafka。
 3. Scheduler workers 以 `woms-scheduler-workers` consumer group 消費 `woms.schedule.jobs`，計算 deterministic allocations，更新 PostgreSQL，並寫入 audit records。
 4. KEDA 透過 WOMS 既有 `ScaledObject` 擴縮 worker deployment。Kafka lag 是主要 trigger，CPU utilization 是次要 trigger，Gthulhu 可選擇性新增一個 Prometheus trigger 來反映 pod scheduling pressure。
-5. Gthulhu 不由 WOMS chart 部署。啟用時，獨立的 Gthulhu deployment 觀察 worker pods，Prometheus scrape Gthulhu metrics，WOMS 再透過 KEDA 讀 Prometheus query。
+5. WOMS chart 可選擇性部署 vendored `gthulhu` subchart 的 monitor-only 模式。Gthulhu 觀察 worker pods，內建或 Alan Prometheus scrape target 從 `woms-gthulhu-scheduler-sidecar:9090` 讀 `/metrics`，WOMS 再透過 KEDA 讀 Prometheus query。
 
 ### 可部署單元
 
 - `web`：由 NGINX 提供的原生 HTML/CSS/JS 前端。
 - `api`：Go REST API，負責 JWT、RBAC、訂單、試排、排程任務、生產回報與稽核紀錄。
 - `scheduler-worker`：Go worker，作為 Kafka 排程任務 consumer 的部署單元。
-- `deploy/helm/woms`：部署 API、worker、web、Ingress 與 KEDA 的 Kubernetes Helm chart。
-- 可選 Gthulhu 整合：Gthulhu 與 Prometheus 不由 WOMS chart 部署；當 `keda.gthulhu.enabled=true` 時，WOMS 會把一個 Prometheus trigger 加進既有 worker `ScaledObject`。
+- `deploy/helm/woms`：部署 API、worker、web、Ingress、KEDA、Prometheus/Grafana 與 optional `gthulhu` subchart 的 Kubernetes Helm chart。
+- 可選 Gthulhu 整合：`gthulhu.enabled=false` 是預設值。使用 `deploy/helm/woms/values-gthulhu-monitor.yaml` 會啟用 monitor-only Gthulhu、worker `PodSchedulingMetrics` selector、Alan-compatible Prometheus/Grafana wiring，以及第三個 KEDA Prometheus trigger。
 
 ## 前置需求
 
@@ -74,7 +74,7 @@ flowchart LR
 - NGINX Ingress Controller
 - KEDA
 - metrics-server，CPU autoscaling 驗證會用到
-- Gthulhu scheduling-pressure autoscaling 選配：Gthulhu monitor，以及可 scrape 它的 Prometheus stack
+- Gthulhu scheduling-pressure autoscaling 選配：由 `/home/ubuntu/Gthulhu` build 的 Gthulhu monitor image，以及此 chart 內建或 Alan/kube-prometheus-stack 提供的 Prometheus/Grafana
 
 檢查工具版本：
 
@@ -104,8 +104,10 @@ cp .env.example .env
 - `KAFKA_BROKERS`：Kafka broker 清單。
 - `KAFKA_SCHEDULE_TOPIC`：排程任務 topic。
 - `KAFKA_PUBLISH_ENABLED`：是否由 API publish 排程任務到 Kafka，預設 `true`。
+- `API_DEPENDENCY_RETRY_TIMEOUT_MS` / `API_DEPENDENCY_RETRY_INTERVAL_MS`：API 啟動時等待 PostgreSQL/Kafka readiness 的 retry 視窗與間隔。
 - `WORKER_MIN_JOB_DURATION_MS`：worker 每個 job 的 demo 最小處理時間，正式環境可設為 `0`。
 - `WORKER_MAX_RETRIES`：worker 遇到暫時性 DB/Kafka 錯誤時的最大重試次數。
+- `WORKER_DEPENDENCY_RETRY_TIMEOUT_MS` / `WORKER_DEPENDENCY_RETRY_INTERVAL_MS`：scheduler-worker 啟動時等待 PostgreSQL/Kafka readiness 的 retry 視窗與間隔。
 - `DOCKERHUB_NAMESPACE`：Docker Hub namespace。
 - `WOMS_IMAGE_TAG`：Docker Compose 使用的 image tag，預設 `latest`。
 - `API_UPSTREAM`：web NGINX 代理 API 的 upstream；Docker Compose 會設定為 `api:8080`。
@@ -267,6 +269,8 @@ kubectl get secret woms-woms-api -n woms -o jsonpath='{.data.JWT_SECRET}' | base
 
 正式環境應使用自訂 values file，明確設定外部服務 endpoint、credentials、`api.jwtSecret`；若使用 fork 後自行建置的 images，也應設定 `imageRegistry`。
 
+API 與 scheduler-worker container 會在啟動時對 PostgreSQL 與 Kafka readiness 做 bounded retry/backoff。Helm 預設透過 `api.env.dependencyRetryTimeoutMs`、`api.env.dependencyRetryIntervalMs`、`worker.env.dependencyRetryTimeoutMs`、`worker.env.dependencyRetryIntervalMs` 設定最多等待 120 秒、每 2 秒重試一次。
+
 Chart 會固定 dependency chart 版本使用的 Bitnami image tags。Docker Hub 已不再從 `bitnami/*` 提供這些保留 tags，因此預設 values 會把 PostgreSQL、Redis、Kafka 與 Kafka topic hook 覆寫到 `bitnamilegacy/*`。
 
 單節點 MicroK8s demo 中，chart 也會把 Kafka internal topic replication 設為 `1`，包含 `offsets.topic.replication.factor`。若未設定，`__consumer_offsets` 會沿用 replication factor `3`，scheduler worker 無法建立 `woms-scheduler-workers` consumer group，KEDA 也無法讀取 Kafka lag metric。
@@ -345,7 +349,55 @@ NAMESPACE=woms ./scripts/verify-k8s.sh
 
 HPA 不會建立名為 `hpa-*` 的 pod。HPA 是 autoscaling resource，會調整 `Deployment/woms-woms-worker` 的 replicas；成功時會看到多個 `woms-woms-worker-*` pods。`kubectl describe hpa woms-woms-worker-hpa -n woms` 的 Events 會顯示 `SuccessfulRescale` 與 external metric above target。
 
-Chart 也提供可選的 Gthulhu Prometheus trigger，設定在 `keda.gthulhu`，預設關閉。只有在明確啟用且 Gthulhu、Prometheus 都已安裝後，這個 trigger 才會 render 到既有 worker `ScaledObject`，與 Kafka、CPU triggers 共用同一個 scaler，不會另外建立第二個 scaler 控制 `woms-woms-worker`。預設 query 使用 `exported_namespace="woms"`，因為 kube-prometheus scrape target 會佔用 `namespace` label，並把 Gthulhu 原本的 pod namespace label 保留為 `exported_namespace`。
+Chart 也提供可選的 Gthulhu monitor-only integration。`values.yaml` 維持 `gthulhu.enabled=false` 與 `keda.gthulhu.enabled=false`；`deploy/helm/woms/values-gthulhu-monitor.yaml` 會啟用 vendored `gthulhu` subchart、設定 `scheduler.config.mode=none`、在 `woms-gthulhu-scheduler-sidecar:9090` 暴露 `/metrics`、部署 worker `PodSchedulingMetrics` selector，並把一個 Prometheus trigger 加進既有 worker `ScaledObject`。PoC overlay 會設定 `scheduler.monitor.monitorAll=true`，並使用加 suffix 的 Gthulhu scheduler ConfigMap name，讓 config 變更能乾淨重新掛載。Kafka、CPU、Gthulhu triggers 分別由 `keda.kafka.enabled`、`keda.cpu.enabled`、`keda.gthulhu.enabled` 獨立控制。
+
+從 Gthulhu source repo build 驗證 image，安裝時再帶入 tag：
+
+如果是在已部署過舊版 Gthulhu integration 的 VM 上升級，先清掉舊的 immutable scheduler ConfigMap，再執行 Helm：
+
+```bash
+kubectl delete configmap woms-gthulhu-scheduler-config -n woms --ignore-not-found
+```
+
+```bash
+REGISTRY=docker.io/d11nn PUSH=true ./scripts/build-push-gthulhu-images.sh
+helm upgrade --install woms ./deploy/helm/woms \
+  --namespace woms --create-namespace \
+  -f ./deploy/helm/woms/values-gthulhu-monitor.yaml \
+  --set gthulhu.scheduler.image.tag=woms-integration-<gthulhu-short-sha> \
+  --set gthulhu.scheduler.sidecar.image.tag=woms-integration-<gthulhu-short-sha> \
+  --set gthulhu.manager.image.tag=woms-integration-<gthulhu-short-sha>
+```
+
+若 Docker Hub credentials 不可用，改用 MicroK8s local registry：
+
+```bash
+REGISTRY=localhost:32000 PUSH=true ./scripts/build-push-gthulhu-images.sh
+helm upgrade --install woms ./deploy/helm/woms \
+  --namespace woms --create-namespace \
+  -f ./deploy/helm/woms/values-gthulhu-monitor.yaml \
+  --set gthulhu.scheduler.image.repository=localhost:32000/gthulhu-scx \
+  --set gthulhu.scheduler.image.tag=woms-integration-<gthulhu-short-sha> \
+  --set gthulhu.scheduler.sidecar.image.repository=localhost:32000/gthulhu-api \
+  --set gthulhu.scheduler.sidecar.image.tag=woms-integration-<gthulhu-short-sha> \
+  --set gthulhu.manager.image.repository=localhost:32000/gthulhu-api \
+  --set gthulhu.manager.image.tag=woms-integration-<gthulhu-short-sha>
+```
+
+Alan integration contract：scrape path 是 `/metrics`，service 是 `woms-gthulhu-scheduler-sidecar`，port 是 `9090`。Dashboard 會包含 `Worker Involuntary Context Switch Rate`、`Worker Run Queue Wait Time Rate` 與 `Tracked Worker Process Count` panels。內建 Prometheus target 會加上自己的 `namespace` label，因此 Gthulhu 原始 pod namespace 需要用 `exported_namespace="woms"` 查詢。
+
+三種 scaler path 可分開驗證：
+
+```bash
+./scripts/verify-gthulhu-monitoring.sh
+HPA_SCENARIO=cpu ./scripts/verify-hpa-behavior.sh
+HPA_SCENARIO=kafka ./scripts/verify-hpa-behavior.sh
+HPA_SCENARIO=gthulhu ./scripts/verify-hpa-behavior.sh
+```
+
+`verify-hpa-behavior.sh` 預設 `GTHULHU_IMAGE_TAG` 為 `woms-integration-f71f78a`；若要驗證其他 image tag，請設定 `GTHULHU_IMAGE_TAG=woms-integration-<gthulhu-short-sha>`。
+
+搬到 GKE Standard 時，Gthulhu 應放在允許 eBPF、hostPID、privileged 與 hostPath 的 Linux node pool；除非明確核准 scheduler handoff，仍保持 monitor-only；正式版本請用 `vX.Y.Z` 這類 release image tag，不要沿用驗證 tag。
 
 變更 WOMS 搭配使用的 Gthulhu branch 或 image 前，請先依照 [Gthulhu 與 WOMS 部署對齊指南](docs/gthulhu-woms-deployment.zh-TW.md) 檢查。已驗證的 WOMS PoC 基準是 Gthulhu `d11nn/feat/woms-poc`；任何較新的 upstream image 都必須重新 build 並驗證後，才能視為等同環境。
 

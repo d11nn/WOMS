@@ -103,7 +103,7 @@ func TestScheduleJobRejectsStalePreviewRevision(t *testing.T) {
 	previewID := createSchedulePreview(t, server, schedulerA, "A")
 
 	body := bytes.NewBufferString(`{"dueDate":"2026-05-08"}`)
-	req := httptest.NewRequest(http.MethodPatch, "/api/orders/ORD-1", body)
+	req := httptest.NewRequest(http.MethodPatch, "/api/orders/ORD-0000001", body)
 	req.Header.Set("Authorization", "Bearer "+schedulerA)
 	res := httptest.NewRecorder()
 	server.ServeHTTP(res, req)
@@ -522,8 +522,8 @@ func TestSalesSeesOnlyOwnOrders(t *testing.T) {
 	salesToken := login(t, server, "sales", "demo")
 	createOrder(t, server, salesToken, "A")
 	store.mu.Lock()
-	store.orders["ORD-2"] = domain.Order{
-		ID:        "ORD-2",
+	store.orders["ORD-0000002"] = domain.Order{
+		ID:        "ORD-0000002",
 		Customer:  "Other Sales",
 		LineID:    "A",
 		Quantity:  2500,
@@ -549,7 +549,7 @@ func TestSalesSeesOnlyOwnOrders(t *testing.T) {
 	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode orders response: %v", err)
 	}
-	if len(payload.Orders) != 1 || payload.Orders[0].ID != "ORD-1" {
+	if len(payload.Orders) != 1 || payload.Orders[0].ID != "ORD-0000001" {
 		t.Fatalf("expected sales to see only own order, got %+v", payload.Orders)
 	}
 }
@@ -635,7 +635,7 @@ func TestScheduleCalendarIncludesVisibleAdjacentMonthDays(t *testing.T) {
 	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode calendar response: %v", err)
 	}
-	if len(payload.Allocations) != 1 || payload.Allocations[0].OrderID != "ORD-1" {
+	if len(payload.Allocations) != 1 || payload.Allocations[0].OrderID != "ORD-0000001" {
 		t.Fatalf("expected May 1 allocation on April calendar page, got %+v", payload.Allocations)
 	}
 }
@@ -691,7 +691,7 @@ func TestSchedulePreviewRespectsRequestedFutureStart(t *testing.T) {
 	store.mu.Unlock()
 
 	schedulerA := login(t, server, "scheduler-a", "demo")
-	body = bytes.NewBufferString(`{"lineId":"A","startDate":"2026-05-01","currentDate":"2026-04-30","orderIds":["ORD-1"]}`)
+	body = bytes.NewBufferString(`{"lineId":"A","startDate":"2026-05-01","currentDate":"2026-04-30","orderIds":["ORD-0000001"]}`)
 	req = httptest.NewRequest(http.MethodPost, "/api/schedules/preview", body)
 	req.Header.Set("Authorization", "Bearer "+schedulerA)
 	res = httptest.NewRecorder()
@@ -731,7 +731,7 @@ func TestSchedulePreviewDefaultsCurrentDateFromLineTimezone(t *testing.T) {
 	createOrderWithPriorityAndDue(t, server, salesToken, "B", "low", "2026-05-06")
 
 	schedulerB := login(t, server, "scheduler-b", "demo")
-	body := bytes.NewBufferString(`{"lineId":"B","startDate":"2026-05-04","orderIds":["ORD-1"]}`)
+	body := bytes.NewBufferString(`{"lineId":"B","startDate":"2026-05-04","orderIds":["ORD-0000001"]}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/schedules/preview", body)
 	req.Header.Set("Authorization", "Bearer "+schedulerB)
 	res := httptest.NewRecorder()
@@ -888,7 +888,7 @@ func TestManualForceConflictCanCreateScheduleJobWithAudit(t *testing.T) {
 	createScheduleJob(t, server, schedulerA, "A")
 	createOrderWithPriority(t, server, salesToken, "A", "high")
 
-	body := bytes.NewBufferString(`{"lineId":"A","startDate":"2026-05-01","currentDate":"2026-04-30","orderIds":["ORD-2"],"manualForce":true,"reason":"customer escalation approved"}`)
+	body := bytes.NewBufferString(`{"lineId":"A","startDate":"2026-05-01","currentDate":"2026-04-30","orderIds":["ORD-0000002"],"manualForce":true,"reason":"customer escalation approved"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/schedules/preview", body)
 	req.Header.Set("Authorization", "Bearer "+schedulerA)
 	res := httptest.NewRecorder()
@@ -909,7 +909,7 @@ func TestManualForceConflictCanCreateScheduleJobWithAudit(t *testing.T) {
 		t.Fatalf("expected manual conflict with affected orders, got %+v", preview.Conflicts)
 	}
 
-	body = bytes.NewBufferString(`{"lineId":"A","startDate":"2026-05-01","currentDate":"2026-04-30","orderIds":["ORD-2"],"manualForce":true,"reason":"customer escalation approved","previewId":"` + preview.PreviewID + `"}`)
+	body = bytes.NewBufferString(`{"lineId":"A","startDate":"2026-05-01","currentDate":"2026-04-30","orderIds":["ORD-0000002"],"manualForce":true,"reason":"customer escalation approved","previewId":"` + preview.PreviewID + `"}`)
 	req = httptest.NewRequest(http.MethodPost, "/api/schedules/jobs", body)
 	req.Header.Set("Authorization", "Bearer "+schedulerA)
 	res = httptest.NewRecorder()
@@ -1020,7 +1020,7 @@ func TestDeleteOrdersRemovesScheduledAllocation(t *testing.T) {
 	schedulerA := login(t, server, "scheduler-a", "demo")
 	createScheduleJob(t, server, schedulerA, "A")
 
-	body := bytes.NewBufferString(`{"orderIds":["ORD-1"]}`)
+	body := bytes.NewBufferString(`{"orderIds":["ORD-0000001"]}`)
 	req := httptest.NewRequest(http.MethodDelete, "/api/orders", body)
 	req.Header.Set("Authorization", "Bearer "+schedulerA)
 	res := httptest.NewRecorder()
@@ -1054,7 +1054,7 @@ func TestSchedulerCanUpdatePendingOrderDueDate(t *testing.T) {
 	schedulerA := login(t, server, "scheduler-a", "demo")
 
 	body := bytes.NewBufferString(`{"dueDate":"2026-05-06"}`)
-	req := httptest.NewRequest(http.MethodPatch, "/api/orders/ORD-1", body)
+	req := httptest.NewRequest(http.MethodPatch, "/api/orders/ORD-0000001", body)
 	req.Header.Set("Authorization", "Bearer "+schedulerA)
 	res := httptest.NewRecorder()
 	server.ServeHTTP(res, req)
@@ -1078,7 +1078,7 @@ func TestUpdateOrderDueDateRejectsTodayOrPast(t *testing.T) {
 
 	for _, dueDate := range []string{"2026-04-30", "2026-04-29"} {
 		body := bytes.NewBufferString(`{"dueDate":"` + dueDate + `"}`)
-		req := httptest.NewRequest(http.MethodPatch, "/api/orders/ORD-1", body)
+		req := httptest.NewRequest(http.MethodPatch, "/api/orders/ORD-0000001", body)
 		req.Header.Set("Authorization", "Bearer "+schedulerA)
 		res := httptest.NewRecorder()
 		server.ServeHTTP(res, req)
@@ -1094,7 +1094,7 @@ func TestUpdateOrderDueDateAcceptsFuture(t *testing.T) {
 	createOrder(t, server, salesToken, "A")
 
 	body := bytes.NewBufferString(`{"dueDate":"2026-05-01"}`)
-	req := httptest.NewRequest(http.MethodPatch, "/api/orders/ORD-1", body)
+	req := httptest.NewRequest(http.MethodPatch, "/api/orders/ORD-0000001", body)
 	req.Header.Set("Authorization", "Bearer "+salesToken)
 	res := httptest.NewRecorder()
 	server.ServeHTTP(res, req)
@@ -1119,7 +1119,7 @@ func TestOrderNoteCannotBeUpdatedAfterCreate(t *testing.T) {
 
 	schedulerA := login(t, server, "scheduler-a", "demo")
 	body = bytes.NewBufferString(`{"dueDate":"2026-05-06","note":"scheduler changed note"}`)
-	req = httptest.NewRequest(http.MethodPatch, "/api/orders/ORD-1", body)
+	req = httptest.NewRequest(http.MethodPatch, "/api/orders/ORD-0000001", body)
 	req.Header.Set("Authorization", "Bearer "+schedulerA)
 	res = httptest.NewRecorder()
 	server.ServeHTTP(res, req)
@@ -1127,8 +1127,8 @@ func TestOrderNoteCannotBeUpdatedAfterCreate(t *testing.T) {
 	if res.Code != http.StatusBadRequest {
 		t.Fatalf("expected note update rejection, got %d body=%s", res.Code, res.Body.String())
 	}
-	if store.orders["ORD-1"].Note != "original sales note" || store.orders["ORD-1"].DueDate.Format("2006-01-02") != "2026-05-03" {
-		t.Fatalf("order should remain unchanged, got %+v", store.orders["ORD-1"])
+	if store.orders["ORD-0000001"].Note != "original sales note" || store.orders["ORD-0000001"].DueDate.Format("2006-01-02") != "2026-05-03" {
+		t.Fatalf("order should remain unchanged, got %+v", store.orders["ORD-0000001"])
 	}
 }
 
@@ -1140,7 +1140,7 @@ func TestStartProductionLocksScheduledAllocations(t *testing.T) {
 	schedulerA := login(t, server, "scheduler-a", "demo")
 	createScheduleJob(t, server, schedulerA, "A")
 
-	body := bytes.NewBufferString(`{"orderId":"ORD-1"}`)
+	body := bytes.NewBufferString(`{"orderId":"ORD-0000001"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/production/start", body)
 	req.Header.Set("Authorization", "Bearer "+schedulerA)
 	res := httptest.NewRecorder()
@@ -1148,8 +1148,8 @@ func TestStartProductionLocksScheduledAllocations(t *testing.T) {
 	if res.Code != http.StatusOK {
 		t.Fatalf("start production failed: %d %s", res.Code, res.Body.String())
 	}
-	if store.orders["ORD-1"].Status != domain.StatusInProgress {
-		t.Fatalf("expected in-progress status, got %+v", store.orders["ORD-1"])
+	if store.orders["ORD-0000001"].Status != domain.StatusInProgress {
+		t.Fatalf("expected in-progress status, got %+v", store.orders["ORD-0000001"])
 	}
 	if len(store.allocations) != 1 || !store.allocations[0].Locked {
 		t.Fatalf("expected locked allocation, got %+v", store.allocations)
@@ -1167,14 +1167,14 @@ func TestPartialProductionReturnsRemainderToPendingQueue(t *testing.T) {
 	store.mu.Lock()
 	store.allocations = []domain.ScheduleAllocation{
 		{
-			OrderID:  "ORD-1",
+			OrderID:  "ORD-0000001",
 			LineID:   "A",
 			Date:     mustAPIDate(t, "2026-05-01"),
 			Quantity: 900,
 			Priority: domain.PriorityLow,
 		},
 		{
-			OrderID:  "ORD-1",
+			OrderID:  "ORD-0000001",
 			LineID:   "A",
 			Date:     mustAPIDate(t, "2026-05-02"),
 			Quantity: 1600,
@@ -1183,9 +1183,9 @@ func TestPartialProductionReturnsRemainderToPendingQueue(t *testing.T) {
 	}
 	store.mu.Unlock()
 
-	startProduction(t, server, schedulerA, "ORD-1")
+	startProduction(t, server, schedulerA, "ORD-0000001")
 
-	body := bytes.NewBufferString(`{"orderId":"ORD-1","productionDate":"2026-05-01","producedQuantity":800}`)
+	body := bytes.NewBufferString(`{"orderId":"ORD-0000001","productionDate":"2026-05-01","producedQuantity":800}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/production/confirm", body)
 	req.Header.Set("Authorization", "Bearer "+schedulerA)
 	res := httptest.NewRecorder()
@@ -1197,16 +1197,16 @@ func TestPartialProductionReturnsRemainderToPendingQueue(t *testing.T) {
 	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode production response: %v", err)
 	}
-	if payload.Order.ID != "ORD-1" || payload.Order.Status != domain.StatusPending || payload.Order.Quantity != 1700 {
+	if payload.Order.ID != "ORD-0000001" || payload.Order.Status != domain.StatusPending || payload.Order.Quantity != 1700 {
 		t.Fatalf("expected original order to return pending with remaining quantity, got %+v", payload.Order)
 	}
-	if payload.Remainder == nil || payload.Remainder.ID != "ORD-1" || payload.Remainder.Quantity != 1700 || payload.Remainder.Status != domain.StatusPending {
+	if payload.Remainder == nil || payload.Remainder.ID != "ORD-0000001" || payload.Remainder.Quantity != 1700 || payload.Remainder.Status != domain.StatusPending {
 		t.Fatalf("unexpected remainder: %+v", payload.Remainder)
 	}
 	if len(store.allocations) != 1 {
 		t.Fatalf("expected partial production to keep one completed allocation, got %+v", store.allocations)
 	}
-	if store.allocations[0].OrderID != "ORD-1" || store.allocations[0].Quantity != 800 || store.allocations[0].Status != domain.StatusCompleted || !store.allocations[0].Date.Equal(mustAPIDate(t, "2026-05-01")) {
+	if store.allocations[0].OrderID != "ORD-0000001" || store.allocations[0].Quantity != 800 || store.allocations[0].Status != domain.StatusCompleted || !store.allocations[0].Date.Equal(mustAPIDate(t, "2026-05-01")) {
 		t.Fatalf("expected completed May 1 allocation for produced quantity, got %+v", store.allocations[0])
 	}
 }
@@ -1218,9 +1218,9 @@ func TestProductionConfirmRejectsQuantityAboveOrderTotal(t *testing.T) {
 	createOrder(t, server, salesToken, "A")
 	schedulerA := login(t, server, "scheduler-a", "demo")
 	createScheduleJob(t, server, schedulerA, "A")
-	startProduction(t, server, schedulerA, "ORD-1")
+	startProduction(t, server, schedulerA, "ORD-0000001")
 
-	body := bytes.NewBufferString(`{"orderId":"ORD-1","productionDate":"2026-05-01","producedQuantity":2501}`)
+	body := bytes.NewBufferString(`{"orderId":"ORD-0000001","productionDate":"2026-05-01","producedQuantity":2501}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/production/confirm", body)
 	req.Header.Set("Authorization", "Bearer "+schedulerA)
 	res := httptest.NewRecorder()
@@ -1248,7 +1248,7 @@ func TestSchedulerRejectsPendingOrdersAndSalesCanResubmit(t *testing.T) {
 	}
 
 	schedulerA := login(t, server, "scheduler-a", "demo")
-	body = bytes.NewBufferString(`{"orderIds":["ORD-1"],"reason":"capacity unavailable before due date"}`)
+	body = bytes.NewBufferString(`{"orderIds":["ORD-0000001"],"reason":"capacity unavailable before due date"}`)
 	req = httptest.NewRequest(http.MethodPost, "/api/orders/reject", body)
 	req.Header.Set("Authorization", "Bearer "+schedulerA)
 	res = httptest.NewRecorder()
@@ -1256,19 +1256,19 @@ func TestSchedulerRejectsPendingOrdersAndSalesCanResubmit(t *testing.T) {
 	if res.Code != http.StatusOK {
 		t.Fatalf("reject failed: %d %s", res.Code, res.Body.String())
 	}
-	if store.orders["ORD-1"].Status != domain.StatusRejected || store.orders["ORD-1"].RejectionReason == "" {
-		t.Fatalf("expected rejected order with reason, got %+v", store.orders["ORD-1"])
+	if store.orders["ORD-0000001"].Status != domain.StatusRejected || store.orders["ORD-0000001"].RejectionReason == "" {
+		t.Fatalf("expected rejected order with reason, got %+v", store.orders["ORD-0000001"])
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/api/orders", nil)
 	req.Header.Set("Authorization", "Bearer "+schedulerA)
 	res = httptest.NewRecorder()
 	server.ServeHTTP(res, req)
-	if strings.Contains(res.Body.String(), "ORD-1") {
+	if strings.Contains(res.Body.String(), "ORD-0000001") {
 		t.Fatalf("rejected order should be hidden from scheduler pending queue: %s", res.Body.String())
 	}
 
-	body = bytes.NewBufferString(`{"orderId":"ORD-1","dueDate":"2026-05-05","quantity":2000}`)
+	body = bytes.NewBufferString(`{"orderId":"ORD-0000001","dueDate":"2026-05-05","quantity":2000}`)
 	req = httptest.NewRequest(http.MethodPost, "/api/orders/resubmit", body)
 	req.Header.Set("Authorization", "Bearer "+salesToken)
 	res = httptest.NewRecorder()
@@ -1276,11 +1276,11 @@ func TestSchedulerRejectsPendingOrdersAndSalesCanResubmit(t *testing.T) {
 	if res.Code != http.StatusOK {
 		t.Fatalf("resubmit failed: %d %s", res.Code, res.Body.String())
 	}
-	if store.orders["ORD-1"].Status != domain.StatusPending || store.orders["ORD-1"].RejectionReason != "" {
-		t.Fatalf("expected resubmitted pending order, got %+v", store.orders["ORD-1"])
+	if store.orders["ORD-0000001"].Status != domain.StatusPending || store.orders["ORD-0000001"].RejectionReason != "" {
+		t.Fatalf("expected resubmitted pending order, got %+v", store.orders["ORD-0000001"])
 	}
-	if store.orders["ORD-1"].Quantity != 2000 || store.orders["ORD-1"].Note != "customer can accept split delivery" {
-		t.Fatalf("expected sales edits to persist, got %+v", store.orders["ORD-1"])
+	if store.orders["ORD-0000001"].Quantity != 2000 || store.orders["ORD-0000001"].Note != "customer can accept split delivery" {
+		t.Fatalf("expected sales edits to persist, got %+v", store.orders["ORD-0000001"])
 	}
 }
 
@@ -1291,7 +1291,7 @@ func TestSalesResubmitRejectsTodayOrPastDueDate(t *testing.T) {
 	createOrder(t, server, salesToken, "A")
 
 	schedulerA := login(t, server, "scheduler-a", "demo")
-	body := bytes.NewBufferString(`{"orderIds":["ORD-1"],"reason":"capacity unavailable before due date"}`)
+	body := bytes.NewBufferString(`{"orderIds":["ORD-0000001"],"reason":"capacity unavailable before due date"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/orders/reject", body)
 	req.Header.Set("Authorization", "Bearer "+schedulerA)
 	res := httptest.NewRecorder()
@@ -1301,7 +1301,7 @@ func TestSalesResubmitRejectsTodayOrPastDueDate(t *testing.T) {
 	}
 
 	for _, dueDate := range []string{"2026-04-30", "2026-04-29"} {
-		body = bytes.NewBufferString(`{"orderId":"ORD-1","dueDate":"` + dueDate + `","quantity":2000}`)
+		body = bytes.NewBufferString(`{"orderId":"ORD-0000001","dueDate":"` + dueDate + `","quantity":2000}`)
 		req = httptest.NewRequest(http.MethodPost, "/api/orders/resubmit", body)
 		req.Header.Set("Authorization", "Bearer "+salesToken)
 		res = httptest.NewRecorder()
@@ -1326,7 +1326,7 @@ func TestSalesCannotChangeNoteDuringResubmit(t *testing.T) {
 	}
 
 	schedulerA := login(t, server, "scheduler-a", "demo")
-	body = bytes.NewBufferString(`{"orderIds":["ORD-1"],"reason":"capacity unavailable before due date"}`)
+	body = bytes.NewBufferString(`{"orderIds":["ORD-0000001"],"reason":"capacity unavailable before due date"}`)
 	req = httptest.NewRequest(http.MethodPost, "/api/orders/reject", body)
 	req.Header.Set("Authorization", "Bearer "+schedulerA)
 	res = httptest.NewRecorder()
@@ -1335,7 +1335,7 @@ func TestSalesCannotChangeNoteDuringResubmit(t *testing.T) {
 		t.Fatalf("reject failed: %d %s", res.Code, res.Body.String())
 	}
 
-	body = bytes.NewBufferString(`{"orderId":"ORD-1","dueDate":"2026-05-05","quantity":2000,"note":"changed note"}`)
+	body = bytes.NewBufferString(`{"orderId":"ORD-0000001","dueDate":"2026-05-05","quantity":2000,"note":"changed note"}`)
 	req = httptest.NewRequest(http.MethodPost, "/api/orders/resubmit", body)
 	req.Header.Set("Authorization", "Bearer "+salesToken)
 	res = httptest.NewRecorder()
@@ -1344,8 +1344,8 @@ func TestSalesCannotChangeNoteDuringResubmit(t *testing.T) {
 	if res.Code != http.StatusBadRequest {
 		t.Fatalf("expected note update rejection, got %d body=%s", res.Code, res.Body.String())
 	}
-	if store.orders["ORD-1"].Note != "original sales note" || store.orders["ORD-1"].Status != domain.StatusRejected {
-		t.Fatalf("order should remain rejected with original note, got %+v", store.orders["ORD-1"])
+	if store.orders["ORD-0000001"].Note != "original sales note" || store.orders["ORD-0000001"].Status != domain.StatusRejected {
+		t.Fatalf("order should remain rejected with original note, got %+v", store.orders["ORD-0000001"])
 	}
 }
 
@@ -1357,7 +1357,7 @@ func TestScheduleHistoryReturnsWorkflowAuditsForSchedulerLine(t *testing.T) {
 
 	schedulerA := login(t, server, "scheduler-a", "demo")
 	createScheduleJob(t, server, schedulerA, "A")
-	startProduction(t, server, schedulerA, "ORD-1")
+	startProduction(t, server, schedulerA, "ORD-0000001")
 
 	schedulerB := login(t, server, "scheduler-b", "demo")
 	createScheduleJob(t, server, schedulerB, "B")

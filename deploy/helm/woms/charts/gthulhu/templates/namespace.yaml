@@ -1,0 +1,15 @@
+{{- if .Values.crdNamespace.create }}
+{{- $namespaceName := tpl .Values.crdNamespace.name . }}
+{{- $existingNs := lookup "v1" "Namespace" "" $namespaceName }}
+{{- if not $existingNs }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $namespaceName }}
+  labels:
+    {{- include "gthulhu.labels" . | nindent 4 }}
+    app.kubernetes.io/component: crd-namespace
+  annotations:
+    helm.sh/resource-policy: keep
+{{- end }}
+{{- end }}

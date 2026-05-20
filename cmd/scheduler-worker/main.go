@@ -12,18 +12,22 @@ import (
 
 	"github.com/d11nn/woms/internal/domain"
 	"github.com/d11nn/woms/internal/scheduler"
+	"github.com/d11nn/woms/internal/startup"
 	_ "github.com/lib/pq"
 	"github.com/segmentio/kafka-go"
 )
 
 func main() {
 	brokers := env("KAFKA_BROKERS", "kafka:9092")
+	brokerList := startup.SplitCSV(brokers)
 	topic := env("KAFKA_SCHEDULE_TOPIC", "woms.schedule.jobs")
 	group := env("KAFKA_CONSUMER_GROUP", "woms-scheduler-workers")
 	databaseURL := env("DATABASE_URL", "")
 	minJobDuration := envDuration("WORKER_MIN_JOB_DURATION_MS", 0)
 	maxRetries := envInt("WORKER_MAX_RETRIES", 3)
 	backfillInterval := envDuration("WORKER_BACKFILL_INTERVAL_MS", 5*time.Second)
+	dependencyTimeout := envDuration("WORKER_DEPENDENCY_RETRY_TIMEOUT_MS", 2*time.Minute)
+	dependencyInterval := envDuration("WORKER_DEPENDENCY_RETRY_INTERVAL_MS", 2*time.Second)
 	startOffsetLabel := strings.ToLower(strings.TrimSpace(env("WORKER_START_OFFSET", "latest")))
 	startOffset := kafka.LastOffset
 	switch startOffsetLabel {
@@ -42,7 +46,12 @@ func main() {
 		if err != nil {
 			log.Fatalf("postgres open failed: %v", err)
 		}
-		if err := db.Ping(); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), dependencyTimeout)
+		err = startup.RetryDependency(ctx, "postgres", dependencyInterval, log.Printf, func(ctx context.Context) error {
+			return db.PingContext(ctx)
+		})
+		cancel()
+		if err != nil {
 			log.Fatalf("postgres ping failed: %v", err)
 		}
 		defer db.Close()
@@ -52,8 +61,16 @@ func main() {
 	}
 
 	log.Printf("scheduler worker starting brokers=%s topic=%s group=%s minJobDuration=%s", brokers, topic, group, minJobDuration)
+	ctx, cancel := context.WithTimeout(context.Background(), dependencyTimeout)
+	if err := startup.RetryDependency(ctx, "kafka broker", dependencyInterval, log.Printf, func(ctx context.Context) error {
+		return startup.PingAnyTCP(ctx, brokerList)
+	}); err != nil {
+		cancel()
+		log.Fatalf("kafka broker failed: %v", err)
+	}
+	cancel()
 	reader := kafka.NewReader(kafka.ReaderConfig{
-		Brokers: strings.Split(brokers, ","),
+		Brokers: brokerList,
 		Topic:   topic,
 		GroupID: group,
 		// Ensure the consumer picks up topics/partitions created after startup.

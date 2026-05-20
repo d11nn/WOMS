@@ -151,14 +151,27 @@ Expected:
 
 Prerequisites:
 
-- MicroK8s has `registry`, `rbac`, KEDA, and metrics-server enabled.
-- Gthulhu monitor-only is deployed and scraped by Prometheus.
-- WOMS `ScaledObject/woms-woms-worker` has the third Gthulhu Prometheus trigger enabled.
-- The Prometheus query uses `exported_namespace="woms"`, not `namespace="woms"`.
+- MicroK8s has `dns`, `hostpath-storage` or `storage`, `metrics-server`, `keda`, and optionally `registry` enabled.
+- Build Gthulhu images from `/home/ubuntu/Gthulhu` branch `feat/woms-poc` with `./scripts/build-push-gthulhu-images.sh`.
+- Install WOMS with `-f deploy/helm/woms/values-gthulhu-monitor.yaml` and set the scheduler, sidecar, and manager image tags to the verification tag.
+- The bundled Prometheus target adds a scrape-level `namespace` label, so Gthulhu's original pod namespace is queried as `exported_namespace="woms"`.
+- The integration overlay enables `gthulhu.scheduler.monitor.monitorAll=true` for this PoC image; worker selection is enforced by the Prometheus `pod_name` filter.
+
+Install example:
+
+```bash
+helm upgrade --install woms ./deploy/helm/woms \
+  --namespace woms --create-namespace \
+  -f ./deploy/helm/woms/values-gthulhu-monitor.yaml \
+  --set gthulhu.scheduler.image.tag=woms-integration-<gthulhu-short-sha> \
+  --set gthulhu.scheduler.sidecar.image.tag=woms-integration-<gthulhu-short-sha> \
+  --set gthulhu.manager.image.tag=woms-integration-<gthulhu-short-sha>
+```
 
 Confirm trigger wiring:
 
 ```bash
+./scripts/verify-gthulhu-monitoring.sh
 kubectl get scaledobject woms-woms-worker -n woms -o yaml
 kubectl describe hpa woms-woms-worker-hpa -n woms
 ```
@@ -169,16 +182,20 @@ Expected:
 - Kafka is still `lagThreshold: "10"`.
 - CPU is still `value: "70"`.
 - Gthulhu scaler health is `Happy`.
+- Prometheus can query WOMS API metrics and `gthulhu_pod_*` metrics for `woms-woms-worker-*`.
+- Grafana dashboard config contains the three Gthulhu panels.
 
 Proof demo flow:
 
-1. Temporarily set `keda.gthulhu.threshold` to `1` without changing Kafka or CPU triggers.
-2. Run the multi-line scheduling peak demo.
-3. Watch HPA events:
+Run each scenario independently so the other triggers do not interfere:
 
 ```bash
-kubectl describe hpa woms-woms-worker-hpa -n woms
+HPA_SCENARIO=cpu ./scripts/verify-hpa-behavior.sh
+HPA_SCENARIO=kafka ./scripts/verify-hpa-behavior.sh
+HPA_SCENARIO=gthulhu ./scripts/verify-hpa-behavior.sh
 ```
+
+`verify-hpa-behavior.sh` defaults to `GTHULHU_IMAGE_TAG=woms-integration-f71f78a`; override that environment variable when validating another Gthulhu tag.
 
 A successful run shows events like:
 
@@ -191,9 +208,11 @@ Prometheus check:
 
 ```promql
 avg(rate(gthulhu_pod_involuntary_ctx_switches_total{exported_namespace="woms",pod_name=~"woms-woms-worker-.*"}[2m]))
+avg(rate(gthulhu_pod_wait_time_nanoseconds_total{exported_namespace="woms",pod_name=~"woms-woms-worker-.*"}[2m])) / 1000000000
+sum(gthulhu_pod_process_count{exported_namespace="woms",pod_name=~"woms-woms-worker-.*"})
 ```
 
-Restore the threshold to a conservative value such as `20` after the demo. On the current single-node MicroK8s VM, threshold `5` plus node-level CPU pressure did not reliably prove realistic Gthulhu-only scale-out. After restarting the Gthulhu monitor, worker-pod ephemeral pressure can push the Gthulhu metric above `5`, but it also triggers the CPU scaler, so the HPA reason can still be CPU. For product demos, describe `threshold=1` as proof/demo calibration, not a production recommendation.
+The scripts clean temporary load pods/jobs only. They leave WOMS, Gthulhu, Prometheus, and Grafana deployed for inspection.
 
 ## 9. Redis Lock Verification
 

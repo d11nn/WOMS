@@ -151,14 +151,27 @@ kubectl describe pdb woms-woms-web -n woms
 
 前置條件：
 
-- MicroK8s 已啟用 `registry`、`rbac`、KEDA、metrics-server。
-- Gthulhu monitor-only 已部署並可被 Prometheus scrape。
-- WOMS `ScaledObject/woms-woms-worker` 已啟用第三個 Gthulhu Prometheus trigger。
-- Prometheus query 使用 `exported_namespace="woms"`，不是 `namespace="woms"`。
+- MicroK8s 已啟用 `dns`、`hostpath-storage` 或 `storage`、`metrics-server`、`keda`，如需 local image fallback 則啟用 `registry`。
+- 從 `/home/ubuntu/Gthulhu` 的 `feat/woms-poc` branch 用 `./scripts/build-push-gthulhu-images.sh` build Gthulhu images。
+- 用 `-f deploy/helm/woms/values-gthulhu-monitor.yaml` 安裝 WOMS，並把 scheduler、sidecar、manager image tag 都設為驗證 tag。
+- 內建 Prometheus target 會加上 scrape-level `namespace` label，因此 Gthulhu 原始 pod namespace 需要用 `exported_namespace="woms"` 查詢。
+- 這個 PoC image 的 integration overlay 會啟用 `gthulhu.scheduler.monitor.monitorAll=true`；worker 篩選由 Prometheus `pod_name` query 負責。
+
+安裝範例：
+
+```bash
+helm upgrade --install woms ./deploy/helm/woms \
+  --namespace woms --create-namespace \
+  -f ./deploy/helm/woms/values-gthulhu-monitor.yaml \
+  --set gthulhu.scheduler.image.tag=woms-integration-<gthulhu-short-sha> \
+  --set gthulhu.scheduler.sidecar.image.tag=woms-integration-<gthulhu-short-sha> \
+  --set gthulhu.manager.image.tag=woms-integration-<gthulhu-short-sha>
+```
 
 確認 trigger wiring：
 
 ```bash
+./scripts/verify-gthulhu-monitoring.sh
 kubectl get scaledobject woms-woms-worker -n woms -o yaml
 kubectl describe hpa woms-woms-worker-hpa -n woms
 ```
@@ -169,16 +182,20 @@ kubectl describe hpa woms-woms-worker-hpa -n woms
 - Kafka 仍為 `lagThreshold: "10"`。
 - CPU 仍為 `value: "70"`。
 - Gthulhu scaler health 為 `Happy`。
+- Prometheus 查得到 WOMS API metrics 與 `woms-woms-worker-*` 的 `gthulhu_pod_*` metrics。
+- Grafana dashboard config 內有三個 Gthulhu panels。
 
 Proof demo 流程：
 
-1. 暫時把 `keda.gthulhu.threshold` 設為 `1`，不改 Kafka/CPU trigger。
-2. 執行「建立多產線排程尖峰」demo。
-3. 觀察 HPA events：
+三種 scenario 分開跑，避免其他 trigger 干擾：
 
 ```bash
-kubectl describe hpa woms-woms-worker-hpa -n woms
+HPA_SCENARIO=cpu ./scripts/verify-hpa-behavior.sh
+HPA_SCENARIO=kafka ./scripts/verify-hpa-behavior.sh
+HPA_SCENARIO=gthulhu ./scripts/verify-hpa-behavior.sh
 ```
+
+`verify-hpa-behavior.sh` 預設使用 `GTHULHU_IMAGE_TAG=woms-integration-f71f78a`；驗證其他 Gthulhu tag 時請覆寫這個環境變數。
 
 成功時會看到類似：
 
@@ -191,9 +208,11 @@ New size: 8; reason: external metric s2-prometheus-woms_worker_gthulhu_involunta
 
 ```promql
 avg(rate(gthulhu_pod_involuntary_ctx_switches_total{exported_namespace="woms",pod_name=~"woms-woms-worker-.*"}[2m]))
+avg(rate(gthulhu_pod_wait_time_nanoseconds_total{exported_namespace="woms",pod_name=~"woms-woms-worker-.*"}[2m])) / 1000000000
+sum(gthulhu_pod_process_count{exported_namespace="woms",pod_name=~"woms-woms-worker-.*"})
 ```
 
-demo 後把 threshold 恢復保守值，例如 `20`。目前單節點 MicroK8s 實測中，threshold `5` 加 node-level CPU pressure 尚未穩定證明 realistic Gthulhu-only scale-out；重啟 Gthulhu monitor 後，worker-pod ephemeral pressure 可讓 Gthulhu metric 超過 `5`，但同時也會觸發 CPU scaler，因此 HPA reason 仍可能是 CPU。若要展示產品能力，請明確說明 `threshold=1` 是 proof/demo calibration，不是 production 建議值。
+Scripts 只會清理臨時壓測 pods/jobs，不會移除 WOMS、Gthulhu、Prometheus 或 Grafana，方便後續檢查。
 
 ## 9. Redis Lock 驗證
 

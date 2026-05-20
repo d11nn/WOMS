@@ -21,7 +21,7 @@ func NewDemoMemoryStore() *MemoryStore {
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	if order, ok := store.orders["ORD-2"]; ok {
+	if order, ok := store.orders["ORD-0000002"]; ok {
 		order.Status = domain.StatusScheduled
 		store.orders[order.ID] = order
 		store.allocations = append(store.allocations, domain.ScheduleAllocation{
@@ -33,7 +33,7 @@ func NewDemoMemoryStore() *MemoryStore {
 			Locked:   false,
 		})
 	}
-	if order, ok := store.orders["ORD-4"]; ok {
+	if order, ok := store.orders["ORD-0000004"]; ok {
 		order.Status = domain.StatusInProgress
 		store.orders[order.ID] = order
 	}

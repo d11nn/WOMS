@@ -36,6 +36,10 @@ spec:
               value: {{ .Values.worker.env.minJobDurationMs | quote }}
             - name: WORKER_MAX_RETRIES
               value: {{ .Values.worker.env.maxRetries | quote }}
+            - name: WORKER_DEPENDENCY_RETRY_TIMEOUT_MS
+              value: {{ .Values.worker.env.dependencyRetryTimeoutMs | quote }}
+            - name: WORKER_DEPENDENCY_RETRY_INTERVAL_MS
+              value: {{ .Values.worker.env.dependencyRetryIntervalMs | quote }}
           resources:
             {{- toYaml .Values.worker.resources | nindent 12 }}
           securityContext:

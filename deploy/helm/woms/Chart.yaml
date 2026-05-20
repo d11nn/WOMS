@@ -17,3 +17,7 @@ dependencies:
     version: 29.3.14
     repository: oci://registry-1.docker.io/bitnamicharts
     condition: kafka.enabled
+  - name: gthulhu
+    version: 0.1.0
+    repository: file://charts/gthulhu
+    condition: gthulhu.enabled

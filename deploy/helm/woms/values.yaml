@@ -109,16 +109,16 @@ keda:
 gthulhu:
   enabled: true
   crdNamespace:
-    create: false
+    create: true
     name: '{{ .Release.Namespace }}'
   scheduler:
     runtimeMode: scheduler
     image:
-      repository: ghcr.io/gthulhu/gthulhu-scx
+      repository: ghcr.io/gthulhu/gthulhu
       pullPolicy: IfNotPresent
-      tag: "develop"
+      tag: "1.0.0"
     sidecar:
-      enabled: true
+      enabled: false
     config:
       mode: none
       kernelMode: false
@@ -135,7 +135,7 @@ gthulhu:
       enableCRDWatcher: true
       kubeConfigPath: ""
     api:
-      enabled: false
+      enabled: true
       authEnabled: false
       interval: 5
   manager:

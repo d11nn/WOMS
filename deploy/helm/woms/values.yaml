@@ -107,18 +107,18 @@ keda:
       avg(rate(gthulhu_pod_involuntary_ctx_switches_total{exported_namespace="{{ .Release.Namespace }}",pod_name=~"{{ include "woms.fullname" . }}-worker-.*"}[2m]))
 
 gthulhu:
-  enabled: false
+  enabled: true
   crdNamespace:
     create: false
     name: '{{ .Release.Namespace }}'
   scheduler:
     runtimeMode: scheduler
     image:
-      repository: docker.io/d11nn/gthulhu-scx
+      repository: ghcr.io/gthulhu/gthulhu-scx
       pullPolicy: IfNotPresent
-      tag: "vX.Y.Z"
+      tag: "develop"
     sidecar:
-      enabled: false
+      enabled: true
     config:
       mode: none
       kernelMode: false
@@ -274,7 +274,6 @@ monitoring:
       gthulhu:
         enabled: true
         path: /metrics
-        service: '{{ .Release.Name }}-gthulhu-scheduler-sidecar'
         port: "9090"
         interval: 15s
 

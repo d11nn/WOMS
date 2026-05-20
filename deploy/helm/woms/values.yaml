@@ -270,10 +270,11 @@ monitoring:
         path: /metrics
         port: "8080"
         interval: 15s
-      # Gthulhu pods: scrape /metrics on port 9091
+      # Gthulhu pods: scrape /metrics on port 9090
       gthulhu:
         enabled: true
         path: /metrics
+        service: '{{ .Release.Name }}-gthulhu-scheduler-sidecar'
         port: "9090"
         interval: 15s
 

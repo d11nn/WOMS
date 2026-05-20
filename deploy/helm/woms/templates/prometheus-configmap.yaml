@@ -44,7 +44,7 @@ data:
         relabel_configs:
           - source_labels: [__meta_kubernetes_service_name]
             action: keep
-            regex: {{ printf "%s-scheduler-sidecar" (include "gthulhu.fullname" .Subcharts.gthulhu) | quote }}
+            regex: {{ tpl .Values.monitoring.prometheus.scrape.gthulhu.service . | quote }}
           - source_labels: [__meta_kubernetes_endpoint_port_name]
             action: keep
             regex: monitor-metrics

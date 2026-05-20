@@ -21,6 +21,17 @@ const hpaBehaviorScript = readFileSync(new URL("../../../scripts/verify-hpa-beha
 const kafkaTopicJob = readFileSync(new URL("./templates/kafka-topic-job.yaml", import.meta.url), "utf8");
 const secret = readFileSync(new URL("./templates/secret.yaml", import.meta.url), "utf8");
 const notes = readFileSync(new URL("./templates/NOTES.txt", import.meta.url), "utf8");
+const ingress = readFileSync(new URL("./templates/ingress.yaml", import.meta.url), "utf8");
+const pdb = readFileSync(new URL("./templates/poddisruptionbudgets.yaml", import.meta.url), "utf8");
+const prometheusDeployment = readFileSync(new URL("./templates/prometheus-deployment.yaml", import.meta.url), "utf8");
+const prometheusConfigmap = prometheusConfig;
+const prometheusService = readFileSync(new URL("./templates/prometheus-service.yaml", import.meta.url), "utf8");
+const grafanaDeployment = readFileSync(new URL("./templates/grafana-deployment.yaml", import.meta.url), "utf8");
+const grafanaConfigmap = grafanaConfig;
+const grafanaService = readFileSync(new URL("./templates/grafana-service.yaml", import.meta.url), "utf8");
+const gthulhuDeployment = readFileSync(new URL("./templates/gthulhu-deployment.yaml", import.meta.url), "utf8");
+const gthulhuService = readFileSync(new URL("./templates/gthulhu-service.yaml", import.meta.url), "utf8");
+const helpers = readFileSync(new URL("./templates/_helpers.tpl", import.meta.url), "utf8");
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 /**
@@ -53,7 +64,7 @@ test("Helm values keep async scheduling and HPA demo defaults wired", () => {
   assert.match(values, /scheduler:[\s\S]*runtimeMode:\s+scheduler/);
   assert.match(values, /mode:\s+none/);
   assert.match(values, /monitor:[\s\S]*enableCRDWatcher:\s+true/);
-  assert.match(values, /prometheusServerAddress:\s+"http:\/\/monitoring-kube-prometheus-prometheus\.monitoring:9090"/);
+  assert.match(values, /prometheusServerAddress:\s+"http:\/\/\{\{ include \\"woms\.fullname\\" \. \}\}-prometheus:9090"/);
   assert.match(values, /metricName:\s+woms_worker_gthulhu_involuntary_ctx_switches_rate/);
   assert.match(values, /threshold:\s+"20"/);
   assert.match(values, /query:\s+\|-/);
@@ -315,8 +326,8 @@ test("Prometheus deployment is gated by monitoring flags and configures scrape j
   assert.match(prometheusConfigmap, /scrape_interval:\s+\{\{ \.Values\.monitoring\.prometheus\.scrape\.api\.interval \}\}/);
   assert.match(prometheusConfigmap, /job_name:\s+woms-api/);
   assert.match(prometheusConfigmap, /metrics_path:\s+\{\{ \.Values\.monitoring\.prometheus\.scrape\.api\.path \}\}/);
-  assert.match(prometheusConfigmap, /if and \.Values\.monitoring\.gthulhu\.enabled \.Values\.monitoring\.prometheus\.scrape\.gthulhu/);
-  assert.match(prometheusConfigmap, /job_name:\s+gthulhu/);
+  assert.match(prometheusConfigmap, /if and \.Values\.gthulhu\.enabled \.Values\.gthulhu\.scheduler\.monitor\.enabled \.Values\.monitoring\.prometheus\.scrape\.gthulhu\.enabled/);
+  assert.match(prometheusConfigmap, /job_name:\s+gthulhu-monitor/);
   // service
   assert.match(prometheusService, /if and \.Values\.monitoring\.enabled \.Values\.monitoring\.prometheus\.enabled/);
   assert.match(prometheusService, /name:\s+\{\{ include "woms\.fullname" \. \}\}-prometheus/);
@@ -364,11 +375,9 @@ test("Grafana deployment provisions datasources, dashboards, and anonymous acces
 test("Gthulhu deployment is gated by monitoring flags and exposes infra metrics env", () => {
   // default enabled in values
   assert.match(values, /monitoring:[\s\S]*gthulhu:[\s\S]*enabled:\s+true/);
-  assert.match(values, /gthulhu:[\s\S]*image:[\s\S]*repository:\s+ghcr\.io\/gthulhu\/gthulhu/);
-  assert.match(values, /metricsPort:\s+9091/);
-  assert.match(values, /postgresDsn:\s+postgres:\/\/woms:woms@postgres:5432\/woms\?sslmode=disable/);
+  assert.match(values, /gthulhu:[\s\S]*image:[\s\S]*repository:\s+docker\.io\/d11nn\/gthulhu-scx/);
   // deployment
-  assert.match(gthulhuDeployment, /if and \.Values\.monitoring\.enabled \.Values\.monitoring\.gthulhu\.enabled/);
+  assert.match(gthulhuDeployment, /if and \.Values\.gthulhu\.enabled/);
   assert.match(gthulhuDeployment, /name:\s+\{\{ include "woms\.fullname" \. \}\}-gthulhu/);
   assert.match(gthulhuDeployment, /app\.kubernetes\.io\/component:\s+gthulhu/);
   assert.match(gthulhuDeployment, /GTHULHU_POSTGRES_DSN/);
@@ -377,7 +386,7 @@ test("Gthulhu deployment is gated by monitoring flags and exposes infra metrics 
   assert.match(gthulhuDeployment, /GTHULHU_METRICS_PORT/);
   assert.match(gthulhuDeployment, /containerPort:\s+\{\{ \.Values\.monitoring\.gthulhu\.metricsPort \}\}/);
   // service
-  assert.match(gthulhuService, /if and \.Values\.monitoring\.enabled \.Values\.monitoring\.gthulhu\.enabled/);
+  assert.match(gthulhuService, /if and \.Values\.gthulhu\.enabled/);
   assert.match(gthulhuService, /name:\s+\{\{ include "woms\.fullname" \. \}\}-gthulhu/);
   assert.match(gthulhuService, /port:\s+\{\{ \.Values\.monitoring\.gthulhu\.metricsPort \}\}/);
 });

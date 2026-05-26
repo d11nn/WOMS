@@ -17,6 +17,7 @@ const grafanaConfig = readFileSync(new URL("./templates/grafana-configmap.yaml",
 const grafanaDeployment = readFileSync(new URL("./templates/grafana-deployment.yaml", import.meta.url), "utf8");
 const grafanaSecret = readFileSync(new URL("./templates/grafana-secret.yaml", import.meta.url), "utf8");
 const webDashboard = readFileSync(new URL("./dashboards/woms-monitoring.json", import.meta.url), "utf8");
+const gkeFullOverlay = readFileSync(new URL("./values-gke-full.yaml", import.meta.url), "utf8");
 const runtimeDashboard = readFileSync(new URL("./dashboards/woms-runtime-monitoring.json", import.meta.url), "utf8");
 const composePrometheus = readFileSync(new URL("../../../monitoring/prometheus.yml", import.meta.url), "utf8");
 const hpaBehaviorScript = readFileSync(new URL("../../../scripts/verify-hpa-behavior.sh", import.meta.url), "utf8");
@@ -183,12 +184,15 @@ test("API JWT secret and admin autoscaling status RBAC are wired", () => {
   assert.match(apiRBAC, /apiGroups:\s+\["autoscaling"\][\s\S]*resources:\s+\["horizontalpodautoscalers"\][\s\S]*verbs:\s+\["get"\]/);
 });
 
-test("Ingress and Grafana proxy behavior remain unchanged", () => {
+test("Ingress keeps login public while protecting API prefix", () => {
   assert.match(ingress, /name:\s+\{\{ include "woms\.fullname" \. \}\}-public/);
   assert.match(ingress, /path:\s+\/api\/auth\/login[\s\S]*pathType:\s+Exact[\s\S]*name:\s+\{\{ include "woms\.fullname" \. \}\}-api/);
   assert.match(ingress, /name:\s+\{\{ include "woms\.fullname" \. \}\}-api-secure/);
   assert.match(ingress, /nginx\.ingress\.kubernetes\.io\/auth-url/);
-  assert.doesNotMatch(ingress, /path:\s+\/grafana/);
+  assert.match(ingress, /path:\s+\/api[\s\S]*pathType:\s+Prefix/);
+});
+
+test("Helm exposes Grafana through the web proxy subpath", () => {
   assert.match(values, /externalPath:\s+\/grafana/);
   assert.match(helpers, /define "woms\.grafanaRootUrl"/);
   assert.match(webDeployment, /name:\s+GRAFANA_UPSTREAM/);

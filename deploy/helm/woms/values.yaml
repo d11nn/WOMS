@@ -99,6 +99,9 @@ ingress:
   tls:
     enabled: false
     secretName: woms-tls
+  routeMode: webProxy
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "1m"
   auth:
     enabled: true
 

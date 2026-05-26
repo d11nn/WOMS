@@ -1,0 +1,54 @@
+ingress:
+  enabled: true
+  className: nginx
+  host: woms.example.edu
+  tls:
+    enabled: true
+    secretName: woms-tls
+  routeMode: webProxy
+  annotations:
+    acme.cert-manager.io/http01-ingress-class: "nginx"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/whitelist-source-range: "140.113.0.0/16"
+    nginx.ingress.kubernetes.io/proxy-body-size: "1m"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+
+keda:
+  enabled: true
+  kafka:
+    enabled: true
+    bootstrapServers: "kafka.{{ .Release.Namespace }}.svc.cluster.local:9092"
+    topic: woms.schedule.jobs
+    consumerGroup: woms-scheduler-workers
+    lagThreshold: "10"
+    offsetResetPolicy: latest
+  cpu:
+    enabled: true
+  gthulhu:
+    enabled: true
+
+kafka:
+  controller:
+    replicaCount: 1
+    extraConfigYaml:
+      default.replication.factor: 1
+      min.insync.replicas: 1
+      offsets.topic.replication.factor: 1
+      transaction.state.log.min.isr: 1
+      transaction.state.log.replication.factor: 1
+  broker:
+    replicaCount: 0
+
+kafkaTopic:
+  enabled: true
+  partitions: 0
+  replicationFactor: 1
+
+monitoring:
+  enabled: true
+  prometheus:
+    enabled: true
+  grafana:
+    enabled: true

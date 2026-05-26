@@ -357,6 +357,178 @@ Grafana anonymous access is disabled in Helm. The chart creates a `woms-woms-gra
 
 Grafana provisions two WOMS dashboards in the `WOMS` folder: `WOMS Monitoring` keeps the API request, latency, status, and Go runtime panels, while `WOMS web autoscaling` shows the web NGINX request-rate signal used by the active HPA.
 
+### GKE Full Deployment With NGINX Ingress Whitelist
+
+The GKE full overlay enables the web/API/worker stack, chart-managed Kafka/Redis/PostgreSQL, KEDA Kafka lag scaling, Prometheus/Grafana, Gthulhu monitor-only metrics, and an NGINX Ingress entry point restricted to `140.113.0.0/16`. This path intentionally keeps the public Ingress routed only to the web service; the web container then proxies `/api/` and `/grafana/` to the internal API and Grafana Services.
+
+Ingress NGINX was retired after March 2026. Existing deployments continue to work, but long-term production exposure should move to a maintained GKE-native Gateway or Cloud Armor design.
+
+Install NGINX Ingress Controller with client IP preservation. `externalTrafficPolicy=Local` is required so the whitelist sees the real client IP instead of a GKE node IP:
+
+```bash
+helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+helm repo update
+
+helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+  --namespace ingress-nginx --create-namespace \
+  --set controller.service.externalTrafficPolicy=Local \
+  --set controller.replicaCount=2 \
+  --wait --timeout 10m
+```
+
+Capture the current GKE LoadBalancer IP after the controller is ready. Do this every time the Ingress Controller is recreated, a node pool migration changes the load balancer, or the namespace is redeployed:
+
+```bash
+kubectl get svc -n ingress-nginx ingress-nginx-controller
+
+export INGRESS_IP="$(
+  kubectl get svc -n ingress-nginx ingress-nginx-controller \
+    -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+)"
+test -n "${INGRESS_IP}"
+echo "${INGRESS_IP}"
+```
+
+Choose the host from the current `INGRESS_IP`. For a temporary no-DNS validation host, use `sslip.io`:
+
+```bash
+export WOMS_HOST="woms.${INGRESS_IP}.sslip.io"
+```
+
+For a real DNS name, point the DNS A record at the same `INGRESS_IP`, then verify it before installing WOMS. The current GKE deployment uses `woms.c1ydeh.net`:
+
+```bash
+export WOMS_HOST="woms.c1ydeh.net"
+dig +short "${WOMS_HOST}"
+test "$(dig +short "${WOMS_HOST}" | tail -n 1)" = "${INGRESS_IP}"
+```
+
+Do not reuse a previous `WOMS_HOST` that embeds an old IP, such as an old `woms.<old-ip>.sslip.io` value. That hostname resolves to the old load balancer and will fail even if all WOMS pods are healthy.
+
+Install KEDA before deploying WOMS:
+
+```bash
+helm repo add kedacore https://kedacore.github.io/charts
+helm repo update
+
+helm upgrade --install keda kedacore/keda \
+  --namespace keda --create-namespace \
+  --wait --timeout 10m
+```
+
+Install cert-manager directly in the GKE cluster and create the Let’s Encrypt ClusterIssuers used by the WOMS Ingress:
+
+```bash
+helm upgrade --install cert-manager oci://quay.io/jetstack/charts/cert-manager \
+  --version v1.20.2 \
+  --namespace cert-manager --create-namespace \
+  --set crds.enabled=true \
+  --wait --timeout 10m
+
+kubectl apply -f ./deploy/helm/woms/cert-manager-clusterissuers.yaml
+kubectl get clusterissuer
+```
+
+The `cert-manager-clusterissuers.yaml` manifest creates `letsencrypt-staging` and `letsencrypt-prod` with an HTTP-01 solver that uses the `nginx` IngressClass. The GKE full values file adds `cert-manager.io/cluster-issuer: letsencrypt-prod` and `acme.cert-manager.io/http01-ingress-class: nginx` to the WOMS Ingress annotations, so cert-manager will create the TLS Secret automatically from the Ingress `tls` block.
+
+Prepare deployment-time values. `WOMS_TLS_SECRET` is the Secret that cert-manager will create; do not create it manually for the cert-manager path.
+
+```bash
+export WOMS_TLS_SECRET="$(echo "${WOMS_HOST}" | tr '.' '-')-tls"
+export GTHULHU_IMAGE_TAG="<real-gthulhu-image-tag>"
+export WOMS_JWT_SECRET="<strong-secret>"
+export GRAFANA_ADMIN_PASSWORD="<strong-password>"
+
+kubectl create namespace woms --dry-run=client -o yaml | kubectl apply -f -
+```
+
+Then deploy the full stack with the host that resolves to the current load balancer:
+
+```bash
+helm upgrade --install woms ./deploy/helm/woms \
+  --namespace woms --create-namespace \
+  --dependency-update \
+  --wait --timeout 30m \
+  -f ./deploy/helm/woms/values-gthulhu-monitor.yaml \
+  -f ./deploy/helm/woms/values-gke-full.yaml \
+  --set ingress.host="${WOMS_HOST}" \
+  --set ingress.tls.secretName="${WOMS_TLS_SECRET}" \
+  --set gthulhu.scheduler.image.tag="${GTHULHU_IMAGE_TAG}" \
+  --set gthulhu.scheduler.sidecar.image.tag="${GTHULHU_IMAGE_TAG}" \
+  --set gthulhu.manager.image.tag="${GTHULHU_IMAGE_TAG}" \
+  --set api.jwtSecret="${WOMS_JWT_SECRET}" \
+  --set monitoring.grafana.admin.password="${GRAFANA_ADMIN_PASSWORD}"
+```
+
+Validate the external endpoint, DNS, TLS, whitelist, Kafka topic hook, KEDA, and Gthulhu metrics:
+
+```bash
+kubectl get svc -n ingress-nginx ingress-nginx-controller -o wide
+kubectl get ingress woms-woms-public -n woms -o wide
+
+dig +short "${WOMS_HOST}"
+test "$(dig +short "${WOMS_HOST}" | tail -n 1)" = "${INGRESS_IP}"
+
+curl -I "https://${WOMS_HOST}/"
+curl -I "https://${WOMS_HOST}/grafana/"
+curl -I "https://${WOMS_HOST}/api/health"
+curl -kI "https://${INGRESS_IP}/" -H "Host: ${WOMS_HOST}"
+kubectl logs -n ingress-nginx deploy/ingress-nginx-controller --tail=100
+
+kubectl get certificate,certificaterequest,order,challenge -A
+kubectl describe certificate -n woms "${WOMS_TLS_SECRET}"
+kubectl get secret "${WOMS_TLS_SECRET}" -n woms
+echo | openssl s_client -connect "${WOMS_HOST}:443" -servername "${WOMS_HOST}" -showcerts 2>/dev/null | \
+  openssl x509 -noout -subject -issuer -dates -ext subjectAltName
+
+kubectl get job,pod,scaledobject,hpa -n woms
+kubectl logs job/woms-woms-kafka-topic -n woms
+kubectl exec -n woms kafka-controller-0 -- \
+  kafka-topics.sh --bootstrap-server kafka.woms.svc.cluster.local:9092 \
+  --describe --topic woms.schedule.jobs
+kubectl describe scaledobject woms-woms-worker -n woms
+kubectl describe hpa woms-woms-worker-hpa -n woms
+
+kubectl get daemonset,pod,svc,podschedulingmetrics -n woms
+kubectl port-forward -n woms svc/woms-gthulhu-scheduler-sidecar 9090:9090
+curl -s http://127.0.0.1:9090/metrics | grep woms-woms-worker
+```
+
+Requests from `140.113.0.0/16` should reach the application or an app-level auth response. Requests from outside that range should receive `403 Forbidden`. For temporary no-DNS testing, `woms.${INGRESS_IP}.sslip.io` can point at the current load balancer IP, but with TLS enabled the certificate must cover that hostname or the browser will report a certificate mismatch.
+
+#### Fully Shut Down The GKE Deployment
+
+When the GKE validation is finished, remove WOMS, NGINX Ingress, and KEDA promptly to avoid continuing charges from GKE LoadBalancers and Persistent Disks. Delete the `woms` namespace, not only the Helm release, because StatefulSet PVCs can keep GCE PD-backed PersistentVolumes allocated after uninstall.
+
+```bash
+helm uninstall woms -n woms --ignore-not-found
+kubectl delete namespace woms --wait=true --timeout=15m
+
+helm uninstall ingress-nginx -n ingress-nginx --ignore-not-found
+kubectl delete namespace ingress-nginx --wait=true --timeout=10m
+
+helm uninstall keda -n keda --ignore-not-found
+kubectl delete namespace keda --wait=true --timeout=10m
+
+helm uninstall cert-manager -n cert-manager --ignore-not-found
+kubectl delete namespace cert-manager --wait=true --timeout=10m
+```
+
+Confirm that no WOMS workloads, public load balancers, PVCs, PVs, or Helm releases remain:
+
+```bash
+helm list -A
+kubectl get ns
+kubectl get pods -n woms
+kubectl get pvc -A
+kubectl get pv
+kubectl get svc -A --field-selector spec.type=LoadBalancer
+kubectl get crd scaledobjects.keda.sh
+kubectl get crd certificates.cert-manager.io
+```
+
+Expected shutdown state: `woms`, `ingress-nginx`, `keda`, and `cert-manager` namespaces are absent; `helm list -A` has no WOMS/KEDA/ingress/cert-manager releases; there are no WOMS PVCs/PVs; and no `ingress-nginx-controller` LoadBalancer remains. If a GKE Persistent Disk or forwarding rule still appears in the Google Cloud console after namespace deletion completes, recheck `kubectl get pv` and `kubectl get svc -A --field-selector spec.type=LoadBalancer` before deleting the orphaned cloud resource manually.
+
 If the browser runs on a Windows host and WOMS runs on VM `192.168.56.101`, create an SSH tunnel from Windows first:
 
 ```powershell

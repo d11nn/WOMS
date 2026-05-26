@@ -359,6 +359,178 @@ Helm 中的 Grafana anonymous access 已停用。當 `monitoring.grafana.admin.e
 
 Grafana 會在 `WOMS` folder provision 兩張 dashboard：`WOMS Monitoring` 保留 API request、latency、status 與 Go runtime panels；`WOMS web autoscaling` 顯示 active HPA 使用的 web NGINX request-rate 訊號。
 
+### GKE 完整部署與 NGINX Ingress 白名單
+
+GKE full overlay 會啟用 web/API/worker、chart-managed Kafka/Redis/PostgreSQL、KEDA Kafka lag 擴縮、Prometheus/Grafana、Gthulhu monitor-only metrics，以及限制在 `140.113.0.0/16` 的 NGINX Ingress 入口。這條路徑會刻意讓 public Ingress 只導到 web service；web container 再把 `/api/` 與 `/grafana/` 代理到叢集內部 API 與 Grafana Services。
+
+Ingress NGINX 已在 2026 年 3 月後停止維護。既有部署仍可運作，但長期正式環境應規劃遷移到仍維護中的 GKE-native Gateway 或 Cloud Armor 架構。
+
+先安裝 NGINX Ingress Controller，並保留 client IP。`externalTrafficPolicy=Local` 是必要設定，否則白名單可能只看到 GKE node IP，而非真實使用者來源 IP：
+
+```bash
+helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+helm repo update
+
+helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+  --namespace ingress-nginx --create-namespace \
+  --set controller.service.externalTrafficPolicy=Local \
+  --set controller.replicaCount=2 \
+  --wait --timeout 10m
+```
+
+Controller 就緒後，先取得目前 GKE LoadBalancer IP。每次重建 Ingress Controller、node pool 遷移導致 load balancer 改變、或重新部署 namespace 後，都要重新取得這個值：
+
+```bash
+kubectl get svc -n ingress-nginx ingress-nginx-controller
+
+export INGRESS_IP="$(
+  kubectl get svc -n ingress-nginx ingress-nginx-controller \
+    -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+)"
+test -n "${INGRESS_IP}"
+echo "${INGRESS_IP}"
+```
+
+請用目前的 `INGRESS_IP` 決定 host。若只是臨時驗證、不要設定 DNS，可使用 `sslip.io`：
+
+```bash
+export WOMS_HOST="woms.${INGRESS_IP}.sslip.io"
+```
+
+若使用正式 DNS，請先把 DNS A record 指到同一個 `INGRESS_IP`，並在安裝 WOMS 前確認解析結果正確。目前 GKE 部署使用 `woms.c1ydeh.net`：
+
+```bash
+export WOMS_HOST="woms.c1ydeh.net"
+dig +short "${WOMS_HOST}"
+test "$(dig +short "${WOMS_HOST}" | tail -n 1)" = "${INGRESS_IP}"
+```
+
+不要沿用包含舊 IP 的 `WOMS_HOST`，例如舊的 `woms.<old-ip>.sslip.io`。這類 hostname 會解析到舊 load balancer，就算 WOMS pods 全部健康也會連線失敗。
+
+部署 WOMS 前先安裝 KEDA：
+
+```bash
+helm repo add kedacore https://kedacore.github.io/charts
+helm repo update
+
+helm upgrade --install keda kedacore/keda \
+  --namespace keda --create-namespace \
+  --wait --timeout 10m
+```
+
+直接在 GKE 叢集裡安裝 cert-manager，並建立 WOMS Ingress 會使用的 Let’s Encrypt ClusterIssuers：
+
+```bash
+helm upgrade --install cert-manager oci://quay.io/jetstack/charts/cert-manager \
+  --version v1.20.2 \
+  --namespace cert-manager --create-namespace \
+  --set crds.enabled=true \
+  --wait --timeout 10m
+
+kubectl apply -f ./deploy/helm/woms/cert-manager-clusterissuers.yaml
+kubectl get clusterissuer
+```
+
+`cert-manager-clusterissuers.yaml` 會建立 `letsencrypt-staging` 與 `letsencrypt-prod`，HTTP-01 solver 會使用 `nginx` IngressClass。GKE full values file 會把 `cert-manager.io/cluster-issuer: letsencrypt-prod` 與 `acme.cert-manager.io/http01-ingress-class: nginx` 加到 WOMS Ingress annotations，因此 cert-manager 會依 Ingress `tls` block 自動建立 TLS Secret。
+
+準備部署時的動態值。`WOMS_TLS_SECRET` 是 cert-manager 會建立的 Secret；走 cert-manager 流程時不要手動建立這個 Secret。
+
+```bash
+export WOMS_TLS_SECRET="$(echo "${WOMS_HOST}" | tr '.' '-')-tls"
+export GTHULHU_IMAGE_TAG="<real-gthulhu-image-tag>"
+export WOMS_JWT_SECRET="<strong-secret>"
+export GRAFANA_ADMIN_PASSWORD="<strong-password>"
+
+kubectl create namespace woms --dry-run=client -o yaml | kubectl apply -f -
+```
+
+接著使用會解析到目前 load balancer 的 host 部署完整 stack：
+
+```bash
+helm upgrade --install woms ./deploy/helm/woms \
+  --namespace woms --create-namespace \
+  --dependency-update \
+  --wait --timeout 30m \
+  -f ./deploy/helm/woms/values-gthulhu-monitor.yaml \
+  -f ./deploy/helm/woms/values-gke-full.yaml \
+  --set ingress.host="${WOMS_HOST}" \
+  --set ingress.tls.secretName="${WOMS_TLS_SECRET}" \
+  --set gthulhu.scheduler.image.tag="${GTHULHU_IMAGE_TAG}" \
+  --set gthulhu.scheduler.sidecar.image.tag="${GTHULHU_IMAGE_TAG}" \
+  --set gthulhu.manager.image.tag="${GTHULHU_IMAGE_TAG}" \
+  --set api.jwtSecret="${WOMS_JWT_SECRET}" \
+  --set monitoring.grafana.admin.password="${GRAFANA_ADMIN_PASSWORD}"
+```
+
+驗證外部入口、DNS、TLS、白名單、Kafka topic hook、KEDA 與 Gthulhu metrics：
+
+```bash
+kubectl get svc -n ingress-nginx ingress-nginx-controller -o wide
+kubectl get ingress woms-woms-public -n woms -o wide
+
+dig +short "${WOMS_HOST}"
+test "$(dig +short "${WOMS_HOST}" | tail -n 1)" = "${INGRESS_IP}"
+
+curl -I "https://${WOMS_HOST}/"
+curl -I "https://${WOMS_HOST}/grafana/"
+curl -I "https://${WOMS_HOST}/api/health"
+curl -kI "https://${INGRESS_IP}/" -H "Host: ${WOMS_HOST}"
+kubectl logs -n ingress-nginx deploy/ingress-nginx-controller --tail=100
+
+kubectl get certificate,certificaterequest,order,challenge -A
+kubectl describe certificate -n woms "${WOMS_TLS_SECRET}"
+kubectl get secret "${WOMS_TLS_SECRET}" -n woms
+echo | openssl s_client -connect "${WOMS_HOST}:443" -servername "${WOMS_HOST}" -showcerts 2>/dev/null | \
+  openssl x509 -noout -subject -issuer -dates -ext subjectAltName
+
+kubectl get job,pod,scaledobject,hpa -n woms
+kubectl logs job/woms-woms-kafka-topic -n woms
+kubectl exec -n woms kafka-controller-0 -- \
+  kafka-topics.sh --bootstrap-server kafka.woms.svc.cluster.local:9092 \
+  --describe --topic woms.schedule.jobs
+kubectl describe scaledobject woms-woms-worker -n woms
+kubectl describe hpa woms-woms-worker-hpa -n woms
+
+kubectl get daemonset,pod,svc,podschedulingmetrics -n woms
+kubectl port-forward -n woms svc/woms-gthulhu-scheduler-sidecar 9090:9090
+curl -s http://127.0.0.1:9090/metrics | grep woms-woms-worker
+```
+
+來自 `140.113.0.0/16` 的請求應可進入應用程式或得到應用層 auth response；範圍外來源應收到 `403 Forbidden`。臨時免設定 DNS 測試時，可以用 `woms.${INGRESS_IP}.sslip.io` 指到目前的 load balancer IP；但本方案啟用 TLS，因此憑證必須涵蓋該 hostname，否則瀏覽器會回報憑證名稱不符。
+
+#### 完整關閉 GKE 部署
+
+GKE 驗證結束後，請盡快移除 WOMS、NGINX Ingress 與 KEDA，避免 GKE LoadBalancer 與 Persistent Disk 持續收費。不要只做 Helm uninstall；請刪除整個 `woms` namespace，因為 StatefulSet PVC 可能在 release 移除後繼續保留 GCE PD-backed PersistentVolume。
+
+```bash
+helm uninstall woms -n woms --ignore-not-found
+kubectl delete namespace woms --wait=true --timeout=15m
+
+helm uninstall ingress-nginx -n ingress-nginx --ignore-not-found
+kubectl delete namespace ingress-nginx --wait=true --timeout=10m
+
+helm uninstall keda -n keda --ignore-not-found
+kubectl delete namespace keda --wait=true --timeout=10m
+
+helm uninstall cert-manager -n cert-manager --ignore-not-found
+kubectl delete namespace cert-manager --wait=true --timeout=10m
+```
+
+確認 WOMS workload、公網 LoadBalancer、PVC、PV 與 Helm release 都已清乾淨：
+
+```bash
+helm list -A
+kubectl get ns
+kubectl get pods -n woms
+kubectl get pvc -A
+kubectl get pv
+kubectl get svc -A --field-selector spec.type=LoadBalancer
+kubectl get crd scaledobjects.keda.sh
+kubectl get crd certificates.cert-manager.io
+```
+
+預期關閉狀態：`woms`、`ingress-nginx`、`keda`、`cert-manager` namespaces 都不存在；`helm list -A` 沒有 WOMS/KEDA/ingress/cert-manager releases；沒有 WOMS PVC/PV；也沒有 `ingress-nginx-controller` LoadBalancer。若 namespace 刪除完成後，Google Cloud console 仍顯示 GKE Persistent Disk 或 forwarding rule，請先重查 `kubectl get pv` 與 `kubectl get svc -A --field-selector spec.type=LoadBalancer`，再手動刪除 orphaned cloud resource。
+
 如果瀏覽器在另一台 Windows 主機，而 WOMS 跑在 VM `192.168.56.101`，先從 Windows 建立 SSH tunnel：
 
 ```powershell

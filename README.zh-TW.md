@@ -65,6 +65,10 @@ flowchart LR
 - [WOMS repo analysis and presentation plan (English)](docs/woms-repo-analysis-presentation.en.md)
 - [WOMS repo 分析與簡報內容建議（繁體中文）](docs/woms-repo-analysis-presentation.zh-TW.md)
 - [Sales operation flow source](docs/sales.excalidraw)
+- [Application architecture diagram source](docs/application-architecture.excalidraw)
+- [Infrastructure architecture diagram source](docs/infrastructure-architecture.excalidraw)
+- [Monitoring and autoscaling diagram source](docs/monitoring-autoscaling.excalidraw)
+- [Deployment flow diagram source](docs/deployment-flow.excalidraw)
 
 ## 前置需求
 

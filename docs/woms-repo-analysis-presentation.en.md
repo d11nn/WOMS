@@ -6,7 +6,7 @@ Language: English | [繁體中文](woms-repo-analysis-presentation.zh-TW.md)
 
 This document is the WOMS repository analysis and final-presentation content plan. It does not produce a PPTX. The narrative follows `plan.md`: first explain what users want to accomplish, then show operation flows, then explain why those flows require the application and infrastructure architecture in slides 4 and 5.
 
-The Sales flow source is [sales.excalidraw](sales.excalidraw). Repository evidence comes from `cmd`, `internal`, `web`, `db/migrations`, `.github/workflows`, `deploy/helm/woms`, `monitoring`, Dockerfiles, Compose, README, `go.mod`, and `package.json`.
+All presentation diagrams use Excalidraw source files. The Sales flow source is [sales.excalidraw](sales.excalidraw). The Scheduler flow diagram is intentionally left for the presenter to add later; this document keeps only the textual flow. Other diagram sources are [application-architecture.excalidraw](application-architecture.excalidraw), [infrastructure-architecture.excalidraw](infrastructure-architecture.excalidraw), [monitoring-autoscaling.excalidraw](monitoring-autoscaling.excalidraw), and [deployment-flow.excalidraw](deployment-flow.excalidraw). Repository evidence comes from `cmd`, `internal`, `web`, `db/migrations`, `.github/workflows`, `deploy/helm/woms`, `monitoring`, Dockerfiles, Compose, README, `go.mod`, and `package.json`.
 
 ## Requirement And Grading Alignment
 
@@ -27,31 +27,7 @@ The repository maps to the evaluation criteria as follows:
 
 ## Sales Operation Flow
 
-The authoritative Sales flow is [sales.excalidraw](sales.excalidraw). The point of this slide is not to list APIs; it is to show how Sales prevents unacceptable due dates and visible conflicts before a draft becomes a pending order.
-
-```mermaid
-flowchart LR
-  sales[Sales] --> lines["Load lines\nGET /api/lines"]
-  lines --> form[Fill order data]
-  form --> future{"Due date is in the future?"}
-  future -- "No" --> invalid[Show unacceptable due date]
-  invalid --> form
-  future -- "Yes" --> preview["Preview schedule\nPOST /api/schedules/preview"]
-  preview --> conflicts{"Preview has conflicts?"}
-  conflicts -- "Yes" --> reason[Show conflict reason and earliest finish date]
-  reason --> adjust[Adjust due date, quantity, start date, or split order]
-  adjust --> preview
-  conflicts -- "No: hand to scheduler" --> confirm["Confirm creation\nPOST /api/orders/preview-confirm"]
-  confirm --> pending[Order created\nstatus = pending]
-  pending --> track["Track order\nGET /api/orders\ncalendar view"]
-  track --> edit{"Need modification or resubmission?"}
-  edit -- "Yes" --> resubmit["Resubmit\nPOST /api/orders/resubmit"]
-  resubmit --> track
-  edit -- "No" --> cancel{"Need cancellation?"}
-  cancel -- "Yes" --> delete["Cancel\nDELETE /api/orders"]
-  delete --> done[Done]
-  cancel -- "No" --> done
-```
+The authoritative Sales flow is [sales.excalidraw](sales.excalidraw). The point of this slide is not to list APIs; it is to show how Sales prevents unacceptable due dates and visible conflicts before a draft becomes a pending order. Use the Excalidraw source directly when taking screenshots.
 
 Repository evidence:
 
@@ -61,24 +37,7 @@ Repository evidence:
 
 ## Scheduler Operation Flow
 
-The Scheduler flow is inferred from the current UI and API. Formal scheduling is preview-backed; this keeps conflict resolution, manual force reason, line revision, and audit data fixed before a job enters Kafka.
-
-```mermaid
-flowchart LR
-  login[Scheduler login] --> orders["Load pending orders\nGET /api/orders"]
-  orders --> select[Select orders or drag to a future date]
-  select --> preview["Create schedule preview\nPOST /api/schedules/preview"]
-  preview --> conflict{"Any conflict?"}
-  conflict -- "No" --> accept["Accept preview\nPOST /api/schedules/jobs"]
-  conflict -- "Yes" --> resolve[Move low-priority orders, update due date, reject, or manual force]
-  resolve --> preview
-  accept --> kafka[Kafka topic woms.schedule.jobs]
-  kafka --> worker[Scheduler Worker]
-  worker --> lock[Redis line lock]
-  lock --> db[(PostgreSQL allocations/jobs/audit)]
-  db --> calendar["Calendar and history\nGET /api/schedules/calendar\nGET /api/schedules/history"]
-  calendar --> prod["Start or confirm production\nPOST /api/production/start\nPOST /api/production/confirm"]
-```
+The Scheduler flow is inferred from the current UI and API. Formal scheduling is preview-backed; this keeps conflict resolution, manual force reason, line revision, and audit data fixed before a job enters Kafka. The Scheduler flow diagram is intentionally not generated, per the user's request.
 
 Repository evidence:
 
@@ -88,47 +47,13 @@ Repository evidence:
 
 ## System Architecture - Application
 
-```mermaid
-flowchart LR
-  browser[Browser UI] --> web[Vanilla HTML/CSS/JS\nserved by NGINX]
-  web --> api[Go API]
-  api --> auth[JWT + RBAC]
-  api --> pg[(PostgreSQL)]
-  api --> redis[(Redis)]
-  api --> kafka[(Kafka\nwoms.schedule.jobs)]
-  kafka --> worker[Go Scheduler Worker]
-  worker --> redis
-  worker --> pg
-  api --> metrics[Prometheus metrics]
-  web --> nginxmetrics[NGINX stub_status exporter]
-  metrics --> grafana[Grafana dashboards]
-  nginxmetrics --> grafana
-```
+Excalidraw source: [application-architecture.excalidraw](application-architecture.excalidraw)
 
 The application architecture follows directly from the workflows. The web frontend owns login, calendars, preview pages, and operation panels. The Go API owns JWT/RBAC, order state, previews, schedule jobs, production state, and audit records. The worker persists accepted schedule jobs asynchronously. PostgreSQL stores durable state, Redis protects same-line schedule consistency, Kafka decouples API requests from execution, and Prometheus/Grafana expose operational feedback.
 
 ## System Architecture - Infrastructure
 
-```mermaid
-flowchart TB
-  gh[GitHub Actions] --> build[Docker build\napi / worker / web]
-  build --> hub[Docker Hub images]
-  hub --> helm[Helm values image tags]
-  user[User traffic] --> ingress[NGINX Ingress or LoadBalancer]
-  ingress --> websvc[Kubernetes Service: web]
-  websvc --> webpods[web Deployment + nginx-exporter sidecar]
-  webpods --> apisvc[Kubernetes Service: api]
-  apisvc --> apipods[api Deployment]
-  apipods --> deps[(PostgreSQL / Redis / Kafka)]
-  kafka[(Kafka)] --> workerpods[worker Deployment]
-  workerpods --> deps
-  prometheus[Prometheus] --> webpods
-  prometheus --> apipods
-  prometheus --> keda[KEDA ScaledObject]
-  keda --> hpa[web HPA]
-  hpa --> webpods
-  grafana[Grafana] --> prometheus
-```
+Excalidraw source: [infrastructure-architecture.excalidraw](infrastructure-architecture.excalidraw)
 
 Repository evidence:
 
@@ -150,6 +75,8 @@ The active autoscaling scenario in the current repository is web NGINX request r
 
 The Monitoring/Autoscaling slide should therefore explain the web traffic path: web pods expose NGINX metrics through an exporter sidecar, Prometheus scrapes the web Service `metrics` port, Grafana displays per-pod request rate, and KEDA uses the same query to drive the HPA.
 
+Excalidraw source: [monitoring-autoscaling.excalidraw](monitoring-autoscaling.excalidraw)
+
 ## Deployment Flow
 
 1. Developers open PRs from `feat/**` branches to protected `main`.
@@ -157,6 +84,8 @@ The Monitoring/Autoscaling slide should therefore explain the web traffic path: 
 3. After merge to `main`, `docker-publish` builds and pushes `woms-api`, `woms-scheduler-worker`, and `woms-web` images to Docker Hub.
 4. The workflow updates image tags in `deploy/helm/woms/values.yaml` and creates a Git tag.
 5. Operators deploy API, web, worker, dependencies, monitoring, and KEDA to Kubernetes with Helm.
+
+Excalidraw source: [deployment-flow.excalidraw](deployment-flow.excalidraw)
 
 ## Testing Strategy
 

@@ -6,7 +6,7 @@
 
 本文件是 WOMS 的 repo 分析與期末簡報內容建議，不直接產出 PPTX。簡報主線採用 `plan.md` 的方向：先說明使用者真正想完成什麼，再用操作流程圖描述使用方式，最後說明為了支撐這些 workflow，系統才需要 Web UI、Go API、Scheduler Worker、PostgreSQL、Redis、Kafka、Prometheus/Grafana、KEDA、Kubernetes、Helm、NGINX Ingress、GitHub Actions 與 Docker Hub。
 
-Sales flow 以 [sales.excalidraw](sales.excalidraw) 為準；repo evidence 則來自 `cmd`、`internal`、`web`、`db/migrations`、`.github/workflows`、`deploy/helm/woms`、`monitoring`、Dockerfiles、Compose、README、`go.mod` 與 `package.json`。
+所有簡報圖都使用 Excalidraw source。Sales flow 以 [sales.excalidraw](sales.excalidraw) 為準；Scheduler flow 圖由簡報作者後續補上，本文件只保留文字 flow。其他圖檔包含 [application-architecture.excalidraw](application-architecture.excalidraw)、[infrastructure-architecture.excalidraw](infrastructure-architecture.excalidraw)、[monitoring-autoscaling.excalidraw](monitoring-autoscaling.excalidraw) 與 [deployment-flow.excalidraw](deployment-flow.excalidraw)。Repo evidence 則來自 `cmd`、`internal`、`web`、`db/migrations`、`.github/workflows`、`deploy/helm/woms`、`monitoring`、Dockerfiles、Compose、README、`go.mod` 與 `package.json`。
 
 ## 需求與評分對齊
 
@@ -27,31 +27,7 @@ Sales flow 以 [sales.excalidraw](sales.excalidraw) 為準；repo evidence 則�
 
 ## Sales Operation Flow
 
-Sales flow 的權威來源是 [sales.excalidraw](sales.excalidraw)。流程重點不是 API 清單，而是 Sales 如何在建立訂單前先排除不可接受交期與可預期衝突。
-
-```mermaid
-flowchart LR
-  sales[Sales] --> lines["載入產線\nGET /api/lines"]
-  lines --> form[填寫訂單資料]
-  form --> future{"交期是未來日？"}
-  future -- "否" --> invalid[提示：無法被接受的交期]
-  invalid --> form
-  future -- "是" --> preview["試排預覽\nPOST /api/schedules/preview"]
-  preview --> conflicts{"預覽有衝突\nconflicts?"}
-  conflicts -- "是" --> reason[顯示衝突原因與最早完成日]
-  reason --> adjust[調整交期/數量/開始日或拆單後重試排]
-  adjust --> preview
-  conflicts -- "否：交給 scheduler" --> confirm["確認建立\nPOST /api/orders/preview-confirm"]
-  confirm --> pending[訂單建立成功\n狀態 = 待排程]
-  pending --> track["追蹤訂單\nGET /api/orders\n查看月曆"]
-  track --> edit{"需要修改或重送？"}
-  edit -- "是" --> resubmit["重新送出\nPOST /api/orders/resubmit"]
-  resubmit --> track
-  edit -- "否" --> cancel{"需要取消？"}
-  cancel -- "是" --> delete["取消\nDELETE /api/orders"]
-  delete --> done[結束]
-  cancel -- "否" --> done
-```
+Sales flow 的權威來源是 [sales.excalidraw](sales.excalidraw)。流程重點不是 API 清單，而是 Sales 如何在建立訂單前先排除不可接受交期與可預期衝突。截圖時請直接開啟該 Excalidraw source。
 
 Repo evidence：
 
@@ -61,24 +37,7 @@ Repo evidence：
 
 ## Scheduler Operation Flow
 
-Scheduler flow 由現有 UI 與 API 推導。Scheduler 的重點是正式排程只接受 preview-backed job；這讓 conflict resolution、manual force reason、line revision 與 audit log 在進入 Kafka 前就被固定下來。
-
-```mermaid
-flowchart LR
-  login[Scheduler login] --> orders["載入待排程訂單\nGET /api/orders"]
-  orders --> select[選取訂單或拖曳到未來日期]
-  select --> preview["產生排程預覽\nPOST /api/schedules/preview"]
-  preview --> conflict{"有 conflict?"}
-  conflict -- "否" --> accept["接受 preview\nPOST /api/schedules/jobs"]
-  conflict -- "是" --> resolve[選擇移動低優先序訂單、更新交期、駁回或 manual force]
-  resolve --> preview
-  accept --> kafka[Kafka topic woms.schedule.jobs]
-  kafka --> worker[Scheduler Worker]
-  worker --> lock[Redis line lock]
-  lock --> db[(PostgreSQL allocations/jobs/audit)]
-  db --> calendar["查看月曆與歷史\nGET /api/schedules/calendar\nGET /api/schedules/history"]
-  calendar --> prod["開始生產/回報產量\nPOST /api/production/start\nPOST /api/production/confirm"]
-```
+Scheduler flow 由現有 UI 與 API 推導。Scheduler 的重點是正式排程只接受 preview-backed job；這讓 conflict resolution、manual force reason、line revision 與 audit log 在進入 Kafka 前就被固定下來。Scheduler flow 圖依使用者要求先不產生，後續由簡報作者自行補上。
 
 Repo evidence：
 
@@ -88,47 +47,13 @@ Repo evidence：
 
 ## System Architecture - Application
 
-```mermaid
-flowchart LR
-  browser[Browser UI] --> web[Vanilla HTML/CSS/JS\nserved by NGINX]
-  web --> api[Go API]
-  api --> auth[JWT + RBAC]
-  api --> pg[(PostgreSQL)]
-  api --> redis[(Redis)]
-  api --> kafka[(Kafka\nwoms.schedule.jobs)]
-  kafka --> worker[Go Scheduler Worker]
-  worker --> redis
-  worker --> pg
-  api --> metrics[Prometheus metrics]
-  web --> nginxmetrics[NGINX stub_status exporter]
-  metrics --> grafana[Grafana dashboards]
-  nginxmetrics --> grafana
-```
+Excalidraw source：[application-architecture.excalidraw](application-architecture.excalidraw)
 
 這個 application 架構是被前面的 Sales/Scheduler workflows 推出來的：Web frontend 負責登入、日曆、preview 與操作面板；Go API 負責 JWT/RBAC、訂單狀態、preview、schedule job 與 audit；worker 負責把正式 schedule job 非同步落地；PostgreSQL 保存長期狀態；Redis 保護同產線排程一致性；Kafka 把 API request path 和排程執行解耦；Prometheus/Grafana 則讓 demo 能看到 API 與 web traffic 指標。
 
 ## System Architecture - Infrastructure
 
-```mermaid
-flowchart TB
-  gh[GitHub Actions] --> build[Docker build\napi / worker / web]
-  build --> hub[Docker Hub images]
-  hub --> helm[Helm values image tags]
-  user[User traffic] --> ingress[NGINX Ingress or LoadBalancer]
-  ingress --> websvc[Kubernetes Service: web]
-  websvc --> webpods[web Deployment + nginx-exporter sidecar]
-  webpods --> apisvc[Kubernetes Service: api]
-  apisvc --> apipods[api Deployment]
-  apipods --> deps[(PostgreSQL / Redis / Kafka)]
-  kafka[(Kafka)] --> workerpods[worker Deployment]
-  workerpods --> deps
-  prometheus[Prometheus] --> webpods
-  prometheus --> apipods
-  prometheus --> keda[KEDA ScaledObject]
-  keda --> hpa[web HPA]
-  hpa --> webpods
-  grafana[Grafana] --> prometheus
-```
+Excalidraw source：[infrastructure-architecture.excalidraw](infrastructure-architecture.excalidraw)
 
 Repo evidence：
 
@@ -150,6 +75,8 @@ Kafka topic 是 `woms.schedule.jobs`，API 建立 queued job 後 publish 給 wor
 
 這代表簡報的 Monitoring/Autoscaling 頁應該說明：web pods 透過 NGINX exporter 暴露 metrics，Prometheus scrape web Service 的 `metrics` port，Grafana 顯示 per-pod req/s，而 KEDA 依相同查詢推動 HPA。不要把目前實作描述成 Kafka lag-based worker autoscaling。
 
+Excalidraw source：[monitoring-autoscaling.excalidraw](monitoring-autoscaling.excalidraw)
+
 ## Deployment Flow
 
 1. Developer 在 `feat/**` 分支開 PR。
@@ -157,6 +84,8 @@ Kafka topic 是 `woms.schedule.jobs`，API 建立 queued job 後 publish 給 wor
 3. PR merge 到 `main` 後，`docker-publish` workflow build/push `woms-api`、`woms-scheduler-worker`、`woms-web` 到 Docker Hub。
 4. Workflow 更新 `deploy/helm/woms/values.yaml` 的 image tags，並建立 Git tag。
 5. Operator 透過 Helm 部署 API/web/worker/dependencies/monitoring/KEDA 到 Kubernetes。
+
+Excalidraw source：[deployment-flow.excalidraw](deployment-flow.excalidraw)
 
 ## Testing Strategy
 

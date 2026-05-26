@@ -17,17 +17,6 @@ ingress:
 
 keda:
   enabled: true
-  kafka:
-    enabled: true
-    bootstrapServers: "kafka.{{ .Release.Namespace }}.svc.cluster.local:9092"
-    topic: woms.schedule.jobs
-    consumerGroup: woms-scheduler-workers
-    lagThreshold: "10"
-    offsetResetPolicy: latest
-  cpu:
-    enabled: true
-  gthulhu:
-    enabled: true
 
 kafka:
   controller:

@@ -242,7 +242,7 @@ Make sure the cluster has KEDA installed first. NGINX Ingress is required only w
 A clean VM deployment should have two layers:
 
 1. Platform setup: Kubernetes, KEDA, and Ingress NGINX or LoadBalancer support for the web traffic demo.
-2. WOMS deployment: Helm installs the API, web, scheduler worker, Services, optional Ingress, KEDA ScaledObject, and the PostgreSQL, Redis, and Kafka chart dependencies.
+2. WOMS deployment: Helm installs the API, web, scheduler worker, Services, optional Ingress, web KEDA ScaledObject, and the PostgreSQL, Redis, and Kafka chart dependencies.
 
 Users should not manually patch the web deployment, create Kafka topics, or tune topic partitions. Those operational details must be handled by the image, Helm chart, or platform bootstrap.
 
@@ -359,11 +359,58 @@ Grafana provisions two WOMS dashboards in the `WOMS` folder: `WOMS Monitoring` k
 
 ### GKE Full Deployment With NGINX Ingress Whitelist
 
-The GKE full overlay enables the web/API/worker stack, chart-managed Kafka/Redis/PostgreSQL, KEDA Kafka lag scaling, Prometheus/Grafana, Gthulhu monitor-only metrics, and an NGINX Ingress entry point restricted to `140.113.0.0/16`. This path intentionally keeps the public Ingress routed only to the web service; the web container then proxies `/api/` and `/grafana/` to the internal API and Grafana Services.
+The GKE full overlay enables the web/API/worker stack, chart-managed Kafka/Redis/PostgreSQL, web traffic autoscaling through KEDA and Prometheus, Prometheus/Grafana, and an NGINX Ingress entry point restricted to `140.113.0.0/16`. It does not deploy Gthulhu. This path intentionally keeps the public Ingress routed only to the web service; the web container then proxies `/api/` and `/grafana/` to the internal API and Grafana Services.
 
 Ingress NGINX was retired after March 2026. Existing deployments continue to work, but long-term production exposure should move to a maintained GKE-native Gateway or Cloud Armor design.
 
-Install NGINX Ingress Controller with client IP preservation. `externalTrafficPolicy=Local` is required so the whitelist sees the real client IP instead of a GKE node IP:
+Reserve or reuse a regional static external IP before installing NGINX Ingress Controller. The reserved address must be in the same region as the GKE cluster and use the same Network Service Tier as the LoadBalancer Service. The current DNS records point to `136.110.70.193`, and this project already has that address reserved as `load-balancer`, so reuse it instead of creating a new address.
+
+```bash
+export GKE_REGION="asia-northeast1"
+export INGRESS_IP="136.110.70.193"
+
+gcloud compute addresses list \
+  --regions="${GKE_REGION}" \
+  --filter="address=${INGRESS_IP}"
+
+export INGRESS_STATIC_IP_NAME="load-balancer"
+
+export INGRESS_IP="$(
+  gcloud compute addresses describe "${INGRESS_STATIC_IP_NAME}" \
+    --region "${GKE_REGION}" \
+    --format='value(address)'
+)"
+echo "${INGRESS_IP}"
+```
+
+If the address list does not show `136.110.70.193`, reserve that exact address only if Google Cloud still allows it:
+
+```bash
+export INGRESS_STATIC_IP_NAME="woms-ingress-ip"
+export INGRESS_IP="136.110.70.193"
+
+gcloud compute addresses create "${INGRESS_STATIC_IP_NAME}" \
+  --region "${GKE_REGION}" \
+  --addresses "${INGRESS_IP}" \
+  --network-tier=Premium
+```
+
+If `136.110.70.193` is already reserved by a different project or is otherwise unavailable, reserve a new address without `--addresses`, then update the DNS A record in Cloudflare/GoDaddy to the new reserved address:
+
+```bash
+gcloud compute addresses create "${INGRESS_STATIC_IP_NAME}" \
+  --region "${GKE_REGION}" \
+  --network-tier=Premium
+
+export INGRESS_IP="$(
+  gcloud compute addresses describe "${INGRESS_STATIC_IP_NAME}" \
+    --region "${GKE_REGION}" \
+    --format='value(address)'
+)"
+echo "${INGRESS_IP}"
+```
+
+Install NGINX Ingress Controller with the reserved IP and client IP preservation. `externalTrafficPolicy=Local` is required so the whitelist sees the real client IP instead of a GKE node IP:
 
 ```bash
 helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
@@ -371,12 +418,24 @@ helm repo update
 
 helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
   --namespace ingress-nginx --create-namespace \
+  --set controller.service.loadBalancerIP="${INGRESS_IP}" \
   --set controller.service.externalTrafficPolicy=Local \
   --set controller.replicaCount=2 \
   --wait --timeout 10m
 ```
 
-Capture the current GKE LoadBalancer IP after the controller is ready. Do this every time the Ingress Controller is recreated, a node pool migration changes the load balancer, or the namespace is redeployed:
+If the Ingress Controller is already installed, upgrade the existing release with the same static IP instead of uninstalling it:
+
+```bash
+helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+  --namespace ingress-nginx --create-namespace \
+  --set controller.service.loadBalancerIP="${INGRESS_IP}" \
+  --set controller.service.externalTrafficPolicy=Local \
+  --set controller.replicaCount=2 \
+  --wait --timeout 10m
+```
+
+Confirm the GKE LoadBalancer uses the reserved IP after the controller is ready:
 
 ```bash
 kubectl get svc -n ingress-nginx ingress-nginx-controller
@@ -389,13 +448,13 @@ test -n "${INGRESS_IP}"
 echo "${INGRESS_IP}"
 ```
 
-Choose the host from the current `INGRESS_IP`. For a temporary no-DNS validation host, use `sslip.io`:
+Choose the host from the reserved `INGRESS_IP`. For a temporary no-DNS validation host, use `sslip.io`:
 
 ```bash
 export WOMS_HOST="woms.${INGRESS_IP}.sslip.io"
 ```
 
-For a real DNS name, point the DNS A record at the same `INGRESS_IP`, then verify it before installing WOMS. The current GKE deployment uses `woms.c1ydeh.net`:
+For a real DNS name, point the DNS A record at the same reserved `INGRESS_IP`, then verify it before installing WOMS. The current GKE deployment uses `woms.c1ydeh.net`:
 
 ```bash
 export WOMS_HOST="woms.c1ydeh.net"
@@ -403,7 +462,7 @@ dig +short "${WOMS_HOST}"
 test "$(dig +short "${WOMS_HOST}" | tail -n 1)" = "${INGRESS_IP}"
 ```
 
-Do not reuse a previous `WOMS_HOST` that embeds an old IP, such as an old `woms.<old-ip>.sslip.io` value. That hostname resolves to the old load balancer and will fail even if all WOMS pods are healthy.
+Do not reuse a previous `WOMS_HOST` that embeds an old IP, such as an old `woms.<old-ip>.sslip.io` value. That hostname resolves to the old load balancer and will fail even if all WOMS pods are healthy. Do not delete the reserved Google Cloud address while the DNS record points to it.
 
 Install KEDA before deploying WOMS:
 
@@ -435,7 +494,6 @@ Prepare deployment-time values. `WOMS_TLS_SECRET` is the Secret that cert-manage
 
 ```bash
 export WOMS_TLS_SECRET="$(echo "${WOMS_HOST}" | tr '.' '-')-tls"
-export GTHULHU_IMAGE_TAG="<real-gthulhu-image-tag>"
 export WOMS_JWT_SECRET="<strong-secret>"
 export GRAFANA_ADMIN_PASSWORD="<strong-password>"
 
@@ -449,18 +507,18 @@ helm upgrade --install woms ./deploy/helm/woms \
   --namespace woms --create-namespace \
   --dependency-update \
   --wait --timeout 30m \
-  -f ./deploy/helm/woms/values-gthulhu-monitor.yaml \
   -f ./deploy/helm/woms/values-gke-full.yaml \
   --set ingress.host="${WOMS_HOST}" \
   --set ingress.tls.secretName="${WOMS_TLS_SECRET}" \
-  --set gthulhu.scheduler.image.tag="${GTHULHU_IMAGE_TAG}" \
-  --set gthulhu.scheduler.sidecar.image.tag="${GTHULHU_IMAGE_TAG}" \
-  --set gthulhu.manager.image.tag="${GTHULHU_IMAGE_TAG}" \
+  --set gthulhu.enabled=false \
+  --set keda.gthulhu.enabled=false \
   --set api.jwtSecret="${WOMS_JWT_SECRET}" \
   --set monitoring.grafana.admin.password="${GRAFANA_ADMIN_PASSWORD}"
 ```
 
-Validate the external endpoint, DNS, TLS, whitelist, Kafka topic hook, KEDA, and Gthulhu metrics:
+Do not include the legacy `values-gthulhu-monitor.yaml` overlay. If an older failed deployment left `woms-gthulhu-scheduler` resources in `InvalidImageName` or `InvalidName`, rerun the corrected Helm command above; if the release is stuck in a pending state, uninstall the `woms` release and delete the `woms` namespace before deploying again.
+
+Validate the external endpoint, DNS, TLS, whitelist, Kafka topic hook, KEDA, Prometheus, and Grafana:
 
 ```bash
 kubectl get svc -n ingress-nginx ingress-nginx-controller -o wide
@@ -486,12 +544,9 @@ kubectl logs job/woms-woms-kafka-topic -n woms
 kubectl exec -n woms kafka-controller-0 -- \
   kafka-topics.sh --bootstrap-server kafka.woms.svc.cluster.local:9092 \
   --describe --topic woms.schedule.jobs
-kubectl describe scaledobject woms-woms-worker -n woms
-kubectl describe hpa woms-woms-worker-hpa -n woms
-
-kubectl get daemonset,pod,svc,podschedulingmetrics -n woms
-kubectl port-forward -n woms svc/woms-gthulhu-scheduler-sidecar 9090:9090
-curl -s http://127.0.0.1:9090/metrics | grep woms-woms-worker
+kubectl describe scaledobject woms-woms-web -n woms
+kubectl describe hpa woms-woms-web-hpa -n woms
+kubectl get deploy,pod,svc -n woms
 ```
 
 Requests from `140.113.0.0/16` should reach the application or an app-level auth response. Requests from outside that range should receive `403 Forbidden`. For temporary no-DNS testing, `woms.${INGRESS_IP}.sslip.io` can point at the current load balancer IP, but with TLS enabled the certificate must cover that hostname or the browser will report a certificate mismatch.
@@ -527,7 +582,7 @@ kubectl get crd scaledobjects.keda.sh
 kubectl get crd certificates.cert-manager.io
 ```
 
-Expected shutdown state: `woms`, `ingress-nginx`, `keda`, and `cert-manager` namespaces are absent; `helm list -A` has no WOMS/KEDA/ingress/cert-manager releases; there are no WOMS PVCs/PVs; and no `ingress-nginx-controller` LoadBalancer remains. If a GKE Persistent Disk or forwarding rule still appears in the Google Cloud console after namespace deletion completes, recheck `kubectl get pv` and `kubectl get svc -A --field-selector spec.type=LoadBalancer` before deleting the orphaned cloud resource manually.
+Expected shutdown state: `woms`, `ingress-nginx`, `keda`, and `cert-manager` namespaces are absent; `helm list -A` has no WOMS/KEDA/ingress/cert-manager releases; there are no WOMS PVCs/PVs; and no `ingress-nginx-controller` LoadBalancer remains. The reserved static IP address can intentionally remain allocated so Cloudflare/GoDaddy DNS continues to point to the same future ingress address. If permanently retiring the environment, delete it explicitly with `gcloud compute addresses delete "${INGRESS_STATIC_IP_NAME}" --region "${GKE_REGION}"` after removing or changing DNS. If a GKE Persistent Disk or forwarding rule still appears in the Google Cloud console after namespace deletion completes, recheck `kubectl get pv` and `kubectl get svc -A --field-selector spec.type=LoadBalancer` before deleting the orphaned cloud resource manually.
 
 If the browser runs on a Windows host and WOMS runs on VM `192.168.56.101`, create an SSH tunnel from Windows first:
 

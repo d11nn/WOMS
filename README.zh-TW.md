@@ -242,7 +242,7 @@ docker build -f Dockerfile.web -t woms-web:local .
 乾淨 VM 的使用者流程應該分成兩層：
 
 1. 平台準備：Kubernetes、KEDA，以及 web traffic demo 所需的 NGINX Ingress 或 LoadBalancer 支援。
-2. WOMS 部署：使用 Helm 部署 API、web、scheduler-worker、Service、可選的 Ingress、KEDA ScaledObject，以及 PostgreSQL、Redis、Kafka chart dependencies。
+2. WOMS 部署：使用 Helm 部署 API、web、scheduler-worker、Service、可選的 Ingress、web KEDA ScaledObject，以及 PostgreSQL、Redis、Kafka chart dependencies。
 
 使用者不應手動 patch web deployment、手動建立 Kafka topic，或手動調整 topic partitions。這些都必須由 image、Helm chart 或平台 bootstrap 自動處理。
 
@@ -361,11 +361,58 @@ Grafana 會在 `WOMS` folder provision 兩張 dashboard：`WOMS Monitoring` 保�
 
 ### GKE 完整部署與 NGINX Ingress 白名單
 
-GKE full overlay 會啟用 web/API/worker、chart-managed Kafka/Redis/PostgreSQL、KEDA Kafka lag 擴縮、Prometheus/Grafana、Gthulhu monitor-only metrics，以及限制在 `140.113.0.0/16` 的 NGINX Ingress 入口。這條路徑會刻意讓 public Ingress 只導到 web service；web container 再把 `/api/` 與 `/grafana/` 代理到叢集內部 API 與 Grafana Services。
+GKE full overlay 會啟用 web/API/worker、chart-managed Kafka/Redis/PostgreSQL、透過 KEDA 與 Prometheus 進行的 web traffic autoscaling、Prometheus/Grafana，以及限制在 `140.113.0.0/16` 的 NGINX Ingress 入口。此流程不會部署 Gthulhu。這條路徑會刻意讓 public Ingress 只導到 web service；web container 再把 `/api/` 與 `/grafana/` 代理到叢集內部 API 與 Grafana Services。
 
 Ingress NGINX 已在 2026 年 3 月後停止維護。既有部署仍可運作，但長期正式環境應規劃遷移到仍維護中的 GKE-native Gateway 或 Cloud Armor 架構。
 
-先安裝 NGINX Ingress Controller，並保留 client IP。`externalTrafficPolicy=Local` 是必要設定，否則白名單可能只看到 GKE node IP，而非真實使用者來源 IP：
+安裝 NGINX Ingress Controller 前，先保留或重用 regional static external IP。此 IP 必須和 GKE cluster 在同一個 region，且 Network Service Tier 要和 LoadBalancer Service 相同。目前 DNS records 指向 `136.110.70.193`，而此 project 已經用 `load-balancer` 名稱保留該 IP，因此請重用它，不要再建立新的 address。
+
+```bash
+export GKE_REGION="asia-northeast1"
+export INGRESS_IP="136.110.70.193"
+
+gcloud compute addresses list \
+  --regions="${GKE_REGION}" \
+  --filter="address=${INGRESS_IP}"
+
+export INGRESS_STATIC_IP_NAME="load-balancer"
+
+export INGRESS_IP="$(
+  gcloud compute addresses describe "${INGRESS_STATIC_IP_NAME}" \
+    --region "${GKE_REGION}" \
+    --format='value(address)'
+)"
+echo "${INGRESS_IP}"
+```
+
+若 address list 沒有顯示 `136.110.70.193`，只有在 Google Cloud 仍允許保留該 IP 時，才建立這個指定地址：
+
+```bash
+export INGRESS_STATIC_IP_NAME="woms-ingress-ip"
+export INGRESS_IP="136.110.70.193"
+
+gcloud compute addresses create "${INGRESS_STATIC_IP_NAME}" \
+  --region "${GKE_REGION}" \
+  --addresses "${INGRESS_IP}" \
+  --network-tier=Premium
+```
+
+若 `136.110.70.193` 已被其他 project 保留或無法使用，請不指定 `--addresses`，改保留新的 IP，然後把 Cloudflare/GoDaddy 的 DNS A record 改到該 IP：
+
+```bash
+gcloud compute addresses create "${INGRESS_STATIC_IP_NAME}" \
+  --region "${GKE_REGION}" \
+  --network-tier=Premium
+
+export INGRESS_IP="$(
+  gcloud compute addresses describe "${INGRESS_STATIC_IP_NAME}" \
+    --region "${GKE_REGION}" \
+    --format='value(address)'
+)"
+echo "${INGRESS_IP}"
+```
+
+接著安裝 NGINX Ingress Controller，綁定保留 IP 並保留 client IP。`externalTrafficPolicy=Local` 是必要設定，否則白名單可能只看到 GKE node IP，而非真實使用者來源 IP：
 
 ```bash
 helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
@@ -373,12 +420,24 @@ helm repo update
 
 helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
   --namespace ingress-nginx --create-namespace \
+  --set controller.service.loadBalancerIP="${INGRESS_IP}" \
   --set controller.service.externalTrafficPolicy=Local \
   --set controller.replicaCount=2 \
   --wait --timeout 10m
 ```
 
-Controller 就緒後，先取得目前 GKE LoadBalancer IP。每次重建 Ingress Controller、node pool 遷移導致 load balancer 改變、或重新部署 namespace 後，都要重新取得這個值：
+若 Ingress Controller 已經安裝，請 upgrade 既有 release 並指定同一個 static IP，不要 uninstall 後重裝：
+
+```bash
+helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+  --namespace ingress-nginx --create-namespace \
+  --set controller.service.loadBalancerIP="${INGRESS_IP}" \
+  --set controller.service.externalTrafficPolicy=Local \
+  --set controller.replicaCount=2 \
+  --wait --timeout 10m
+```
+
+Controller 就緒後，確認 GKE LoadBalancer 使用的是保留 IP：
 
 ```bash
 kubectl get svc -n ingress-nginx ingress-nginx-controller
@@ -391,13 +450,13 @@ test -n "${INGRESS_IP}"
 echo "${INGRESS_IP}"
 ```
 
-請用目前的 `INGRESS_IP` 決定 host。若只是臨時驗證、不要設定 DNS，可使用 `sslip.io`：
+請用保留的 `INGRESS_IP` 決定 host。若只是臨時驗證、不要設定 DNS，可使用 `sslip.io`：
 
 ```bash
 export WOMS_HOST="woms.${INGRESS_IP}.sslip.io"
 ```
 
-若使用正式 DNS，請先把 DNS A record 指到同一個 `INGRESS_IP`，並在安裝 WOMS 前確認解析結果正確。目前 GKE 部署使用 `woms.c1ydeh.net`：
+若使用正式 DNS，請先把 DNS A record 指到同一個保留的 `INGRESS_IP`，並在安裝 WOMS 前確認解析結果正確。目前 GKE 部署使用 `woms.c1ydeh.net`：
 
 ```bash
 export WOMS_HOST="woms.c1ydeh.net"
@@ -405,7 +464,7 @@ dig +short "${WOMS_HOST}"
 test "$(dig +short "${WOMS_HOST}" | tail -n 1)" = "${INGRESS_IP}"
 ```
 
-不要沿用包含舊 IP 的 `WOMS_HOST`，例如舊的 `woms.<old-ip>.sslip.io`。這類 hostname 會解析到舊 load balancer，就算 WOMS pods 全部健康也會連線失敗。
+不要沿用包含舊 IP 的 `WOMS_HOST`，例如舊的 `woms.<old-ip>.sslip.io`。這類 hostname 會解析到舊 load balancer，就算 WOMS pods 全部健康也會連線失敗。DNS record 仍指向該 IP 時，不要刪除 Google Cloud 保留的 address。
 
 部署 WOMS 前先安裝 KEDA：
 
@@ -437,7 +496,6 @@ kubectl get clusterissuer
 
 ```bash
 export WOMS_TLS_SECRET="$(echo "${WOMS_HOST}" | tr '.' '-')-tls"
-export GTHULHU_IMAGE_TAG="<real-gthulhu-image-tag>"
 export WOMS_JWT_SECRET="<strong-secret>"
 export GRAFANA_ADMIN_PASSWORD="<strong-password>"
 
@@ -451,18 +509,18 @@ helm upgrade --install woms ./deploy/helm/woms \
   --namespace woms --create-namespace \
   --dependency-update \
   --wait --timeout 30m \
-  -f ./deploy/helm/woms/values-gthulhu-monitor.yaml \
   -f ./deploy/helm/woms/values-gke-full.yaml \
   --set ingress.host="${WOMS_HOST}" \
   --set ingress.tls.secretName="${WOMS_TLS_SECRET}" \
-  --set gthulhu.scheduler.image.tag="${GTHULHU_IMAGE_TAG}" \
-  --set gthulhu.scheduler.sidecar.image.tag="${GTHULHU_IMAGE_TAG}" \
-  --set gthulhu.manager.image.tag="${GTHULHU_IMAGE_TAG}" \
+  --set gthulhu.enabled=false \
+  --set keda.gthulhu.enabled=false \
   --set api.jwtSecret="${WOMS_JWT_SECRET}" \
   --set monitoring.grafana.admin.password="${GRAFANA_ADMIN_PASSWORD}"
 ```
 
-驗證外部入口、DNS、TLS、白名單、Kafka topic hook、KEDA 與 Gthulhu metrics：
+不要再套用舊的 `values-gthulhu-monitor.yaml` overlay。若舊版失敗部署留下 `InvalidImageName` 或 `InvalidName` 狀態的 `woms-gthulhu-scheduler` resources，請重新執行上方修正後的 Helm 指令；若 release 卡在 pending 狀態，先 uninstall `woms` release 並刪除 `woms` namespace，再重新部署。
+
+驗證外部入口、DNS、TLS、白名單、Kafka topic hook、KEDA、Prometheus 與 Grafana：
 
 ```bash
 kubectl get svc -n ingress-nginx ingress-nginx-controller -o wide
@@ -488,12 +546,9 @@ kubectl logs job/woms-woms-kafka-topic -n woms
 kubectl exec -n woms kafka-controller-0 -- \
   kafka-topics.sh --bootstrap-server kafka.woms.svc.cluster.local:9092 \
   --describe --topic woms.schedule.jobs
-kubectl describe scaledobject woms-woms-worker -n woms
-kubectl describe hpa woms-woms-worker-hpa -n woms
-
-kubectl get daemonset,pod,svc,podschedulingmetrics -n woms
-kubectl port-forward -n woms svc/woms-gthulhu-scheduler-sidecar 9090:9090
-curl -s http://127.0.0.1:9090/metrics | grep woms-woms-worker
+kubectl describe scaledobject woms-woms-web -n woms
+kubectl describe hpa woms-woms-web-hpa -n woms
+kubectl get deploy,pod,svc -n woms
 ```
 
 來自 `140.113.0.0/16` 的請求應可進入應用程式或得到應用層 auth response；範圍外來源應收到 `403 Forbidden`。臨時免設定 DNS 測試時，可以用 `woms.${INGRESS_IP}.sslip.io` 指到目前的 load balancer IP；但本方案啟用 TLS，因此憑證必須涵蓋該 hostname，否則瀏覽器會回報憑證名稱不符。
@@ -529,7 +584,7 @@ kubectl get crd scaledobjects.keda.sh
 kubectl get crd certificates.cert-manager.io
 ```
 
-預期關閉狀態：`woms`、`ingress-nginx`、`keda`、`cert-manager` namespaces 都不存在；`helm list -A` 沒有 WOMS/KEDA/ingress/cert-manager releases；沒有 WOMS PVC/PV；也沒有 `ingress-nginx-controller` LoadBalancer。若 namespace 刪除完成後，Google Cloud console 仍顯示 GKE Persistent Disk 或 forwarding rule，請先重查 `kubectl get pv` 與 `kubectl get svc -A --field-selector spec.type=LoadBalancer`，再手動刪除 orphaned cloud resource。
+預期關閉狀態：`woms`、`ingress-nginx`、`keda`、`cert-manager` namespaces 都不存在；`helm list -A` 沒有 WOMS/KEDA/ingress/cert-manager releases；沒有 WOMS PVC/PV；也沒有 `ingress-nginx-controller` LoadBalancer。保留的 static IP address 可以刻意留下，讓 Cloudflare/GoDaddy DNS 下次仍指到同一個 ingress address。若環境永久退場，請先移除或修改 DNS，再用 `gcloud compute addresses delete "${INGRESS_STATIC_IP_NAME}" --region "${GKE_REGION}"` 明確刪除。若 namespace 刪除完成後，Google Cloud console 仍顯示 GKE Persistent Disk 或 forwarding rule，請先重查 `kubectl get pv` 與 `kubectl get svc -A --field-selector spec.type=LoadBalancer`，再手動刪除 orphaned cloud resource。
 
 如果瀏覽器在另一台 Windows 主機，而 WOMS 跑在 VM `192.168.56.101`，先從 Windows 建立 SSH tunnel：
 

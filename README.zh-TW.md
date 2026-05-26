@@ -60,6 +60,12 @@ flowchart LR
 - `deploy/helm/woms`：部署 API、worker、web、Ingress、KEDA、Prometheus/Grafana 與 web NGINX metrics exporter 的 Kubernetes Helm chart。
 - 歷史 Gthulhu 筆記保留在 `docs/` 供參考；active chart 已不再部署 Gthulhu subchart，也不再使用 worker Kafka/CPU/Gthulhu KEDA triggers。
 
+## Repo 分析與簡報素材
+
+- [WOMS repo analysis and presentation plan (English)](docs/woms-repo-analysis-presentation.en.md)
+- [WOMS repo 分析與簡報內容建議（繁體中文）](docs/woms-repo-analysis-presentation.zh-TW.md)
+- [Sales operation flow source](docs/sales.excalidraw)
+
 ## 前置需求
 
 請先安裝：

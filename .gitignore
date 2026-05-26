@@ -32,6 +32,8 @@ charts/
 # Logs and runtime files
 *.log
 npm-debug.log*
+hpa-*.txt
+workload-*.txt
 tmp/
 .tmp/
 .tmp-*

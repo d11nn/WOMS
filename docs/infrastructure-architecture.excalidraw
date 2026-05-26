@@ -135,9 +135,13 @@
         {
           "id": "infra-gh-bound-text",
           "type": "text"
+        },
+        {
+          "id": "ia1",
+          "type": "arrow"
         }
       ],
-      "updated": 1779794278034,
+      "updated": 1779795282582,
       "link": null,
       "locked": false
     },
@@ -169,9 +173,17 @@
         {
           "id": "infra-hub-bound-text",
           "type": "text"
+        },
+        {
+          "id": "ia1",
+          "type": "arrow"
+        },
+        {
+          "id": "ia2",
+          "type": "arrow"
         }
       ],
-      "updated": 1779794278034,
+      "updated": 1779795282582,
       "link": null,
       "locked": false
     },
@@ -203,9 +215,17 @@
         {
           "id": "infra-helm-bound-text",
           "type": "text"
+        },
+        {
+          "id": "ia2",
+          "type": "arrow"
+        },
+        {
+          "id": "ia3",
+          "type": "arrow"
         }
       ],
-      "updated": 1779794278034,
+      "updated": 1779795282582,
       "link": null,
       "locked": false
     },
@@ -237,9 +257,17 @@
         {
           "id": "infra-ing-bound-text",
           "type": "text"
+        },
+        {
+          "id": "ia3",
+          "type": "arrow"
+        },
+        {
+          "id": "ia4",
+          "type": "arrow"
         }
       ],
-      "updated": 1779794278034,
+      "updated": 1779795282582,
       "link": null,
       "locked": false
     },
@@ -271,9 +299,21 @@
         {
           "id": "infra-web-bound-text",
           "type": "text"
+        },
+        {
+          "id": "ia4",
+          "type": "arrow"
+        },
+        {
+          "id": "ia5",
+          "type": "arrow"
+        },
+        {
+          "id": "ia8",
+          "type": "arrow"
         }
       ],
-      "updated": 1779794278034,
+      "updated": 1779795282582,
       "link": null,
       "locked": false
     },
@@ -305,9 +345,17 @@
         {
           "id": "infra-api-bound-text",
           "type": "text"
+        },
+        {
+          "id": "ia5",
+          "type": "arrow"
+        },
+        {
+          "id": "ia6",
+          "type": "arrow"
         }
       ],
-      "updated": 1779794278034,
+      "updated": 1779795282582,
       "link": null,
       "locked": false
     },
@@ -339,9 +387,13 @@
         {
           "id": "infra-worker-bound-text",
           "type": "text"
+        },
+        {
+          "id": "ia7",
+          "type": "arrow"
         }
       ],
-      "updated": 1779794278034,
+      "updated": 1779795282582,
       "link": null,
       "locked": false
     },
@@ -373,9 +425,17 @@
         {
           "id": "infra-deps-bound-text",
           "type": "text"
+        },
+        {
+          "id": "ia6",
+          "type": "arrow"
+        },
+        {
+          "id": "ia7",
+          "type": "arrow"
         }
       ],
-      "updated": 1779794278034,
+      "updated": 1779795282582,
       "link": null,
       "locked": false
     },
@@ -407,9 +467,13 @@
         {
           "id": "infra-mon-bound-text",
           "type": "text"
+        },
+        {
+          "id": "ia8",
+          "type": "arrow"
         }
       ],
-      "updated": 1779794278034,
+      "updated": 1779795282582,
       "link": null,
       "locked": false
     },
@@ -417,7 +481,7 @@
       "id": "ia1",
       "type": "arrow",
       "x": 150,
-      "y": 202,
+      "y": 200,
       "width": 0,
       "height": 56,
       "angle": 0,
@@ -438,7 +502,7 @@
       "versionNonce": 401,
       "isDeleted": false,
       "boundElements": [],
-      "updated": 1,
+      "updated": 1779795282582,
       "link": null,
       "locked": false,
       "points": [
@@ -448,12 +512,22 @@
         ],
         [
           0,
-          56
+          60
         ]
       ],
       "lastCommittedPoint": null,
-      "startBinding": null,
-      "endBinding": null,
+      "startBinding": {
+        "elementId": "infra-gh",
+        "focus": 0,
+        "gap": 1,
+        "fixedPoint": null
+      },
+      "endBinding": {
+        "elementId": "infra-hub",
+        "focus": 0,
+        "gap": 1,
+        "fixedPoint": null
+      },
       "startArrowhead": null,
       "endArrowhead": "arrow"
     },
@@ -461,7 +535,7 @@
       "id": "ia2",
       "type": "arrow",
       "x": 150,
-      "y": 332,
+      "y": 330,
       "width": 0,
       "height": 56,
       "angle": 0,
@@ -482,7 +556,7 @@
       "versionNonce": 402,
       "isDeleted": false,
       "boundElements": [],
-      "updated": 1,
+      "updated": 1779795282582,
       "link": null,
       "locked": false,
       "points": [
@@ -492,20 +566,30 @@
         ],
         [
           0,
-          56
+          60
         ]
       ],
       "lastCommittedPoint": null,
-      "startBinding": null,
-      "endBinding": null,
+      "startBinding": {
+        "elementId": "infra-hub",
+        "focus": 0,
+        "gap": 1,
+        "fixedPoint": null
+      },
+      "endBinding": {
+        "elementId": "infra-helm",
+        "focus": 0,
+        "gap": 1,
+        "fixedPoint": null
+      },
       "startArrowhead": null,
       "endArrowhead": "arrow"
     },
     {
       "id": "ia3",
       "type": "arrow",
-      "x": 232,
-      "y": 425,
+      "x": 205.1063829787234,
+      "y": 390,
       "width": 200,
       "height": -232,
       "angle": 0,
@@ -526,7 +610,7 @@
       "versionNonce": 403,
       "isDeleted": false,
       "boundElements": [],
-      "updated": 1,
+      "updated": 1779795282582,
       "link": null,
       "locked": false,
       "points": [
@@ -535,20 +619,30 @@
           0
         ],
         [
-          200,
-          -232
+          259.7872340425532,
+          -165
         ]
       ],
       "lastCommittedPoint": null,
-      "startBinding": null,
-      "endBinding": null,
+      "startBinding": {
+        "elementId": "infra-helm",
+        "focus": 0,
+        "gap": 1,
+        "fixedPoint": null
+      },
+      "endBinding": {
+        "elementId": "infra-ing",
+        "focus": 0,
+        "gap": 1,
+        "fixedPoint": null
+      },
       "startArrowhead": null,
       "endArrowhead": "arrow"
     },
     {
       "id": "ia4",
       "type": "arrow",
-      "x": 607,
+      "x": 605,
       "y": 190,
       "width": 86,
       "height": 0,
@@ -570,7 +664,7 @@
       "versionNonce": 404,
       "isDeleted": false,
       "boundElements": [],
-      "updated": 1,
+      "updated": 1779795282582,
       "link": null,
       "locked": false,
       "points": [
@@ -579,13 +673,23 @@
           0
         ],
         [
-          86,
+          90,
           0
         ]
       ],
       "lastCommittedPoint": null,
-      "startBinding": null,
-      "endBinding": null,
+      "startBinding": {
+        "elementId": "infra-ing",
+        "focus": 0,
+        "gap": 1,
+        "fixedPoint": null
+      },
+      "endBinding": {
+        "elementId": "infra-web",
+        "focus": 0,
+        "gap": 1,
+        "fixedPoint": null
+      },
       "startArrowhead": null,
       "endArrowhead": "arrow"
     },
@@ -593,7 +697,7 @@
       "id": "ia5",
       "type": "arrow",
       "x": 780,
-      "y": 227,
+      "y": 225,
       "width": 0,
       "height": 56,
       "angle": 0,
@@ -614,7 +718,7 @@
       "versionNonce": 405,
       "isDeleted": false,
       "boundElements": [],
-      "updated": 1,
+      "updated": 1779795282582,
       "link": null,
       "locked": false,
       "points": [
@@ -624,20 +728,30 @@
         ],
         [
           0,
-          56
+          60
         ]
       ],
       "lastCommittedPoint": null,
-      "startBinding": null,
-      "endBinding": null,
+      "startBinding": {
+        "elementId": "infra-web",
+        "focus": 0,
+        "gap": 1,
+        "fixedPoint": null
+      },
+      "endBinding": {
+        "elementId": "infra-api",
+        "focus": 0,
+        "gap": 1,
+        "fixedPoint": null
+      },
       "startArrowhead": null,
       "endArrowhead": "arrow"
     },
     {
       "id": "ia6",
       "type": "arrow",
-      "x": 867,
-      "y": 320,
+      "x": 865,
+      "y": 346,
       "width": 50,
       "height": 0,
       "angle": 0,
@@ -658,7 +772,7 @@
       "versionNonce": 406,
       "isDeleted": false,
       "boundElements": [],
-      "updated": 1,
+      "updated": 1779795282582,
       "link": null,
       "locked": false,
       "points": [
@@ -667,21 +781,31 @@
           0
         ],
         [
-          50,
-          0
+          55,
+          16.823529411764696
         ]
       ],
       "lastCommittedPoint": null,
-      "startBinding": null,
-      "endBinding": null,
+      "startBinding": {
+        "elementId": "infra-api",
+        "focus": 0,
+        "gap": 1,
+        "fixedPoint": null
+      },
+      "endBinding": {
+        "elementId": "infra-deps",
+        "focus": 0,
+        "gap": 1,
+        "fixedPoint": null
+      },
       "startArrowhead": null,
       "endArrowhead": "arrow"
     },
     {
       "id": "ia7",
       "type": "arrow",
-      "x": 867,
-      "y": 450,
+      "x": 865,
+      "y": 424,
       "width": 50,
       "height": 0,
       "angle": 0,
@@ -702,7 +826,7 @@
       "versionNonce": 407,
       "isDeleted": false,
       "boundElements": [],
-      "updated": 1,
+      "updated": 1779795282582,
       "link": null,
       "locked": false,
       "points": [
@@ -711,13 +835,23 @@
           0
         ],
         [
-          50,
-          0
+          55,
+          -16.823529411764696
         ]
       ],
       "lastCommittedPoint": null,
-      "startBinding": null,
-      "endBinding": null,
+      "startBinding": {
+        "elementId": "infra-worker",
+        "focus": 0,
+        "gap": 1,
+        "fixedPoint": null
+      },
+      "endBinding": {
+        "elementId": "infra-deps",
+        "focus": 0,
+        "gap": 1,
+        "fixedPoint": null
+      },
       "startArrowhead": null,
       "endArrowhead": "arrow"
     },
@@ -746,7 +880,7 @@
       "versionNonce": 408,
       "isDeleted": false,
       "boundElements": [],
-      "updated": 1,
+      "updated": 1779795282582,
       "link": null,
       "locked": false,
       "points": [
@@ -755,13 +889,23 @@
           0
         ],
         [
-          52,
+          55,
           0
         ]
       ],
       "lastCommittedPoint": null,
-      "startBinding": null,
-      "endBinding": null,
+      "startBinding": {
+        "elementId": "infra-web",
+        "focus": 0,
+        "gap": 1,
+        "fixedPoint": null
+      },
+      "endBinding": {
+        "elementId": "infra-mon",
+        "focus": 0,
+        "gap": 1,
+        "fixedPoint": null
+      },
       "startArrowhead": null,
       "endArrowhead": "arrow"
     },

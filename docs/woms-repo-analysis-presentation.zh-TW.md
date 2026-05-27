@@ -4,9 +4,9 @@
 
 ## 交付範圍
 
-本文件是 WOMS 的 repo 分析與期末簡報內容建議，不直接產出 PPTX。簡報主線採用 `plan.md` 的方向：先說明使用者真正想完成什麼，再用操作流程圖描述使用方式，最後說明為了支撐這些 workflow，系統才需要 Web UI、Go API、Scheduler Worker、PostgreSQL、Redis、Kafka、Prometheus/Grafana、KEDA、Kubernetes、Helm、NGINX Ingress、GitHub Actions 與 Docker Hub。
+本文件是 WOMS 的 repo 分析與期末簡報內容建議。簡報主線採用 `../plan.md` 的方向：先說明使用者真正想完成什麼，再用操作流程圖描述使用方式，最後說明為了支撐這些 workflow，系統才需要 Web UI、Go API、Scheduler Worker、PostgreSQL、Redis、Kafka、Prometheus/Grafana、KEDA、Kubernetes、Helm、NGINX Ingress、GitHub Actions 與 Docker Hub。
 
-所有簡報圖都使用 Excalidraw source。Sales flow 以 [sales.excalidraw](sales.excalidraw) 為準；Scheduler flow 圖由簡報作者後續補上，本文件只保留文字 flow。其他圖檔包含 [application-architecture.excalidraw](application-architecture.excalidraw)、[infrastructure-architecture.excalidraw](infrastructure-architecture.excalidraw)、[monitoring-autoscaling.excalidraw](monitoring-autoscaling.excalidraw) 與 [deployment-flow.excalidraw](deployment-flow.excalidraw)。Repo evidence 則來自 `cmd`、`internal`、`web`、`db/migrations`、`.github/workflows`、`deploy/helm/woms`、`monitoring`、Dockerfiles、Compose、README、`go.mod` 與 `package.json`。
+所有簡報圖都使用 Excalidraw source。Sales flow 以 [sales.excalidraw](sales.excalidraw) 為準；Scheduler flow 以 [scheduler.excalidraw](scheduler.excalidraw) 為準；本文件只保留文字 flow。其他圖檔包含 [application-architecture.excalidraw](application-architecture.excalidraw)、[infrastructure-architecture.excalidraw](infrastructure-architecture.excalidraw)、[monitoring-autoscaling.excalidraw](monitoring-autoscaling.excalidraw) 與 [deployment-flow.excalidraw](deployment-flow.excalidraw)。Repo evidence 則來自 `cmd`、`internal`、`web`、`db/migrations`、`.github/workflows`、`deploy/helm/woms`、`monitoring`、Dockerfiles、Compose、README、`go.mod` 與 `package.json`。
 
 ## 需求與評分對齊
 
@@ -27,7 +27,7 @@
 
 ## Sales Operation Flow
 
-Sales flow 的權威來源是 [sales.excalidraw](sales.excalidraw)。流程重點不是 API 清單，而是 Sales 如何在建立訂單前先排除不可接受交期與可預期衝突。截圖時請直接開啟該 Excalidraw source。
+Sales flow 的來源是 [sales.excalidraw](sales.excalidraw)。流程重點不是 API 清單，而是 Sales 如何在建立訂單前先排除不可接受交期與可預期衝突。截圖時請直接開啟該 Excalidraw source。
 
 Repo evidence：
 
@@ -37,7 +37,7 @@ Repo evidence：
 
 ## Scheduler Operation Flow
 
-Scheduler flow 由現有 UI 與 API 推導。Scheduler 的重點是正式排程只接受 preview-backed job；這讓 conflict resolution、manual force reason、line revision 與 audit log 在進入 Kafka 前就被固定下來。Scheduler flow 圖依使用者要求先不產生，後續由簡報作者自行補上。
+Scheduler flow 的來源是 [scheduler.excalidraw](scheduler.excalidraw)。Scheduler 的重點是正式排程只接受 preview-backed job；這讓 conflict resolution、manual force reason、line revision 與 audit log 在進入 Kafka 前就被固定下來。
 
 Repo evidence：
 
@@ -218,20 +218,11 @@ Bullets:
 
 這一頁把資料邊界講清楚。PostgreSQL 是 source of truth，所有長期狀態都在這裡：orders、schedule previews、jobs、allocations 和 audit logs。Kafka 只負責傳遞排程任務，讓 API 不必在 request path 裡等待 worker 完成。Redis 的角色則比較小但很關鍵，它負責同產線排程 lock，必要時也能支援 token session revocation。這樣三者的責任是分開的：DB 管事實，Kafka 管工作流，Redis 管短期一致性控制。
 
-### Slide 10: Monitoring And Autoscaling
+### Slide 10-12: Monitoring And Autoscaling
 
-Bullets:
+可以直接考慮沿用 @Monitor.pptx 的內容。
 
-- API exposes Prometheus metrics at `/metrics`
-- Web pods expose NGINX request metrics through an exporter sidecar
-- KEDA scales web pods using per-pod NGINX requests per second
-- Grafana displays the same signal used by the HPA trigger
-
-講稿：
-
-這一頁要照目前 repo 實作講清楚：active autoscaling 是 web traffic HPA，不是 worker backlog。Web pod 裡有 NGINX exporter sidecar，Prometheus scrape 之後計算 per-pod request rate。KEDA 使用同一個 Prometheus query 來 scale web deployment，Grafana dashboard 也呈現同一個 signal。這代表 demo 時可以一邊打 Ingress 或 LoadBalancer traffic，一邊觀察 per-pod req/s、replica count 和 HPA 狀態。
-
-### Slide 11: Deployment Flow
+### Slide 13: Deployment Flow
 
 Bullets:
 
@@ -243,7 +234,7 @@ Bullets:
 
 這一頁講 deployment flow。開發是在 `feat/**` 分支，PR 進 `main` 前 CI 會跑 Go tests、web tests、Docker build、Helm render 和 HPA render verification。真正 publish Docker Hub 不會在 feature branch 發生，而是在 `main`、`release/**` 或 manual workflow。publish 完會把 Helm values 的 image tag 更新成 release tag，這樣 Kubernetes rollout 用的是明確版本，而不是模糊的本機 image。
 
-### Slide 12: Testing Strategy
+### Slide 14: Testing Strategy
 
 Bullets:
 
@@ -255,20 +246,17 @@ Bullets:
 
 這一頁把測試對回 Slide 4/5 的元件。Scheduler tests 確認 allocation、conflict、manual force 和 late completion；API tests 確認 JWT/RBAC、line scoping、preview-backed job、calendar、history 和 production flow；web tests 則處理 UI helper 的行為；Helm static tests 和 render scripts 確認 deployment contract。換句話說，測試不是只測函式，而是沿著使用者 workflow 和部署架構去覆蓋風險。
 
-### Slide 13: Demo Scenario
+### Slide 15: Demo 
 
 Bullets:
 
-- Sales creates and confirms a preview-backed pending order
-- Scheduler previews, accepts, and persists the schedule
-- Production status updates return to the calendar
-- Admin observes Grafana and web HPA during traffic load
+- 播影片而已
 
 講稿：
 
 Demo 建議走一條完整主線。先用 Sales 建立訂單，通過 due date validation 和 preview 後建立 pending order。接著切到 Scheduler，選取 pending order 產生 preview，接受後讓 Kafka worker 寫入 allocation。然後在 calendar 上看到排程結果，並演示開始生產或回報產量。最後切到 Admin 或 Grafana，用 web traffic demo 觀察 KEDA web HPA。這樣 demo 可以同時覆蓋需求、排程、資料一致性、部署和 observability。
 
-### Slide 14: Conclusion
+### Slide 15: Conclusion
 
 Bullets:
 
@@ -282,4 +270,4 @@ Bullets:
 
 ## Icon 與視覺建議
 
-Slide 中的技術 icon 建議使用官方或常見 brand asset：Go、PostgreSQL、Redis、Apache Kafka、Docker、Kubernetes、Helm、NGINX、KEDA、Prometheus、Grafana、GitHub Actions、Docker Hub。Slide 4/5 可以沿用手繪式 architecture 風格，但要把節點替換成 WOMS 真實元件；Slide 6-11 則沿用 Slide 4/5 的小型縮圖，並用紅框標示當頁 component。
+Slide 中的技術 icon 建議使用官方或常見 brand asset：Go、PostgreSQL、Redis、Apache Kafka、Docker、Kubernetes、Helm、NGINX、KEDA、Prometheus、Grafana、GitHub Actions、Docker Hub。我已經把所有照片都放在 docs/image/，你可以自己做使用 ，Slide 4/5 請貼上我們製作的 excalidraw 截圖，但要把節點替換成 WOMS 真實元件對應到的官方圖；每次切換至 Slide 6-13前，會新增一頁，類似回到 Slide 4或5 告訴評審我們現在要講哪一部分，並僅 Highlight 即將介紹的 Component。

@@ -185,10 +185,15 @@ test("API JWT secret and admin autoscaling status RBAC are wired", () => {
 });
 
 test("Ingress keeps login public while protecting API prefix", () => {
+  assert.match(values, /routeMode:\s+directApi/);
+  assert.match(values, /auth:[\s\S]*enabled:\s+true/);
   assert.match(ingress, /name:\s+\{\{ include "woms\.fullname" \. \}\}-public/);
   assert.match(ingress, /path:\s+\/api\/auth\/login[\s\S]*pathType:\s+Exact[\s\S]*name:\s+\{\{ include "woms\.fullname" \. \}\}-api/);
   assert.match(ingress, /name:\s+\{\{ include "woms\.fullname" \. \}\}-api-secure/);
   assert.match(ingress, /nginx\.ingress\.kubernetes\.io\/auth-url/);
+  assert.match(ingress, /nginx\.ingress\.kubernetes\.io\/auth-method:\s+"GET"/);
+  assert.match(ingress, /nginx\.ingress\.kubernetes\.io\/auth-response-headers:\s+"X-User-ID, X-User-Role, X-User-Line"/);
+  assert.doesNotMatch(ingress, /auth-cache/);
   assert.match(ingress, /path:\s+\/api[\s\S]*pathType:\s+Prefix/);
 });
 

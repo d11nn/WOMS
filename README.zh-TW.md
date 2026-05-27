@@ -353,7 +353,7 @@ http(s)://<ingress.host>/grafana
 
 使用 ingress path 時不需要額外對 Grafana port-forward。public ingress 會把 `/grafana` 送到 web service，再由 web NGINX container proxy 到內部 Grafana ClusterIP service。Chart 會依 `ingress.host`、`ingress.tls.enabled` 與 `monitoring.grafana.externalPath` 產生 `GF_SERVER_ROOT_URL`；正式環境若有外部 DNS、TLS terminator 或非預設路徑，可用 `monitoring.grafana.env.rootUrl` 覆寫。
 
-在 Helm/Kubernetes 中，web container 會把 `/api/` 代理到 `API_UPSTREAM`，chart 會設定為 `woms-woms-api:8080`，並把 `/grafana/` 代理到 `GRAFANA_UPSTREAM`，chart 會設定為 `woms-woms-grafana:3000`。Kubernetes NGINX template 會直接 render 這些 upstream，並使用 Kubernetes 寫入 Pod 的 resolver；Kubernetes 部署中不應使用 `127.0.0.11` 這類 Docker-only DNS。Docker Compose 會改掛載 `web/nginx.compose.conf.template`，讓本機 Compose 環境使用 Docker embedded resolver，並在 API 或 Grafana container 重建後重新解析 service。
+在 Helm/Kubernetes 中，Ingress 使用 `directApi` 路由：`/api/auth/login` 不經 edge auth、直接進 API service；受保護的 `/api` 會先經 NGINX Ingress `auth-url` 驗證 bearer token，再直接進 API service；`/` 與 `/grafana/` 則進 web service。web container 仍保留 `/api/` proxy，供 Docker Compose、直接存取 web Service、以及非 Ingress 環境使用；它也會把 `/grafana/` 代理到 `GRAFANA_UPSTREAM`，chart 會設定為 `woms-woms-grafana:3000`。Kubernetes NGINX template 會直接 render 這些 upstream，並使用 Kubernetes 寫入 Pod 的 resolver；Kubernetes 部署中不應使用 `127.0.0.11` 這類 Docker-only DNS。Docker Compose 會改掛載 `web/nginx.compose.conf.template`，讓本機 Compose 環境使用 Docker embedded resolver，並在 API 或 Grafana container 重建後重新解析 service。
 
 Helm 中的 Grafana anonymous access 已停用。當 `monitoring.grafana.admin.existingSecret` 為空時，chart 會建立 `woms-woms-grafana-admin` Secret 並產生密碼。正式環境應自行建立 Secret，並設定 `monitoring.grafana.admin.existingSecret`、`monitoring.grafana.admin.userKey` 與 `monitoring.grafana.admin.passwordKey`。使用者必須登入 Grafana 後才能觀察監控儀錶板。若使用預設產生的 Secret，可用 `kubectl get secret woms-woms-grafana-admin -n woms -o jsonpath='{.data.admin-password}' | base64 -d` 取出密碼。
 
@@ -361,7 +361,7 @@ Grafana 會在 `WOMS` folder provision 兩張 dashboard：`WOMS Monitoring` 保�
 
 ### GKE 完整部署與 NGINX Ingress 白名單
 
-GKE full overlay 會啟用 web/API/worker、chart-managed Kafka/Redis/PostgreSQL、透過 KEDA 與 Prometheus 進行的 web traffic autoscaling、Prometheus/Grafana，以及限制在 `140.113.0.0/16` 的 NGINX Ingress 入口。此流程不會部署 Gthulhu。這條路徑會刻意讓 public Ingress 只導到 web service；web container 再把 `/api/` 與 `/grafana/` 代理到叢集內部 API 與 Grafana Services。
+GKE full overlay 會啟用 web/API/worker、chart-managed Kafka/Redis/PostgreSQL、透過 KEDA 與 Prometheus 進行的 web traffic autoscaling、Prometheus/Grafana，以及限制在 `140.113.0.0/16` 的 NGINX Ingress 入口。此流程不會部署 Gthulhu。這條路徑使用 Ingress path splitting：`/` 與 `/grafana/` route 到 web service，`/api/auth/login` 保持公開供登入使用，受保護的 `/api` 則在 `auth-url` 驗證 bearer token 後直接 route 到 API service。Go API 仍是 JWT、session verification、claims 與 RBAC 的真正安全邊界。
 
 Ingress NGINX 已在 2026 年 3 月後停止維護。既有部署仍可運作，但長期正式環境應規劃遷移到仍維護中的 GKE-native Gateway 或 Cloud Armor 架構。
 
@@ -496,8 +496,8 @@ kubectl get clusterissuer
 
 ```bash
 export WOMS_TLS_SECRET="$(echo "${WOMS_HOST}" | tr '.' '-')-tls"
-export WOMS_JWT_SECRET="<strong-secret>"
-export GRAFANA_ADMIN_PASSWORD="<strong-password>"
+export WOMS_JWT_SECRET="$(openssl rand -base64 48)"
+export GRAFANA_ADMIN_PASSWORD="demo"
 
 kubectl create namespace woms --dry-run=client -o yaml | kubectl apply -f -
 ```
@@ -531,7 +531,10 @@ test "$(dig +short "${WOMS_HOST}" | tail -n 1)" = "${INGRESS_IP}"
 
 curl -I "https://${WOMS_HOST}/"
 curl -I "https://${WOMS_HOST}/grafana/"
-curl -I "https://${WOMS_HOST}/api/health"
+curl -i "https://${WOMS_HOST}/api/orders"
+curl -i "https://${WOMS_HOST}/api/auth/login" \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"demo"}'
 curl -kI "https://${INGRESS_IP}/" -H "Host: ${WOMS_HOST}"
 kubectl logs -n ingress-nginx deploy/ingress-nginx-controller --tail=100
 
@@ -551,7 +554,7 @@ kubectl describe hpa woms-woms-web-hpa -n woms
 kubectl get deploy,pod,svc -n woms
 ```
 
-來自 `140.113.0.0/16` 的請求應可進入應用程式或得到應用層 auth response；範圍外來源應收到 `403 Forbidden`。臨時免設定 DNS 測試時，可以用 `woms.${INGRESS_IP}.sslip.io` 指到目前的 load balancer IP；但本方案啟用 TLS，因此憑證必須涵蓋該 hostname，否則瀏覽器會回報憑證名稱不符。
+來自 `140.113.0.0/16` 的請求應可進入應用程式、公開登入端點，或從 `/api` Ingress/API 邊界得到 auth response；範圍外來源應收到 `403 Forbidden`。臨時免設定 DNS 測試時，可以用 `woms.${INGRESS_IP}.sslip.io` 指到目前的 load balancer IP；但本方案啟用 TLS，因此憑證必須涵蓋該 hostname，否則瀏覽器會回報憑證名稱不符。
 
 #### 完整關閉 GKE 部署
 
@@ -594,7 +597,7 @@ ssh -L 8081:127.0.0.1:8081 ubuntu@192.168.56.101
 
 ### Web Traffic HPA Demo
 
-WOMS 目前 active HPA 情境是 NGINX Ingress 或 LoadBalancer 導入 web pods 的流量。web NGINX container 在 `127.0.0.1` 暴露 `stub_status`，sidecar `nginx-prometheus-exporter` 提供 `/metrics`，Prometheus scrape web Service 的 `metrics` port，KEDA 再用同一條 Grafana 顯示的 per-pod NGINX request-rate query 擴縮 `Deployment/woms-woms-web`。
+WOMS 目前 active HPA 情境是 NGINX Ingress 或 LoadBalancer 導入 web pods 的流量。web NGINX container 在 `127.0.0.1` 暴露 `stub_status`，sidecar `nginx-prometheus-exporter` 提供 `/metrics`，Prometheus scrape web Service 的 `metrics` port，KEDA 再用同一條 Grafana 顯示的 per-pod NGINX request-rate query 擴縮 `Deployment/woms-woms-web`。啟用 direct API Ingress routing 後，這個 web HPA 訊號只反映 `/`、static assets 與 `/grafana/` 流量；直接進 API pods 的 `/api` 流量不會計入 web NGINX request metric。
 
 預設 active target：
 

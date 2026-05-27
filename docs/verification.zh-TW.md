@@ -99,7 +99,8 @@ kubectl get scaledobject woms-woms-web -n woms -o yaml
 期望：
 
 - 使用 NGINX Ingress 時，`woms-woms-web` Service 是 `ClusterIP`；非 Ingress 環境才明確設為 `LoadBalancer`。
-- `ingress.enabled=true` 時，`woms-woms-public` Ingress 會把設定的 host route 到 `woms-woms-web`。
+- `ingress.enabled=true` 時，`woms-woms-public` Ingress 會把 `/` 與 `/grafana/` 流量 route 到 `woms-woms-web`，並讓 exact `/api/auth/login` 公開進入 `woms-woms-api`。
+- `woms-woms-api-secure` Ingress 會把受保護的 `/api` 流量透過 NGINX Ingress `auth-url` 驗證後，直接 route 到 `woms-woms-api`。
 - `woms-woms-web` ScaledObject 指向 `Deployment/woms-woms-web`。
 - HPA 名稱是 `woms-woms-web-hpa`。
 - Trigger metric 是 `woms_web_nginx_requests_per_second_per_pod`。
@@ -123,6 +124,7 @@ Grafana：
 - 開啟 dashboard `WOMS web autoscaling`。
 - 確認 `Per-pod NGINX req/s` 在壓測期間上升。
 - 確認 `NGINX req/s by web pod` 在 scale-out 後顯示流量分散到多個 pods。
+- 直接進 API pods 的 `/api` 流量不預期會拉高 web NGINX request-rate metric。
 
 期望：
 

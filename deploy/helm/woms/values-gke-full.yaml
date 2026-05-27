@@ -5,7 +5,7 @@ ingress:
   tls:
     enabled: true
     secretName: woms-tls
-  routeMode: webProxy
+  routeMode: directApi
   annotations:
     acme.cert-manager.io/http01-ingress-class: "nginx"
     cert-manager.io/cluster-issuer: "letsencrypt-prod"

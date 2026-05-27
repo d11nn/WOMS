@@ -1,7 +1,11 @@
 {{- if .Values.ingress.enabled }}
-{{- $routeMode := default "webProxy" .Values.ingress.routeMode }}
-{{- if ne $routeMode "webProxy" }}
-{{- fail (printf "unsupported ingress.routeMode %q; use webProxy so /api and /grafana stay behind the web container proxy" $routeMode) }}
+{{- $routeMode := default "directApi" .Values.ingress.routeMode }}
+{{- if ne $routeMode "directApi" }}
+{{- fail (printf "unsupported ingress.routeMode %q; use directApi so /api is routed directly to the API service" $routeMode) }}
+{{- end }}
+{{- $apiAnnotations := dict }}
+{{- with .Values.ingress.annotations }}
+{{- $apiAnnotations = omit . "cert-manager.io/cluster-issuer" "acme.cert-manager.io/http01-ingress-class" }}
 {{- end }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -25,11 +29,53 @@ spec:
     - host: {{ .Values.ingress.host | quote }}
       http:
         paths:
+          - path: /api/auth/login
+            pathType: Exact
+            backend:
+              service:
+                name: {{ include "woms.fullname" . }}-api
+                port:
+                  name: http
           - path: /
             pathType: Prefix
             backend:
               service:
                 name: {{ include "woms.fullname" . }}-web
+                port:
+                  name: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  {{- if .Values.ingress.auth.enabled }}
+  name: {{ include "woms.fullname" . }}-api-secure
+  {{- else }}
+  name: {{ include "woms.fullname" . }}-api-open
+  {{- end }}
+  labels:
+    {{- include "woms.labels" . | nindent 4 }}
+  {{- if or $apiAnnotations .Values.ingress.auth.enabled }}
+  annotations:
+    {{- with $apiAnnotations }}
+    {{- tpl (toYaml .) $ | nindent 4 }}
+    {{- end }}
+    {{- if .Values.ingress.auth.enabled }}
+    nginx.ingress.kubernetes.io/auth-url: {{ printf "http://%s-api.%s.svc.cluster.local:8080/internal/auth/verify" (include "woms.fullname" .) .Release.Namespace | quote }}
+    nginx.ingress.kubernetes.io/auth-method: "GET"
+    nginx.ingress.kubernetes.io/auth-response-headers: "X-User-ID, X-User-Role, X-User-Line"
+    {{- end }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className | quote }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "woms.fullname" . }}-api
                 port:
                   name: http
 {{- end }}

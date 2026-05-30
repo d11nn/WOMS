@@ -96,6 +96,17 @@ test("order status badges stay on one line in scheduler and sales cards", () => 
   assert.match(styles, /\.tag\s*\{[\s\S]*flex:\s+0 0 auto;[\s\S]*white-space:\s+nowrap;/);
 });
 
+test("calendar preview highlights only outline days and colors conflicted orders", () => {
+  const styles = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
+  const previewHighlight = styles.slice(
+    styles.indexOf(".calendar-day.preview-highlight"),
+    styles.indexOf(".calendar-day.drop-target"),
+  );
+  assert.match(previewHighlight, /outline:\s+2px solid #f79009;/);
+  assert.doesNotMatch(previewHighlight, /background:/);
+  assert.match(styles, /\.calendar-item\.conflict-preview,\s*\.preview-item\.conflict-preview\s*\{[\s\S]*background:\s+#f7fdab;/);
+});
+
 test("sales draft preview calendar can switch pending draft and scheduled allocations", () => {
   const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
   const app = readFileSync(new URL("./app.js", import.meta.url), "utf8");
@@ -108,7 +119,8 @@ test("sales draft preview calendar can switch pending draft and scheduled alloca
   assert.match(app, /function previewCalendarAllocationsForMode\(mode, pendingAllocations\)/);
   assert.match(app, /return \[\.\.\.state\.calendarAllocations, \.\.\.pendingAllocations\]/);
   assert.match(app, /const previewAllocations = conflicts\.length > 0 && !isSalesDraft \? \[\] : allocations;/);
-  assert.match(app, /const markedPreviewAllocations = markMovedPreviewAllocations\(previewAllocations\)/);
+  assert.match(app, /markConflictedPreviewAllocations\(markMovedPreviewAllocations\(previewAllocations\), conflictedOrderIds\)/);
+  assert.match(app, /function markConflictedPreviewAllocations\(previewAllocations, conflictedOrderIds\)/);
   assert.match(app, /function salesDraftPendingPreviewAllocations\(markedPreviewAllocations, conflicts = \[\]\)/);
   assert.match(app, /const conflictedOrderIds = new Set\(conflicts\.map\(\(conflict\) => conflict\.orderId\)\.filter\(Boolean\)\)/);
   assert.match(app, /state\.pendingCalendarAllocations\.map\(\(allocation\) => \(\{ \.\.\.allocation, preview: true \}\)\)/);

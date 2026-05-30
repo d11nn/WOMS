@@ -1379,6 +1379,7 @@ test("sales draft conflict preview keeps baseline pending and scheduled calendar
     const pendingMarkup = renderedMarkup(document.getElementById("preview-calendar-grid"));
     assert.match(pendingMarkup, /ORD-PENDING/);
     assert.doesNotMatch(pendingMarkup, /PREVIEW-DRAFT/);
+    assert.match(document.getElementById("preview-page-list").innerHTML, /conflict-preview[\s\S]*PREVIEW-DRAFT/);
 
     const previewCalendarModes = document.getElementById("preview-calendar-mode").children;
     await document.getElementById("preview-calendar-mode").dispatchEvent({
@@ -1477,6 +1478,7 @@ test("sales draft conflict preview shows successful draft schedule and excludes 
     assert.match(pendingMarkup, /ORD-A[\s\S]*ORD-B[\s\S]*PREVIEW-DRAFT[\s\S]*ORD-C/);
     assert.doesNotMatch(pendingMarkup, /ORD-D/);
     assert.match(document.getElementById("preview-page-list").innerHTML, /ORD-D/);
+    assert.match(document.getElementById("preview-page-list").innerHTML, /conflict-preview[\s\S]*ORD-D/);
 
     const previewCalendarModes = document.getElementById("preview-calendar-mode").children;
     await document.getElementById("preview-calendar-mode").dispatchEvent({

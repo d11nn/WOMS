@@ -328,7 +328,7 @@ function buildDomFromIndex() {
   byId("reset-password-form").appendChild(byId("reset-password-username"));
   addNamedControl(byId("reset-password-form"), "input", "password");
 
-  for (const mode of ["pending", "scheduled", "all"]) {
+  for (const mode of ["all", "pending", "scheduled"]) {
     appendElement(byId("main-calendar-mode"), "button", { "data-calendar-mode": mode });
     appendElement(byId("preview-calendar-mode"), "button", { "data-preview-calendar-mode": mode });
   }
@@ -1578,7 +1578,7 @@ test("calendar modes and drag or drop scheduling target visible future dates", (
   const app = readFileSync(new URL("./app.js", import.meta.url), "utf8");
   const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
 
-  assert.match(html, /id="main-calendar-mode"[\s\S]*data-calendar-mode="pending"[\s\S]*data-calendar-mode="scheduled"[\s\S]*data-calendar-mode="all"/);
+  assert.match(html, /id="main-calendar-mode"[\s\S]*data-calendar-mode="all"[\s\S]*data-calendar-mode="pending"[\s\S]*data-calendar-mode="scheduled"/);
   assert.match(app, /document\.getElementById\("main-calendar-mode"\)\.addEventListener\("click"[\s\S]*state\.calendarMode = mode[\s\S]*renderCalendar\(\)/);
   assert.match(app, /function mainCalendarAllocations\(\)[\s\S]*state\.calendarMode === "pending"[\s\S]*state\.calendarMode === "all"/);
   assert.match(app, /cell\.addEventListener\("drop", async \(event\) => \{[\s\S]*await scheduleDroppedOrders\(orderIds, day\.key\)/);

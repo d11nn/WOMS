@@ -48,9 +48,9 @@ const state = {
   orders: [],
   calendarAllocations: [],
   pendingCalendarAllocations: [],
-  calendarMode: "scheduled",
+  calendarMode: "all",
   preview: null,
-  previewCalendarMode: "pending",
+  previewCalendarMode: "all",
   hpaPeak: null,
   hpaPeakPollingEnabled: false,
   productionOrderId: "",
@@ -1282,7 +1282,7 @@ function renderPreviewSummary() {
 
 function openPreviewDialog(preview) {
   state.preview = preview;
-  state.previewCalendarMode = "pending";
+  state.previewCalendarMode = "all";
   closeProductionReport();
   renderPreviewPage();
   renderPreviewSummary();
@@ -1307,7 +1307,7 @@ function closePreviewPage() {
     dialog?.removeAttribute("open");
   }
   state.preview = null;
-  state.previewCalendarMode = "pending";
+  state.previewCalendarMode = "all";
   renderPreviewSummary();
   renderCalendar();
 }

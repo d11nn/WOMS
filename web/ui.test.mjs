@@ -110,10 +110,9 @@ test("calendar preview highlights only outline days and colors conflicted orders
 test("sales draft preview calendar can switch pending draft and scheduled allocations", () => {
   const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
   const app = readFileSync(new URL("./app.js", import.meta.url), "utf8");
-  assert.match(html, /id="preview-calendar-mode"[\s\S]*data-preview-calendar-mode="pending"[\s\S]*待排程/);
-  assert.match(html, /data-preview-calendar-mode="scheduled"[\s\S]*已排程/);
-  assert.match(html, /data-preview-calendar-mode="all"[\s\S]*所有訂單/);
-  assert.match(app, /previewCalendarMode:\s+"pending"/);
+  assert.match(html, /id="preview-calendar-mode"[\s\S]*data-preview-calendar-mode="all"[\s\S]*所有訂單[\s\S]*data-preview-calendar-mode="pending"[\s\S]*待排程[\s\S]*data-preview-calendar-mode="scheduled"[\s\S]*已排程/);
+  assert.match(app, /previewCalendarMode:\s+"all"/);
+  assert.match(app, /state\.previewCalendarMode = "all"/);
   assert.match(app, /document\.getElementById\("preview-calendar-mode"\)\.addEventListener\("click"/);
   assert.match(app, /const isSalesDraft = state\.preview\?\.kind === "sales-draft"/);
   assert.match(app, /function previewCalendarAllocationsForMode\(mode, pendingAllocations\)/);
@@ -130,11 +129,9 @@ test("sales draft preview calendar can switch pending draft and scheduled alloca
 test("sales main calendar can switch pending scheduled and all allocations", () => {
   const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
   const app = readFileSync(new URL("./app.js", import.meta.url), "utf8");
-  assert.match(html, /id="main-calendar-mode"[\s\S]*data-calendar-mode="pending"[\s\S]*待排程/);
-  assert.match(html, /data-calendar-mode="scheduled"[\s\S]*已排程/);
-  assert.match(html, /data-calendar-mode="all"[\s\S]*所有訂單/);
+  assert.match(html, /id="main-calendar-mode"[\s\S]*data-calendar-mode="all"[\s\S]*所有訂單[\s\S]*data-calendar-mode="pending"[\s\S]*待排程[\s\S]*data-calendar-mode="scheduled"[\s\S]*已排程/);
   assert.match(app, /pendingCalendarAllocations:\s+\[\]/);
-  assert.match(app, /calendarMode:\s+"scheduled"/);
+  assert.match(app, /calendarMode:\s+"all"/);
   assert.match(app, /payload\.pendingAllocations/);
   assert.match(app, /function mainCalendarAllocations\(\)/);
   assert.match(app, /return \[\.\.\.state\.calendarAllocations, \.\.\.state\.pendingCalendarAllocations\]/);

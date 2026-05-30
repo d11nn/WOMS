@@ -1353,13 +1353,10 @@ function renderPreviewCalendar(allocations) {
   });
   const conflicts = state.preview?.conflicts ?? [];
   const resolutionOrderIds = state.preview?.request?.resolutionOrderIds ?? [];
-  const hasSalesDraftConflicts = isSalesDraft && conflicts.length > 0;
-  const previewAllocations = conflicts.length > 0 ? [] : allocations;
+  const previewAllocations = conflicts.length > 0 && !isSalesDraft ? [] : allocations;
   const markedPreviewAllocations = markMovedPreviewAllocations(previewAllocations);
   const movedFromAllocations = buildMovedFromAllocations(markedPreviewAllocations);
-  const pendingAllocations = hasSalesDraftConflicts
-    ? state.pendingCalendarAllocations.map((allocation) => ({ ...allocation, preview: true }))
-    : markedPreviewAllocations.map((allocation) => ({ ...allocation, preview: true }));
+  const pendingAllocations = salesDraftPendingPreviewAllocations(markedPreviewAllocations, conflicts);
   const visibleAllocations = isSalesDraft
     ? previewCalendarAllocationsForMode(mode, pendingAllocations)
     : markedPreviewAllocations;
@@ -1387,6 +1384,19 @@ function renderPreviewCalendar(allocations) {
     `;
     grid.appendChild(cell);
   }
+}
+
+function salesDraftPendingPreviewAllocations(markedPreviewAllocations, conflicts = []) {
+  const pendingAllocations = markedPreviewAllocations.map((allocation) => ({ ...allocation, preview: true }));
+  if (state.preview?.kind !== "sales-draft" || conflicts.length === 0) {
+    return pendingAllocations;
+  }
+  const conflictedOrderIds = new Set(conflicts.map((conflict) => conflict.orderId).filter(Boolean));
+  const successfulAllocations = pendingAllocations.filter((allocation) => !conflictedOrderIds.has(allocation.orderId));
+  if (successfulAllocations.length > 0) {
+    return successfulAllocations;
+  }
+  return state.pendingCalendarAllocations.map((allocation) => ({ ...allocation, preview: true }));
 }
 
 function markMovedPreviewAllocations(previewAllocations) {

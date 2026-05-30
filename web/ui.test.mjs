@@ -107,9 +107,10 @@ test("sales draft preview calendar can switch pending draft and scheduled alloca
   assert.match(app, /const isSalesDraft = state\.preview\?\.kind === "sales-draft"/);
   assert.match(app, /function previewCalendarAllocationsForMode\(mode, pendingAllocations\)/);
   assert.match(app, /return \[\.\.\.state\.calendarAllocations, \.\.\.pendingAllocations\]/);
-  assert.match(app, /const hasSalesDraftConflicts = isSalesDraft && conflicts\.length > 0;/);
-  assert.match(app, /const previewAllocations = conflicts\.length > 0 \? \[\] : allocations;/);
+  assert.match(app, /const previewAllocations = conflicts\.length > 0 && !isSalesDraft \? \[\] : allocations;/);
   assert.match(app, /const markedPreviewAllocations = markMovedPreviewAllocations\(previewAllocations\)/);
+  assert.match(app, /function salesDraftPendingPreviewAllocations\(markedPreviewAllocations, conflicts = \[\]\)/);
+  assert.match(app, /const conflictedOrderIds = new Set\(conflicts\.map\(\(conflict\) => conflict\.orderId\)\.filter\(Boolean\)\)/);
   assert.match(app, /state\.pendingCalendarAllocations\.map\(\(allocation\) => \(\{ \.\.\.allocation, preview: true \}\)\)/);
   assert.match(app, /markedPreviewAllocations\.map\(\(allocation\) => \(\{ \.\.\.allocation, preview: true \}\)\)/);
 });

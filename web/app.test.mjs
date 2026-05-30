@@ -1402,6 +1402,96 @@ test("sales draft conflict preview keeps baseline pending and scheduled calendar
   }
 });
 
+test("sales draft conflict preview shows successful draft schedule and excludes conflicted pending order", async () => {
+  const document = buildDomFromIndex();
+  const previewDate = dateKeyAfter(1);
+  const fetchImpl = async (path, options = {}) => {
+    if (path === "/api/auth/login") {
+      return jsonResponse({
+        token: "token-sales",
+        user: { id: "user-sales", username: "sales", role: "sales" },
+      });
+    }
+    if (path === "/api/lines") {
+      return jsonResponse({
+        lines: [{ id: "A", name: "Line A", capacityPerDay: 10000, timezone: "Asia/Taipei" }],
+      });
+    }
+    if (path === "/api/orders") {
+      return jsonResponse({
+        orders: [
+          { id: "ORD-A", customer: "A", lineId: "A", quantity: 2500, priority: "high", status: "待排程", dueDate: previewDate, createdBy: "user-sales" },
+          { id: "ORD-B", customer: "B", lineId: "A", quantity: 2500, priority: "high", status: "待排程", dueDate: previewDate, createdBy: "user-sales" },
+          { id: "ORD-C", customer: "C", lineId: "A", quantity: 2500, priority: "low", status: "待排程", dueDate: previewDate, createdBy: "user-sales" },
+          { id: "ORD-D", customer: "D", lineId: "A", quantity: 2500, priority: "low", status: "待排程", dueDate: previewDate, createdBy: "user-sales" },
+          { id: "ORD-SCHEDULED", customer: "Scheduled", lineId: "A", quantity: 1000, priority: "low", status: "已排程", dueDate: dateKeyAfter(4), createdBy: "user-sales" },
+        ],
+      });
+    }
+    if (String(path).startsWith("/api/schedules/calendar?")) {
+      return jsonResponse({
+        allocations: [
+          { orderId: "ORD-SCHEDULED", customer: "Scheduled", lineId: "A", date: dateKeyAfter(4), quantity: 1000, priority: "low", status: "已排程", dueDate: dateKeyAfter(4), createdAtTimestamp: 1772271700000 },
+        ],
+        pendingAllocations: [
+          { orderId: "ORD-A", customer: "A", lineId: "A", date: previewDate, quantity: 2500, priority: "high", status: "待排程", dueDate: previewDate, createdAtTimestamp: 1772271711000 },
+          { orderId: "ORD-B", customer: "B", lineId: "A", date: previewDate, quantity: 2500, priority: "high", status: "待排程", dueDate: previewDate, createdAtTimestamp: 1772271712000 },
+          { orderId: "ORD-C", customer: "C", lineId: "A", date: previewDate, quantity: 2500, priority: "low", status: "待排程", dueDate: previewDate, createdAtTimestamp: 1772271713000 },
+          { orderId: "ORD-D", customer: "D", lineId: "A", date: previewDate, quantity: 2500, priority: "low", status: "待排程", dueDate: previewDate, createdAtTimestamp: 1772271714000 },
+        ],
+      });
+    }
+    if (path === "/api/schedules/preview") {
+      assert.equal(options.method, "POST");
+      return jsonResponse({
+        previewId: "PREVIEW-DRAFT",
+        currentDate: dateKeyAfter(0),
+        allocations: [
+          { orderId: "ORD-A", customer: "A", lineId: "A", date: previewDate, quantity: 2500, priority: "high", status: "待排程", dueDate: previewDate, createdAtTimestamp: 1772271711000 },
+          { orderId: "ORD-B", customer: "B", lineId: "A", date: previewDate, quantity: 2500, priority: "high", status: "待排程", dueDate: previewDate, createdAtTimestamp: 1772271712000 },
+          { orderId: "PREVIEW-DRAFT", customer: "E", lineId: "A", date: previewDate, quantity: 2500, priority: "high", status: "待排程", dueDate: previewDate, createdAtTimestamp: 1772271715000 },
+          { orderId: "ORD-C", customer: "C", lineId: "A", date: previewDate, quantity: 2500, priority: "low", status: "待排程", dueDate: previewDate, createdAtTimestamp: 1772271713000 },
+        ],
+        conflicts: [
+          {
+            orderId: "ORD-D",
+            reason: "capacity cannot satisfy order before due date",
+            earliestFinishDate: `${dateKeyAfter(2)}T00:00:00Z`,
+            affectedOrderIds: [],
+          },
+        ],
+      });
+    }
+    throw new Error(`unexpected fetch ${path}`);
+  };
+  const restoreGlobals = installBrowserGlobalsWithFetch(document, fetchImpl);
+  try {
+    await import(appModuleUrl("sales-draft-conflict-successful-allocations"));
+
+    await document.getElementById("login-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+    await document.getElementById("order-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+
+    const pendingMarkup = renderedMarkup(document.getElementById("preview-calendar-grid"));
+    assert.match(pendingMarkup, /ORD-A[\s\S]*ORD-B[\s\S]*PREVIEW-DRAFT[\s\S]*ORD-C/);
+    assert.doesNotMatch(pendingMarkup, /ORD-D/);
+    assert.match(document.getElementById("preview-page-list").innerHTML, /ORD-D/);
+
+    const previewCalendarModes = document.getElementById("preview-calendar-mode").children;
+    await document.getElementById("preview-calendar-mode").dispatchEvent({
+      type: "click",
+      target: previewCalendarModes.find((button) => button.dataset.previewCalendarMode === "all"),
+    });
+    const allMarkup = renderedMarkup(document.getElementById("preview-calendar-grid"));
+    assert.match(allMarkup, /ORD-SCHEDULED/);
+    assert.match(allMarkup, /ORD-A[\s\S]*ORD-B[\s\S]*PREVIEW-DRAFT[\s\S]*ORD-C/);
+    assert.doesNotMatch(allMarkup, /ORD-D/);
+  } finally {
+    restoreGlobals();
+  }
+});
+
 test("scheduler bulk controls filter select preview reject cancel and schedule selected orders", () => {
   const app = readFileSync(new URL("./app.js", import.meta.url), "utf8");
   const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");

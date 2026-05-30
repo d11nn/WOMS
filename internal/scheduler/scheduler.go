@@ -13,13 +13,14 @@ const dateLayout = "2006-01-02"
 var ErrInvalidRequest = errors.New("invalid schedule request")
 
 type OrderInput struct {
-	ID       string
-	Customer string
-	LineID   string
-	Quantity int
-	Priority domain.Priority
-	Status   domain.OrderStatus
-	DueDate  time.Time
+	ID                 string
+	Customer           string
+	LineID             string
+	Quantity           int
+	Priority           domain.Priority
+	Status             domain.OrderStatus
+	DueDate            time.Time
+	CreatedAtTimestamp int64
 }
 
 type ExistingAllocation struct {
@@ -32,15 +33,17 @@ type ExistingAllocation struct {
 }
 
 type Allocation struct {
-	OrderID       string             `json:"orderId"`
-	SourceOrderID string             `json:"sourceOrderId,omitempty"`
-	Customer      string             `json:"customer,omitempty"`
-	LineID        string             `json:"lineId"`
-	Date          time.Time          `json:"date"`
-	Quantity      int                `json:"quantity"`
-	Priority      domain.Priority    `json:"priority"`
-	Status        domain.OrderStatus `json:"status,omitempty"`
-	Locked        bool               `json:"locked"`
+	OrderID            string             `json:"orderId"`
+	SourceOrderID      string             `json:"sourceOrderId,omitempty"`
+	Customer           string             `json:"customer,omitempty"`
+	LineID             string             `json:"lineId"`
+	Date               time.Time          `json:"date"`
+	Quantity           int                `json:"quantity"`
+	Priority           domain.Priority    `json:"priority"`
+	Status             domain.OrderStatus `json:"status,omitempty"`
+	Locked             bool               `json:"locked"`
+	DueDate            time.Time          `json:"dueDate,omitempty"`
+	CreatedAtTimestamp int64              `json:"createdAtTimestamp,omitempty"`
 }
 
 type Conflict struct {
@@ -102,6 +105,9 @@ func sortedOrders(input []OrderInput) []OrderInput {
 		if !orders[i].DueDate.Equal(orders[j].DueDate) {
 			return orders[i].DueDate.Before(orders[j].DueDate)
 		}
+		if orders[i].CreatedAtTimestamp != orders[j].CreatedAtTimestamp {
+			return orders[i].CreatedAtTimestamp < orders[j].CreatedAtTimestamp
+		}
 		return orders[i].ID < orders[j].ID
 	})
 	return orders
@@ -159,17 +165,18 @@ func planOrder(req Request, ledger *capacityLedger, order OrderInput, result *Re
 	day := start
 	due := truncateDate(order.DueDate)
 
-	for remaining > 0 {
-		if day.After(due) && !req.AllowLateCompletion {
-			recordLateCapacityConflict(lateCapacityConflict{
-				req:       req,
-				ledger:    *ledger,
-				order:     order,
-				result:    result,
-				start:     start,
-				day:       day,
-				due:       due,
-				remaining: remaining,
+			qty := min(remaining, available)
+			result.Allocations = append(result.Allocations, Allocation{
+				OrderID:            order.ID,
+				Customer:           order.Customer,
+				LineID:             req.LineID,
+				Date:               day,
+				Quantity:           qty,
+				Priority:           order.Priority,
+				Status:             order.Status,
+				Locked:             order.Priority == domain.PriorityHigh,
+				DueDate:            order.DueDate,
+				CreatedAtTimestamp: order.CreatedAtTimestamp,
 			})
 			break
 		}

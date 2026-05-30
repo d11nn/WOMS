@@ -70,6 +70,43 @@ func TestPlanUsesEarliestAvailableDatesBeforeDueDate(t *testing.T) {
 	}
 }
 
+func TestPlanOrdersEqualPriorityAndDueDateByOlderCreatedTimestamp(t *testing.T) {
+	result, err := Plan(Request{
+		LineID:         "A",
+		CapacityPerDay: 1000,
+		StartDate:      mustDate(t, "2026-05-01"),
+		Orders: []OrderInput{
+			{
+				ID:                 "ORD-B",
+				LineID:             "A",
+				Quantity:           1000,
+				Priority:           domain.PriorityLow,
+				DueDate:            mustDate(t, "2026-05-30"),
+				CreatedAtTimestamp: 1772271715000,
+			},
+			{
+				ID:                 "ORD-A",
+				LineID:             "A",
+				Quantity:           1000,
+				Priority:           domain.PriorityLow,
+				DueDate:            mustDate(t, "2026-05-30"),
+				CreatedAtTimestamp: 1772271713000,
+			},
+		},
+		AllowLateCompletion: true,
+	})
+	if err != nil {
+		t.Fatalf("Plan returned error: %v", err)
+	}
+
+	if len(result.Allocations) != 2 {
+		t.Fatalf("expected two allocations, got %+v", result.Allocations)
+	}
+	if result.Allocations[0].OrderID != "ORD-A" || result.Allocations[1].OrderID != "ORD-B" {
+		t.Fatalf("expected older created timestamp to sort first, got %+v", result.Allocations)
+	}
+}
+
 func TestPlanRespectsFutureRequestedStartWhenCurrentDateIsEarlier(t *testing.T) {
 	result, err := Plan(Request{
 		LineID:         "A",

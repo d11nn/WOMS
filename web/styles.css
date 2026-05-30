@@ -826,7 +826,6 @@ textarea {
 .calendar-day.preview-highlight {
   outline: 2px solid #f79009;
   outline-offset: -2px;
-  background: #fff8eb;
 }
 
 .calendar-day.drop-target {
@@ -970,6 +969,11 @@ button.calendar-item:focus-visible {
   border: 1px solid #f79009;
   box-shadow: 0 0 0 2px rgb(247 144 9 / 18%);
   background: #fffaeb;
+}
+
+.calendar-item.conflict-preview,
+.preview-item.conflict-preview {
+  background: #f7fdab;
 }
 
 .calendar-item-note {

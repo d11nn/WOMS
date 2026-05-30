@@ -48,9 +48,9 @@ const state = {
   orders: [],
   calendarAllocations: [],
   pendingCalendarAllocations: [],
-  calendarMode: "scheduled",
+  calendarMode: "all",
   preview: null,
-  previewCalendarMode: "pending",
+  previewCalendarMode: "all",
   hpaPeak: null,
   hpaPeakPollingEnabled: false,
   productionOrderId: "",
@@ -1302,7 +1302,7 @@ function renderPreviewSummary() {
 
 function openPreviewDialog(preview) {
   state.preview = preview;
-  state.previewCalendarMode = "pending";
+  state.previewCalendarMode = "all";
   closeProductionReport();
   renderPreviewPage();
   renderPreviewSummary();
@@ -1327,7 +1327,7 @@ function closePreviewPage() {
     dialog?.removeAttribute("open");
   }
   state.preview = null;
-  state.previewCalendarMode = "pending";
+  state.previewCalendarMode = "all";
   renderPreviewSummary();
   renderCalendar();
 }
@@ -1373,19 +1373,19 @@ function renderPreviewCalendar(allocations) {
   });
   const conflicts = state.preview?.conflicts ?? [];
   const resolutionOrderIds = state.preview?.request?.resolutionOrderIds ?? [];
-  const previewAllocations = conflicts.length > 0 ? [] : allocations;
-  const markedPreviewAllocations = markMovedPreviewAllocations(previewAllocations);
+  const conflictedOrderIds = new Set(conflicts.map((conflict) => conflict.orderId).filter(Boolean));
+  const previewAllocations = conflicts.length > 0 && !isSalesDraft ? [] : allocations;
+  const markedPreviewAllocations = markConflictedPreviewAllocations(markMovedPreviewAllocations(previewAllocations), conflictedOrderIds);
   const movedFromAllocations = buildMovedFromAllocations(markedPreviewAllocations);
-  const pendingAllocations = markedPreviewAllocations.map((allocation) => ({ ...allocation, preview: true }));
+  const pendingAllocations = salesDraftPendingPreviewAllocations(markedPreviewAllocations, conflicts);
   const visibleAllocations = isSalesDraft
     ? previewCalendarAllocationsForMode(mode, pendingAllocations)
     : markedPreviewAllocations;
   const calendarAllocations = isSalesDraft
     ? visibleAllocations
     : [...mergePreviewCalendarAllocations(markedPreviewAllocations, state.calendarAllocations, resolutionOrderIds), ...movedFromAllocations];
-  const previewMonth = firstPreviewDate(visibleAllocations) ?? firstPreviewDate(previewAllocations) ?? state.calendarDate;
-  const year = previewMonth.getUTCFullYear();
-  const monthIndex = previewMonth.getUTCMonth();
+  const year = state.calendarDate.getUTCFullYear();
+  const monthIndex = state.calendarDate.getUTCMonth();
   const groups = groupAllocationsByDate(calendarAllocations);
   const grid = document.getElementById("preview-calendar-grid");
   grid.innerHTML = "";
@@ -1394,6 +1394,7 @@ function renderPreviewCalendar(allocations) {
     const effectiveAllocations = dayAllocations.filter((allocation) => !allocation.movedFromPreview);
     const cell = document.createElement("div");
     cell.className = `calendar-day ${day.inMonth ? "" : "outside"} ${dayAllocations.some((item) => item.preview) ? "preview-highlight" : ""}`;
+    cell.dataset.date = day.key;
     cell.innerHTML = `
       <div class="calendar-day-number">
         <span>${day.date.getUTCDate()}</span>
@@ -1404,6 +1405,31 @@ function renderPreviewCalendar(allocations) {
     `;
     grid.appendChild(cell);
   }
+}
+
+function salesDraftPendingPreviewAllocations(markedPreviewAllocations, conflicts = []) {
+  const pendingAllocations = markedPreviewAllocations.map((allocation) => ({ ...allocation, preview: true }));
+  if (state.preview?.kind !== "sales-draft" || conflicts.length === 0) {
+    return pendingAllocations;
+  }
+  const conflictedOrderIds = new Set(conflicts.map((conflict) => conflict.orderId).filter(Boolean));
+  const successfulAllocations = pendingAllocations.filter((allocation) => !conflictedOrderIds.has(allocation.orderId));
+  if (successfulAllocations.length > 0) {
+    return successfulAllocations;
+  }
+  return state.pendingCalendarAllocations.map((allocation) => ({ ...allocation, preview: true }));
+}
+
+function markConflictedPreviewAllocations(previewAllocations, conflictedOrderIds) {
+  if (conflictedOrderIds.size === 0) {
+    return previewAllocations;
+  }
+  return previewAllocations.map((allocation) => {
+    if (!conflictedOrderIds.has(allocation.orderId)) {
+      return allocation;
+    }
+    return { ...allocation, conflictPreview: true };
+  });
 }
 
 function markMovedPreviewAllocations(previewAllocations) {
@@ -1508,7 +1534,7 @@ function renderConflictItem(conflict, index = 0, withAcknowledgement = false) {
       ? conflictExplanation(conflict)
       : "這張待排程訂單由於新訂單的影響，在目前開始日期與交期之間沒有足夠產能。需要提前開始、延後交期、拆單，或調整訂單數量。";
     return `
-      <div class="preview-item high">
+      <div class="preview-item high conflict-preview">
         <strong>${escapeHtml(conflict.orderId)}</strong>
         <span>${escapeHtml(explanation)}</span>
         <span>最早完成：${finishDate}。</span>
@@ -1516,7 +1542,7 @@ function renderConflictItem(conflict, index = 0, withAcknowledgement = false) {
     `;
   }
   return `
-    <div class="preview-item high">
+    <div class="preview-item high conflict-preview">
       <strong>${escapeHtml(conflict.orderId)}</strong>
       <span>${escapeHtml(conflictExplanation(conflict))}</span>
       <span>最早完成：${finishDate}。可在下方選取衝突訂單與可移動訂單，產生最早完成解法。</span>
@@ -1638,6 +1664,7 @@ function renderCalendarItem(allocation) {
   const movedFromClass = allocation.movedFromPreview ? "moved-from-preview" : "";
   const quantityChangedClass = allocation.quantityChangedPreview ? "quantity-changed-preview" : "";
   const childOrderClass = isNewChildScheduledAllocation(allocation) ? "child-order-preview" : "";
+  const conflictClass = allocation.conflictPreview ? "conflict-preview" : "";
   const attrs = actionable
     ? `type="button" data-calendar-order-id="${escapeHtml(allocation.orderId)}" data-calendar-date="${dateOnly(allocation.date)}"`
     : "";
@@ -1645,7 +1672,7 @@ function renderCalendarItem(allocation) {
   const quantityNote = allocation.quantityChangedPreview ? "<span class=\"calendar-item-note\">數量調整</span>" : "";
   const childNote = isNewChildScheduledAllocation(allocation) ? "<span class=\"calendar-item-note\">子訂單</span>" : "";
   return `
-    <${tag} class="calendar-item ${priorityClass(allocation.priority)} ${allocation.preview ? "preview-item-inline" : ""} ${movedClass} ${movedFromClass} ${quantityChangedClass} ${childOrderClass}" ${attrs}>
+    <${tag} class="calendar-item ${priorityClass(allocation.priority)} ${allocation.preview ? "preview-item-inline" : ""} ${movedClass} ${movedFromClass} ${quantityChangedClass} ${childOrderClass} ${conflictClass}" ${attrs}>
       <strong>${escapeHtml(allocation.orderId)}</strong>
       <span>${escapeHtml(allocation.customer ?? "Preview")} · ${calendarDisplayQuantity(allocation).toLocaleString()} 片</span>
       <span>${priorityLabel(allocation.priority)} · ${escapeHtml(allocation.status ?? "試排")}</span>
@@ -2307,13 +2334,6 @@ function canScheduleOnDate(dateKey) {
 
 function conflictsCanBeManuallyForced(conflicts) {
   return conflicts.every((conflict) => conflict.reason === "existing allocations require manual review or reschedule");
-}
-
-function firstPreviewDate(allocations) {
-  if (!allocations.length) {
-    return null;
-  }
-  return new Date(allocations[0].date);
 }
 
 function dateOnly(value) {

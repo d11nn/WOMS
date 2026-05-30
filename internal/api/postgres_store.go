@@ -794,7 +794,7 @@ func (s *PostgresStore) calendarAllocationsFromRows(lineID string, window calend
 		JOIN orders o ON o.id = a.order_id
 		WHERE a.line_id = $1 AND a.allocation_date >= $2 AND a.allocation_date < $3
 		ORDER BY a.allocation_date, CASE WHEN a.priority = 'high' THEN 0 ELSE 1 END, o.due_date, o.created_at, a.order_id
-	`, lineID, calendarStart, calendarEnd)
+	`, lineID, window.Start, window.End)
 	if err != nil {
 		return nil, err
 	}
@@ -804,7 +804,7 @@ func (s *PostgresStore) calendarAllocationsFromRows(lineID string, window calend
 		var allocation calendarAllocation
 		var createdAt time.Time
 		if err := rows.Scan(&allocation.OrderID, &allocation.Customer, &allocation.LineID, &allocation.Date, &allocation.Quantity, &allocation.CompletedQuantity, &allocation.Priority, &allocation.Status, &allocation.Locked, &allocation.DueDate, &createdAt); err != nil {
-			return calendarResponse{}, err
+			return nil, err
 		}
 		allocation.CreatedAtTimestamp = unixMilliseconds(createdAt)
 		allocations = append(allocations, allocation)
@@ -816,25 +816,9 @@ func (s *PostgresStore) postgresPendingBacklogCalendarAllocations(line domain.Pr
 	if claims.Role != domain.RoleSales {
 		return []calendarAllocation{}, nil
 	}
-	sortCalendarAllocations(allocations)
-	pendingAllocations := []calendarAllocation{}
-	if claims.Role == domain.RoleSales {
-		pendingInputs, err := s.pendingOrderInputs(lineID, nil)
-		if err != nil {
-			return calendarResponse{}, err
-		}
-		existing, err := s.existingAllocations(lineID, nil)
-		if err != nil {
-			return calendarResponse{}, err
-		}
-		currentDate, err := currentDateInLineTimezone(line, nowUTC())
-		if err != nil {
-			return calendarResponse{}, err
-		}
-		pendingAllocations, err = pendingBacklogCalendarAllocations(line, pendingInputs, existing, currentDate, calendarStart, calendarEnd)
-		if err != nil {
-			return calendarResponse{}, err
-		}
+	pendingInputs, err := s.pendingOrderInputs(line.ID, nil)
+	if err != nil {
+		return nil, err
 	}
 	existing, err := s.existingAllocations(line.ID, nil)
 	if err != nil {

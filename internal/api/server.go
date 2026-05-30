@@ -1742,48 +1742,60 @@ func (s *MemoryStore) persistedCalendarAllocationsLocked(lineID string, window c
 		if allocationDate.Before(window.Start) || !allocationDate.Before(window.End) {
 			continue
 		}
-		order := s.orders[allocation.OrderID]
-		status := allocation.Status
-		if status == "" {
-			status = order.Status
-		}
-		completedQuantity := 0
-		if status == domain.StatusCompleted {
-			completedQuantity = order.Quantity
-		}
-		allocations = append(allocations, calendarAllocation{
-			OrderID:            allocation.OrderID,
-			Customer:           order.Customer,
-			LineID:             allocation.LineID,
-			Date:               allocationDate,
-			Quantity:           allocation.Quantity,
-			CompletedQuantity:  completedQuantity,
-			Priority:           allocation.Priority,
-			Status:             status,
-			Locked:             allocation.Locked,
-			DueDate:            order.DueDate,
-			CreatedAtTimestamp: unixMilliseconds(order.CreatedAt),
-		})
+		allocations = append(allocations, s.calendarAllocationFromSchedule(allocation, allocationDate))
 	}
 	sortCalendarAllocations(allocations)
+	return allocations
+}
 
-	pendingAllocations := []calendarAllocation{}
-	if claims.Role == domain.RoleSales {
-		pendingInputs := []scheduler.OrderInput{}
-		for _, order := range s.orders {
-			if order.LineID != lineID || order.Status != domain.StatusPending {
-				continue
-			}
-			pendingInputs = append(pendingInputs, scheduler.OrderInput{
-				ID:                 order.ID,
-				Customer:           order.Customer,
-				LineID:             order.LineID,
-				Quantity:           order.Quantity,
-				Priority:           order.Priority,
-				Status:             order.Status,
-				DueDate:            order.DueDate,
-				CreatedAtTimestamp: unixMilliseconds(order.CreatedAt),
-			})
+func (s *MemoryStore) calendarAllocationFromSchedule(allocation domain.ScheduleAllocation, allocationDate time.Time) calendarAllocation {
+	order := s.orders[allocation.OrderID]
+	status := allocation.Status
+	if status == "" {
+		status = order.Status
+	}
+	completedQuantity := 0
+	if status == domain.StatusCompleted {
+		completedQuantity = order.Quantity
+	}
+	return calendarAllocation{
+		OrderID:            allocation.OrderID,
+		Customer:           order.Customer,
+		LineID:             allocation.LineID,
+		Date:               allocationDate,
+		Quantity:           allocation.Quantity,
+		CompletedQuantity:  completedQuantity,
+		Priority:           allocation.Priority,
+		Status:             status,
+		Locked:             allocation.Locked,
+		DueDate:            order.DueDate,
+		CreatedAtTimestamp: unixMilliseconds(order.CreatedAt),
+	}
+}
+
+func (s *MemoryStore) salesPendingBacklogCalendarAllocationsLocked(line domain.ProductionLine, window calendarWindow, claims auth.Claims) ([]calendarAllocation, error) {
+	if claims.Role != domain.RoleSales {
+		return []calendarAllocation{}, nil
+	}
+	currentDate, err := currentDateInLineTimezone(line, nowUTC())
+	if err != nil {
+		return nil, err
+	}
+	return pendingBacklogCalendarAllocations(
+		line,
+		s.pendingOrderInputsForLineLocked(line.ID),
+		s.existingAllocationsForLineLocked(line.ID),
+		currentDate,
+		window.Start,
+		window.End,
+	)
+}
+
+func (s *MemoryStore) pendingOrderInputsForLineLocked(lineID string) []scheduler.OrderInput {
+	inputs := []scheduler.OrderInput{}
+	for _, order := range s.orders {
+		if order.LineID == lineID && order.Status == domain.StatusPending {
+			inputs = append(inputs, orderInputFromOrder(order))
 		}
 	}
 	return inputs
@@ -1804,15 +1816,6 @@ func (s *MemoryStore) existingAllocationsForLineLocked(lineID string) []schedule
 		}
 	}
 	return existing
-}
-
-func sortCalendarAllocations(allocations []calendarAllocation) {
-	sort.Slice(allocations, func(i, j int) bool {
-		if !allocations[i].Date.Equal(allocations[j].Date) {
-			return allocations[i].Date.Before(allocations[j].Date)
-		}
-		return allocations[i].OrderID < allocations[j].OrderID
-	})
 }
 
 func pendingBacklogCalendarAllocations(line domain.ProductionLine, pendingInputs []scheduler.OrderInput, existing []scheduler.ExistingAllocation, currentDate, calendarStart, calendarEnd time.Time) ([]calendarAllocation, error) {
@@ -2197,13 +2200,14 @@ func (s *MemoryStore) draftOrderInputsLocked(lineID string, currentDate time.Tim
 		return nil, err
 	}
 	inputs := []scheduler.OrderInput{{
-		ID:       previewDraftOrderID,
-		Customer: strings.TrimSpace(draft.Customer),
-		LineID:   draft.LineID,
-		Quantity: draft.Quantity,
-		Priority: draft.Priority,
-		Status:   domain.StatusPending,
-		DueDate:  dueDate,
+		ID:                 previewDraftOrderID,
+		Customer:           strings.TrimSpace(draft.Customer),
+		LineID:             draft.LineID,
+		Quantity:           draft.Quantity,
+		Priority:           draft.Priority,
+		Status:             domain.StatusPending,
+		DueDate:            dueDate,
+		CreatedAtTimestamp: unixMilliseconds(nowUTC()),
 	}}
 	for _, order := range s.orders {
 		if order.LineID == lineID && order.Status == domain.StatusPending {
@@ -2223,60 +2227,28 @@ func (s *MemoryStore) selectedOrderInputsLocked(lineID string, req scheduleReque
 		if order.LineID != lineID {
 			continue
 		}
-		inputs = append(inputs, scheduler.OrderInput{
-			ID:                 previewDraftOrderID,
-			Customer:           strings.TrimSpace(draft.Customer),
-			LineID:             draft.LineID,
-			Quantity:           draft.Quantity,
-			Priority:           draft.Priority,
-			Status:             domain.StatusPending,
-			DueDate:            dueDate,
-			CreatedAtTimestamp: unixMilliseconds(nowUTC()),
-		})
-		// Sales draft previews account for the pending backlog as capacity usage
-		// and return those pending preview allocations for the preview dialog only.
-		// Scheduler previews/jobs still use the non-draft branch, so formal scheduling
-		// keeps excluding unrelated pending orders from daily capacity.
-		for _, order := range s.orders {
-			if order.LineID != lineID || order.Status != domain.StatusPending {
+		if order.Status == domain.StatusPending {
+			if len(selected) > 0 && !selected[order.ID] {
 				continue
 			}
-			inputs = append(inputs, scheduler.OrderInput{
-				ID:                 order.ID,
-				Customer:           order.Customer,
-				LineID:             order.LineID,
-				Quantity:           order.Quantity,
-				Priority:           order.Priority,
-				Status:             order.Status,
-				DueDate:            order.DueDate,
-				CreatedAtTimestamp: unixMilliseconds(order.CreatedAt),
-			})
+		} else if !slicesContains(req.ResolutionOrderIDs, order.ID) {
+			continue
 		}
 		inputs = append(inputs, orderInputFromOrder(order))
 	}
-	if req.DraftOrder == nil {
-		for _, order := range s.orders {
-			if order.LineID != lineID {
-				continue
-			}
-			if order.Status == domain.StatusPending {
-				if len(selected) > 0 && !selected[order.ID] {
-					continue
-				}
-			} else if !slicesContains(req.ResolutionOrderIDs, order.ID) {
-				continue
-			}
-			inputs = append(inputs, scheduler.OrderInput{
-				ID:                 order.ID,
-				Customer:           order.Customer,
-				LineID:             order.LineID,
-				Quantity:           order.Quantity,
-				Priority:           order.Priority,
-				Status:             order.Status,
-				DueDate:            order.DueDate,
-				CreatedAtTimestamp: unixMilliseconds(order.CreatedAt),
-			})
-		}
+	return inputs
+}
+
+func orderInputFromOrder(order domain.Order) scheduler.OrderInput {
+	return scheduler.OrderInput{
+		ID:                 order.ID,
+		Customer:           order.Customer,
+		LineID:             order.LineID,
+		Quantity:           order.Quantity,
+		Priority:           order.Priority,
+		Status:             order.Status,
+		DueDate:            order.DueDate,
+		CreatedAtTimestamp: unixMilliseconds(order.CreatedAt),
 	}
 }
 

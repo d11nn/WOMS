@@ -165,18 +165,17 @@ func planOrder(req Request, ledger *capacityLedger, order OrderInput, result *Re
 	day := start
 	due := truncateDate(order.DueDate)
 
-			qty := min(remaining, available)
-			result.Allocations = append(result.Allocations, Allocation{
-				OrderID:            order.ID,
-				Customer:           order.Customer,
-				LineID:             req.LineID,
-				Date:               day,
-				Quantity:           qty,
-				Priority:           order.Priority,
-				Status:             order.Status,
-				Locked:             order.Priority == domain.PriorityHigh,
-				DueDate:            order.DueDate,
-				CreatedAtTimestamp: order.CreatedAtTimestamp,
+	for remaining > 0 {
+		if day.After(due) && !req.AllowLateCompletion {
+			recordLateCapacityConflict(lateCapacityConflict{
+				req:       req,
+				ledger:    *ledger,
+				order:     order,
+				result:    result,
+				start:     start,
+				day:       day,
+				due:       due,
+				remaining: remaining,
 			})
 			break
 		}
@@ -189,14 +188,16 @@ func planOrder(req Request, ledger *capacityLedger, order OrderInput, result *Re
 
 		qty := min(remaining, available)
 		result.Allocations = append(result.Allocations, Allocation{
-			OrderID:  order.ID,
-			Customer: order.Customer,
-			LineID:   req.LineID,
-			Date:     day,
-			Quantity: qty,
-			Priority: order.Priority,
-			Status:   order.Status,
-			Locked:   order.Priority == domain.PriorityHigh,
+			OrderID:            order.ID,
+			Customer:           order.Customer,
+			LineID:             req.LineID,
+			Date:               day,
+			Quantity:           qty,
+			Priority:           order.Priority,
+			Status:             order.Status,
+			Locked:             order.Priority == domain.PriorityHigh,
+			DueDate:            order.DueDate,
+			CreatedAtTimestamp: order.CreatedAtTimestamp,
 		})
 		ledger.newUsed[dateKey(day)] += qty
 		remaining -= qty

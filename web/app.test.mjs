@@ -385,6 +385,11 @@ function installBrowserGlobalsWithFetch(document, fetchImpl, initialStorage = {}
     HTMLElement: MiniElement,
     HTMLDialogElement: MiniElement,
     CSS: { escape: (value) => String(value).replaceAll('"', '\\"') },
+    confirm: window.confirm,
+    setInterval: window.setInterval,
+    clearInterval: window.clearInterval,
+    setTimeout: window.setTimeout,
+    clearTimeout: window.clearTimeout,
   };
   for (const [key, value] of Object.entries(globals)) {
     previous.set(key, globalThis[key]);

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 )
 
 // ────────────────────────────────────────────────────────────────────
@@ -56,10 +57,10 @@ func TestCustomCountersIncrement(t *testing.T) {
 	Register()
 
 	// Reset counters for this test by gathering baseline.
-	before := gatherGuageValue(t, "woms_current_online_user_count")
+	before := gatherGaugeValue(t, "woms_current_online_user_count")
 	CurrentOnlineUserCount.Inc()
 	CurrentOnlineUserCount.Inc()
-	after := gatherGuageValue(t, "woms_current_online_user_count")
+	after := gatherGaugeValue(t, "woms_current_online_user_count")
 
 	delta := after - before
 	if delta != 2 {
@@ -119,18 +120,16 @@ func TestRegistrySupportsNewMetricTypes(t *testing.T) {
 // Helpers
 // ────────────────────────────────────────────────────────────────────
 
-func gatherGuageValue(t *testing.T, name string) float64 {
+func gatherGaugeValue(t *testing.T, name string) float64 {
 	t.Helper()
-	families, err := Registry.Gather()
-	if err != nil {
-		t.Fatalf("gather failed: %v", err)
+	family := findMetricFamily(gatherMetricFamilies(t), name)
+	if family == nil {
+		return 0
 	}
-	for _, family := range families {
-		if family.GetName() == name {
-			metrics := family.GetMetric()
-			if len(metrics) > 0 && metrics[0].GetGauge() != nil {
-				return metrics[0].GetGauge().GetValue()
-			}
+
+	for _, metric := range family.GetMetric() {
+		if metric.GetGauge() != nil {
+			return metric.GetGauge().GetValue()
 		}
 	}
 	return 0
@@ -138,33 +137,62 @@ func gatherGuageValue(t *testing.T, name string) float64 {
 
 func gatherLabeledCounterValue(t *testing.T, name string, labels map[string]string) float64 {
 	t.Helper()
+	family := findMetricFamily(gatherMetricFamilies(t), name)
+	if family == nil {
+		return 0
+	}
+
+	for _, metric := range family.GetMetric() {
+		if !metricMatchesLabels(metric, labels) {
+			continue
+		}
+		if value, ok := counterValue(metric); ok {
+			return value
+		}
+	}
+	return 0
+}
+
+func gatherMetricFamilies(t *testing.T) []*dto.MetricFamily {
+	t.Helper()
 	families, err := Registry.Gather()
 	if err != nil {
 		t.Fatalf("gather failed: %v", err)
 	}
+	return families
+}
+
+func findMetricFamily(families []*dto.MetricFamily, name string) *dto.MetricFamily {
 	for _, family := range families {
-		if family.GetName() != name {
-			continue
-		}
-		for _, metric := range family.GetMetric() {
-			match := true
-			for k, v := range labels {
-				found := false
-				for _, lp := range metric.GetLabel() {
-					if lp.GetName() == k && lp.GetValue() == v {
-						found = true
-						break
-					}
-				}
-				if !found {
-					match = false
-					break
-				}
-			}
-			if match && metric.GetCounter() != nil {
-				return metric.GetCounter().GetValue()
-			}
+		if family.GetName() == name {
+			return family
 		}
 	}
-	return 0
+	return nil
+}
+
+func metricMatchesLabels(metric *dto.Metric, labels map[string]string) bool {
+	for name, value := range labels {
+		if !metricHasLabel(metric, name, value) {
+			return false
+		}
+	}
+	return true
+}
+
+func metricHasLabel(metric *dto.Metric, name, value string) bool {
+	for _, label := range metric.GetLabel() {
+		if label.GetName() == name && label.GetValue() == value {
+			return true
+		}
+	}
+	return false
+}
+
+func counterValue(metric *dto.Metric) (float64, bool) {
+	counter := metric.GetCounter()
+	if counter == nil {
+		return 0, false
+	}
+	return counter.GetValue(), true
 }

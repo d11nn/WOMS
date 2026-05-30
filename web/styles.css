@@ -772,12 +772,6 @@ textarea {
   margin-bottom: 12px;
 }
 
-.calendar-controls {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
 .calendar-controls strong {
   min-width: 90px;
   text-align: center;

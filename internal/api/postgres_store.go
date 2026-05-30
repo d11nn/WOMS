@@ -18,6 +18,10 @@ import (
 	"github.com/lib/pq"
 )
 
+const userIdPrefix = "AUD-USER-"
+const resolutionOrdersMsg = "resolution orders must be low-priority scheduled orders without locked or completed allocations"
+const bumpProductionLineRevisionSQL = "UPDATE production_lines SET schedule_revision = schedule_revision + 1 WHERE id = $1"
+
 type PostgresStore struct {
 	*MemoryStore
 	db *sql.DB
@@ -120,7 +124,7 @@ func (s *PostgresStore) CreateUser(req createUserRequest, actorID string) (domai
 	_, _ = s.db.Exec(`
 		INSERT INTO audit_logs (id, actor_id, action, resource, reason, created_at)
 		VALUES ($1, $2, 'user.create', $3, $4, NOW())
-	`, auditID("AUD-USER-"+user.ID), actorID, user.ID, string(req.Role)+" "+req.LineID)
+	`, auditID(userIdPrefix+user.ID), actorID, user.ID, string(req.Role)+" "+req.LineID)
 	return user, nil
 }
 
@@ -221,7 +225,7 @@ func (s *PostgresStore) CreateOrder(req createOrderRequest, actorID string) (dom
 	`, order.ID, order.Customer, order.LineID, order.Quantity, order.Priority, order.Status, order.DueDate, order.Note, order.CreatedBy, now); err != nil {
 		return domain.Order{}, err
 	}
-	if _, err := tx.Exec("UPDATE production_lines SET schedule_revision = schedule_revision + 1 WHERE id = $1", order.LineID); err != nil {
+	if _, err := tx.Exec(bumpProductionLineRevisionSQL, order.LineID); err != nil {
 		return domain.Order{}, err
 	}
 	if _, err := tx.Exec(`
@@ -241,23 +245,14 @@ func (s *PostgresStore) UpdateOrderDueDate(id string, req updateOrderRequest, cl
 	if err != nil {
 		return domain.Order{}, err
 	}
-	if claims.Role == domain.RoleScheduler && order.LineID != claims.LineID {
-		return domain.Order{}, errors.New("cannot update another production line")
-	}
-	if claims.Role == domain.RoleSales && order.CreatedBy != claims.Subject {
-		return domain.Order{}, errors.New("sales can update only their own orders")
-	}
-	if order.Status != domain.StatusPending && order.Status != domain.StatusRejected {
-		return domain.Order{}, errors.New("only pending or rejected orders can change order details")
-	}
 	if strings.TrimSpace(req.Note) != "" {
 		return domain.Order{}, errors.New("note cannot be updated after order creation")
 	}
-	if req.Quantity != 0 {
-		if req.Quantity < 25 || req.Quantity > 2500 {
-			return domain.Order{}, errors.New("quantity must be between 25 and 2500")
-		}
-		order.Quantity = req.Quantity
+	if err := canUpdateOrderDetails(order, claims); err != nil {
+		return domain.Order{}, err
+	}
+	if err := applyOptionalQuantity(&order, req.Quantity); err != nil {
+		return domain.Order{}, err
 	}
 	if req.DueDate != "" {
 		line, err := s.productionLine(order.LineID)
@@ -268,11 +263,9 @@ func (s *PostgresStore) UpdateOrderDueDate(id string, req updateOrderRequest, cl
 		if err != nil {
 			return domain.Order{}, err
 		}
-		dueDate, err := validateFutureDueDate(req.DueDate, currentDate)
-		if err != nil {
+		if err := applyOptionalDueDate(&order, req.DueDate, currentDate); err != nil {
 			return domain.Order{}, err
 		}
-		order.DueDate = dueDate
 	}
 	order.UpdatedAt = time.Now().UTC()
 	if err := s.updateOrderAndRevision(order, claims.Subject, "order.update_due_date", req.DueDate); err != nil {
@@ -298,11 +291,8 @@ func (s *PostgresStore) RejectOrders(req rejectOrdersRequest, claims auth.Claims
 		if err != nil {
 			return rejectOrdersResponse{}, err
 		}
-		if claims.Role == domain.RoleScheduler && order.LineID != claims.LineID {
-			return rejectOrdersResponse{}, errors.New("cannot reject another production line")
-		}
-		if order.Status != domain.StatusPending {
-			return rejectOrdersResponse{}, errors.New("only pending orders can be rejected")
+		if err := canRejectOrder(order, claims); err != nil {
+			return rejectOrdersResponse{}, err
 		}
 		now := time.Now().UTC()
 		order.Status = domain.StatusRejected
@@ -332,11 +322,8 @@ func (s *PostgresStore) ResubmitOrder(req resubmitOrderRequest, claims auth.Clai
 	if strings.TrimSpace(req.Note) != "" {
 		return domain.Order{}, errors.New("note cannot be updated after order creation")
 	}
-	if req.Quantity != 0 {
-		if req.Quantity < 25 || req.Quantity > 2500 {
-			return domain.Order{}, errors.New("quantity must be between 25 and 2500")
-		}
-		order.Quantity = req.Quantity
+	if err := applyOptionalQuantity(&order, req.Quantity); err != nil {
+		return domain.Order{}, err
 	}
 	if req.DueDate != "" {
 		line, err := s.productionLine(order.LineID)
@@ -347,16 +334,12 @@ func (s *PostgresStore) ResubmitOrder(req resubmitOrderRequest, claims auth.Clai
 		if err != nil {
 			return domain.Order{}, err
 		}
-		dueDate, err := validateFutureDueDate(req.DueDate, currentDate)
-		if err != nil {
+		if err := applyOptionalDueDate(&order, req.DueDate, currentDate); err != nil {
 			return domain.Order{}, err
 		}
-		order.DueDate = dueDate
 	}
 	order.Status = domain.StatusPending
-	order.RejectionReason = ""
-	order.RejectedBy = ""
-	order.RejectedAt = time.Time{}
+	resetRejectedState(&order)
 	order.UpdatedAt = time.Now().UTC()
 	if err := s.updateOrderAndRevision(order, claims.Subject, "order.resubmit", ""); err != nil {
 		return domain.Order{}, err
@@ -430,7 +413,7 @@ func (s *PostgresStore) CreateDemoConflictOrders(req demoConflictRequest, claims
 		}
 		orders = append(orders, order)
 	}
-	if _, err := tx.Exec("UPDATE production_lines SET schedule_revision = schedule_revision + 1 WHERE id = $1", lineID); err != nil {
+	if _, err := tx.Exec(bumpProductionLineRevisionSQL, lineID); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -463,19 +446,8 @@ func (s *PostgresStore) CancelOrders(req cancelOrdersRequest, claims auth.Claims
 			result.SkippedOrderIDs = append(result.SkippedOrderIDs, id)
 			continue
 		}
-		if claims.Role == domain.RoleSales {
-			if order.CreatedBy != claims.Subject {
-				return cancelOrdersResponse{}, errors.New("sales can cancel only their own orders")
-			}
-			if !canSalesCancelStatus(order.Status) {
-				return cancelOrdersResponse{}, errors.New("sales can cancel only pending or rejected orders")
-			}
-		}
-		if claims.Role == domain.RoleScheduler && order.LineID != claims.LineID {
-			return cancelOrdersResponse{}, errors.New("cannot cancel another production line")
-		}
-		if order.Status == domain.StatusInProgress || order.Status == domain.StatusCompleted {
-			return cancelOrdersResponse{}, errors.New("cannot cancel in-progress or completed orders")
+		if err := canCancelOrder(order, claims); err != nil {
+			return cancelOrdersResponse{}, err
 		}
 		if _, err := tx.Exec("DELETE FROM schedule_allocations WHERE order_id = $1", id); err != nil {
 			return cancelOrdersResponse{}, err
@@ -490,7 +462,7 @@ func (s *PostgresStore) CancelOrders(req cancelOrdersRequest, claims auth.Claims
 		result.CancelledOrderIDs = append(result.CancelledOrderIDs, id)
 	}
 	for lineID := range revisions {
-		if _, err := tx.Exec("UPDATE production_lines SET schedule_revision = schedule_revision + 1 WHERE id = $1", lineID); err != nil {
+		if _, err := tx.Exec(bumpProductionLineRevisionSQL, lineID); err != nil {
 			return cancelOrdersResponse{}, err
 		}
 	}
@@ -515,7 +487,7 @@ func (s *PostgresStore) AssignUser(req assignUserRequest, actorID string) (domai
 		RETURNING id, username, password_hash, role, COALESCE(line_id, ''), disabled
 	`, req.Username, req.Role, req.LineID).Scan(&user.ID, &user.Username, &user.PasswordHash, &user.Role, &user.LineID, &user.Disabled)
 	if errors.Is(err, sql.ErrNoRows) {
-		return domain.User{}, errors.New("user not found")
+		return domain.User{}, errors.New(notFoundMsg)
 	}
 	if err != nil {
 		return domain.User{}, err
@@ -523,7 +495,7 @@ func (s *PostgresStore) AssignUser(req assignUserRequest, actorID string) (domai
 	_, _ = s.db.Exec(`
 		INSERT INTO audit_logs (id, actor_id, action, resource, reason, created_at)
 		VALUES ($1, $2, 'user.assign', $3, $4, NOW())
-	`, auditID("AUD-USER-"+user.ID), actorID, user.ID, string(req.Role)+" "+req.LineID)
+	`, auditID(userIdPrefix+user.ID), actorID, user.ID, string(req.Role)+" "+req.LineID)
 	return user, nil
 }
 
@@ -539,7 +511,7 @@ func (s *PostgresStore) ResetUserPassword(req resetUserPasswordRequest, actorID 
 		RETURNING id, username, password_hash, role, COALESCE(line_id, ''), disabled
 	`, strings.TrimSpace(req.Username), passwordHash).Scan(&user.ID, &user.Username, &user.PasswordHash, &user.Role, &user.LineID, &user.Disabled)
 	if errors.Is(err, sql.ErrNoRows) {
-		return domain.User{}, errors.New("user not found")
+		return domain.User{}, errors.New(notFoundMsg)
 	}
 	if err != nil {
 		return domain.User{}, err
@@ -547,7 +519,7 @@ func (s *PostgresStore) ResetUserPassword(req resetUserPasswordRequest, actorID 
 	_, _ = s.db.Exec(`
 		INSERT INTO audit_logs (id, actor_id, action, resource, reason, created_at)
 		VALUES ($1, $2, 'user.reset_password', $3, '', NOW())
-	`, auditID("AUD-USER-"+user.ID), actorID, user.ID)
+	`, auditID(userIdPrefix+user.ID), actorID, user.ID)
 	return user, nil
 }
 
@@ -559,25 +531,20 @@ func (s *PostgresStore) DeleteUser(username, actorID string) (domain.User, error
 		FROM users WHERE username = $1
 	`, username).Scan(&user.ID, &user.Username, &user.PasswordHash, &user.Role, &user.LineID, &user.Disabled)
 	if errors.Is(err, sql.ErrNoRows) {
-		return domain.User{}, errors.New("user not found")
+		return domain.User{}, errors.New(notFoundMsg)
 	}
 	if err != nil {
 		return domain.User{}, err
 	}
-	var references int
-	if err := s.db.QueryRow(`
-		SELECT
-			(SELECT COUNT(*) FROM orders WHERE created_by = $1 OR rejected_by = $1) +
-			(SELECT COUNT(*) FROM audit_logs WHERE actor_id = $1) +
-			(SELECT COUNT(*) FROM schedule_previews WHERE actor_id = $1)
-	`, user.ID).Scan(&references); err != nil {
+	referenced, err := s.postgresUserHasReferences(user.ID)
+	if err != nil {
 		return domain.User{}, err
 	}
-	if references == 0 && actorID != user.ID {
+	if !referenced && actorID != user.ID {
 		if _, err := s.db.Exec(`
 			INSERT INTO audit_logs (id, actor_id, action, resource, reason, created_at)
 			VALUES ($1, $2, 'user.delete', $3, '', NOW())
-		`, auditID("AUD-USER-"+user.ID), actorID, user.ID); err != nil {
+		`, auditID(userIdPrefix+user.ID), actorID, user.ID); err != nil {
 			return domain.User{}, err
 		}
 		if _, err := s.db.Exec("DELETE FROM users WHERE id = $1", user.ID); err != nil {
@@ -599,8 +566,41 @@ func (s *PostgresStore) DeleteUser(username, actorID string) (domain.User, error
 	_, _ = s.db.Exec(`
 		INSERT INTO audit_logs (id, actor_id, action, resource, reason, created_at)
 		VALUES ($1, $2, 'user.disable', $3, '', NOW())
-	`, auditID("AUD-USER-"+user.ID), actorID, user.ID)
+	`, auditID(userIdPrefix+user.ID), actorID, user.ID)
 	return user, nil
+}
+
+func (s *PostgresStore) postgresUserHasReferences(userID string) (bool, error) {
+	var references int
+	if err := s.db.QueryRow(`
+		SELECT
+			(SELECT COUNT(*) FROM orders WHERE created_by = $1 OR rejected_by = $1) +
+			(SELECT COUNT(*) FROM audit_logs WHERE actor_id = $1) +
+			(SELECT COUNT(*) FROM schedule_previews WHERE actor_id = $1)
+	`, userID).Scan(&references); err != nil {
+		return false, err
+	}
+	return references > 0, nil
+}
+
+func (s *PostgresStore) postgresUserHasOrderReferences(userID string) (bool, error) {
+	return postgresHasReference(s.db, "SELECT COUNT(*) FROM orders WHERE created_by = $1 OR rejected_by = $1", userID)
+}
+
+func (s *PostgresStore) postgresUserHasAuditReferences(userID string) (bool, error) {
+	return postgresHasReference(s.db, "SELECT COUNT(*) FROM audit_logs WHERE actor_id = $1", userID)
+}
+
+func (s *PostgresStore) postgresUserHasPreviewReferences(userID string) (bool, error) {
+	return postgresHasReference(s.db, "SELECT COUNT(*) FROM schedule_previews WHERE actor_id = $1", userID)
+}
+
+func postgresHasReference(db *sql.DB, query, userID string) (bool, error) {
+	var references int
+	if err := db.QueryRow(query, userID).Scan(&references); err != nil {
+		return false, err
+	}
+	return references > 0, nil
 }
 
 func (s *PostgresStore) applyMigrations(seedDemo bool) error {
@@ -742,37 +742,61 @@ func (s *PostgresStore) PreviewSchedule(req scheduleRequest, claims auth.Claims)
 }
 
 func (s *PostgresStore) ScheduleCalendar(lineID, month string, claims auth.Claims) (calendarResponse, error) {
+	lineID, line, err := s.resolvePostgresCalendarLine(lineID, claims)
+	if err != nil {
+		return calendarResponse{}, err
+	}
+	window, err := parsePostgresCalendarWindow(month)
+	if err != nil {
+		return calendarResponse{}, err
+	}
+	allocations, err := s.calendarAllocationsFromRows(lineID, window)
+	if err != nil {
+		return calendarResponse{}, err
+	}
+	pendingAllocations, err := s.postgresPendingBacklogCalendarAllocations(line, window, claims)
+	if err != nil {
+		return calendarResponse{}, err
+	}
+	return calendarResponse{LineID: lineID, Timezone: line.Timezone, Month: window.Month, Allocations: allocations, PendingAllocations: pendingAllocations}, nil
+}
+
+func (s *PostgresStore) resolvePostgresCalendarLine(lineID string, claims auth.Claims) (string, domain.ProductionLine, error) {
 	if lineID == "" && claims.Role == domain.RoleScheduler {
 		lineID = claims.LineID
 	}
 	if lineID == "" {
-		return calendarResponse{}, errors.New("lineId is required")
+		return "", domain.ProductionLine{}, errors.New("lineId is required")
 	}
 	if claims.Role == domain.RoleScheduler && claims.LineID != lineID {
-		return calendarResponse{}, errors.New("cannot access another production line")
+		return "", domain.ProductionLine{}, errors.New("cannot access another production line")
 	}
 	line, err := s.productionLine(lineID)
-	if err != nil {
-		return calendarResponse{}, err
-	}
+	return lineID, line, err
+}
+
+func parsePostgresCalendarWindow(month string) (calendarWindow, error) {
 	if month == "" {
 		month = time.Now().UTC().Format("2006-01")
 	}
 	monthStart, err := time.Parse("2006-01", month)
 	if err != nil {
-		return calendarResponse{}, errors.New("month must use YYYY-MM")
+		return calendarWindow{}, errors.New("month must use YYYY-MM")
 	}
-	calendarStart := monthStart.AddDate(0, 0, -int(monthStart.Weekday()))
-	calendarEnd := calendarStart.AddDate(0, 0, 42)
+	start := monthStart.AddDate(0, 0, -int(monthStart.Weekday()))
+	return calendarWindow{Month: month, Start: start, End: start.AddDate(0, 0, 42)}, nil
+}
+
+func (s *PostgresStore) calendarAllocationsFromRows(lineID string, window calendarWindow) ([]calendarAllocation, error) {
 	rows, err := s.db.Query(`
 		SELECT a.order_id, o.customer, a.line_id, a.allocation_date, a.quantity, CASE WHEN COALESCE(a.status, o.status) = '已完成' THEN o.quantity ELSE 0 END, a.priority, COALESCE(a.status, o.status), a.locked, o.due_date, o.created_at
 		FROM schedule_allocations a
 		JOIN orders o ON o.id = a.order_id
 		WHERE a.line_id = $1 AND a.allocation_date >= $2 AND a.allocation_date < $3
 		ORDER BY a.allocation_date, CASE WHEN a.priority = 'high' THEN 0 ELSE 1 END, o.due_date, o.created_at, a.order_id
-	`, lineID, calendarStart, calendarEnd)
+	`, lineID, window.Start, window.End)
 	if err != nil {
-		return calendarResponse{}, err
+		return nil, err
 	}
 	defer rows.Close()
 	allocations := []calendarAllocation{}
@@ -780,35 +804,31 @@ func (s *PostgresStore) ScheduleCalendar(lineID, month string, claims auth.Claim
 		var allocation calendarAllocation
 		var createdAt time.Time
 		if err := rows.Scan(&allocation.OrderID, &allocation.Customer, &allocation.LineID, &allocation.Date, &allocation.Quantity, &allocation.CompletedQuantity, &allocation.Priority, &allocation.Status, &allocation.Locked, &allocation.DueDate, &createdAt); err != nil {
-			return calendarResponse{}, err
+			return nil, err
 		}
 		allocation.CreatedAtTimestamp = unixMilliseconds(createdAt)
 		allocations = append(allocations, allocation)
 	}
-	if err := rows.Err(); err != nil {
-		return calendarResponse{}, err
+	return allocations, rows.Err()
+}
+
+func (s *PostgresStore) postgresPendingBacklogCalendarAllocations(line domain.ProductionLine, window calendarWindow, claims auth.Claims) ([]calendarAllocation, error) {
+	if claims.Role != domain.RoleSales {
+		return []calendarAllocation{}, nil
 	}
-	sortCalendarAllocations(allocations)
-	pendingAllocations := []calendarAllocation{}
-	if claims.Role == domain.RoleSales {
-		pendingInputs, err := s.pendingOrderInputs(lineID, nil)
-		if err != nil {
-			return calendarResponse{}, err
-		}
-		existing, err := s.existingAllocations(lineID, nil)
-		if err != nil {
-			return calendarResponse{}, err
-		}
-		currentDate, err := currentDateInLineTimezone(line, nowUTC())
-		if err != nil {
-			return calendarResponse{}, err
-		}
-		pendingAllocations, err = pendingBacklogCalendarAllocations(line, pendingInputs, existing, currentDate, calendarStart, calendarEnd)
-		if err != nil {
-			return calendarResponse{}, err
-		}
+	pendingInputs, err := s.pendingOrderInputs(line.ID, nil)
+	if err != nil {
+		return nil, err
 	}
-	return calendarResponse{LineID: lineID, Timezone: line.Timezone, Month: month, Allocations: allocations, PendingAllocations: pendingAllocations}, nil
+	existing, err := s.existingAllocations(line.ID, nil)
+	if err != nil {
+		return nil, err
+	}
+	currentDate, err := currentDateInLineTimezone(line, nowUTC())
+	if err != nil {
+		return nil, err
+	}
+	return pendingBacklogCalendarAllocations(line, pendingInputs, existing, currentDate, window.Start, window.End)
 }
 
 func (s *PostgresStore) ConfirmPreviewOrder(previewID string, claims auth.Claims) (domain.Order, error) {
@@ -923,7 +943,7 @@ func (s *PostgresStore) StartProduction(req productionStartRequest, claims auth.
 	if _, err := tx.Exec("UPDATE schedule_allocations SET locked = TRUE, status = '生產中' WHERE order_id = $1 AND COALESCE(status, '已排程') <> '已完成'", order.ID); err != nil {
 		return domain.Order{}, err
 	}
-	if _, err := tx.Exec("UPDATE production_lines SET schedule_revision = schedule_revision + 1 WHERE id = $1", order.LineID); err != nil {
+	if _, err := tx.Exec(bumpProductionLineRevisionSQL, order.LineID); err != nil {
 		return domain.Order{}, err
 	}
 	if _, err := insertAuditTx(tx, claims.Subject, "production.start", order.ID, ""); err != nil {
@@ -1027,7 +1047,7 @@ func (s *PostgresStore) ConfirmProduction(req productionConfirmRequest, claims a
 			return productionConfirmResponse{}, err
 		}
 	}
-	if _, err := tx.Exec("UPDATE production_lines SET schedule_revision = schedule_revision + 1 WHERE id = $1", order.LineID); err != nil {
+	if _, err := tx.Exec(bumpProductionLineRevisionSQL, order.LineID); err != nil {
 		return productionConfirmResponse{}, err
 	}
 	if _, err := insertAuditTx(tx, claims.Subject, action, order.ID, reason); err != nil {
@@ -1368,32 +1388,13 @@ type previewFromDBResult struct {
 }
 
 func (s *PostgresStore) previewFromDB(req scheduleRequest, claims auth.Claims) (scheduler.Result, previewFromDBResult, error) {
-	lineID := scheduleLineID(req, claims)
-	if lineID == "" {
-		return scheduler.Result{}, previewFromDBResult{}, errors.New("lineId is required")
-	}
-	if claims.Role == domain.RoleScheduler && claims.LineID != lineID {
-		return scheduler.Result{}, previewFromDBResult{}, errors.New("cannot access another production line")
-	}
-	line, err := s.productionLine(lineID)
+	lineID, line, err := s.resolvePreviewLineFromDB(req, claims)
 	if err != nil {
 		return scheduler.Result{}, previewFromDBResult{}, err
 	}
-	startDate := time.Now().UTC()
-	if req.StartDate != "" {
-		parsed, err := time.Parse(dateLayout, req.StartDate)
-		if err != nil {
-			return scheduler.Result{}, previewFromDBResult{}, errors.New("startDate must use YYYY-MM-DD")
-		}
-		startDate = parsed
-	}
-	currentDate := time.Time{}
-	if req.CurrentDate != "" {
-		parsed, err := time.Parse(dateLayout, req.CurrentDate)
-		if err != nil {
-			return scheduler.Result{}, previewFromDBResult{}, errors.New("currentDate must use YYYY-MM-DD")
-		}
-		currentDate = parsed
+	currentDate, startDate, err := parsePreviewDatesFromDB(req)
+	if err != nil {
+		return scheduler.Result{}, previewFromDBResult{}, err
 	}
 	inputs, err := s.schedulerInputs(req, claims, lineID)
 	if err != nil {
@@ -1403,7 +1404,7 @@ func (s *PostgresStore) previewFromDB(req scheduleRequest, claims auth.Claims) (
 	if err != nil {
 		return scheduler.Result{}, previewFromDBResult{}, err
 	}
-	planRequest := scheduler.Request{
+	result, err := runSchedulePlan(scheduler.Request{
 		LineID:              lineID,
 		CapacityPerDay:      line.CapacityPerDay,
 		StartDate:           startDate,
@@ -1413,22 +1414,9 @@ func (s *PostgresStore) previewFromDB(req scheduleRequest, claims auth.Claims) (
 		ManualForce:         req.ManualForce,
 		ForceReason:         req.Reason,
 		AllowLateCompletion: req.AllowLateCompletion,
-	}
-	var baseline scheduler.Result
-	if req.DraftOrder != nil {
-		baselineRequest := planRequest
-		baselineRequest.Orders = withoutDraftOrderInputs(inputs)
-		baseline, err = scheduler.Plan(baselineRequest)
-		if err != nil {
-			return scheduler.Result{}, previewFromDBResult{}, err
-		}
-	}
-	result, err := scheduler.Plan(planRequest)
+	}, req.DraftOrder != nil)
 	if err != nil {
 		return scheduler.Result{}, previewFromDBResult{}, err
-	}
-	if req.DraftOrder != nil {
-		result = salesDraftPreviewResult(result, baseline)
 	}
 	if req.DraftOrder == nil {
 		result.Allocations, err = s.splitAllocationOrderIDsDB(result.Allocations)
@@ -1436,16 +1424,52 @@ func (s *PostgresStore) previewFromDB(req scheduleRequest, claims auth.Claims) (
 			return scheduler.Result{}, previewFromDBResult{}, err
 		}
 	}
-	normalized := normalizedPreviewRequest(req)
+	return result, previewRecordFromDBResult(result, req, claims, lineID, line.ScheduleRevision), nil
+}
+
+func (s *PostgresStore) resolvePreviewLineFromDB(req scheduleRequest, claims auth.Claims) (string, domain.ProductionLine, error) {
+	lineID := scheduleLineID(req, claims)
+	if lineID == "" {
+		return "", domain.ProductionLine{}, errors.New("lineId is required")
+	}
+	if claims.Role == domain.RoleScheduler && claims.LineID != lineID {
+		return "", domain.ProductionLine{}, errors.New("cannot access another production line")
+	}
+	line, err := s.productionLine(lineID)
+	return lineID, line, err
+}
+
+func parsePreviewDatesFromDB(req scheduleRequest) (time.Time, time.Time, error) {
+	startDate := time.Now().UTC()
+	if req.StartDate != "" {
+		parsed, err := time.Parse(dateLayout, req.StartDate)
+		if err != nil {
+			return time.Time{}, time.Time{}, errors.New("startDate must use YYYY-MM-DD")
+		}
+		startDate = parsed
+	}
+	currentDate := time.Time{}
+	if req.CurrentDate != "" {
+		parsed, err := time.Parse(dateLayout, req.CurrentDate)
+		if err != nil {
+			return time.Time{}, time.Time{}, errors.New("currentDate must use YYYY-MM-DD")
+		}
+		currentDate = parsed
+	}
+	return currentDate, startDate, nil
+}
+
+func previewRecordFromDBResult(result scheduler.Result, req scheduleRequest, claims auth.Claims, lineID string, lineRevision int64) previewFromDBResult {
 	now := time.Now().UTC()
 	id := "PREVIEW-" + strconv.FormatInt(now.UnixNano(), 10)
-	return result, previewFromDBResult{
+	normalized := normalizedPreviewRequest(req)
+	return previewFromDBResult{
 		ID: id,
 		record: previewRecord{
 			ActorID:      claims.Subject,
 			ActorRole:    claims.Role,
 			LineID:       lineID,
-			LineRevision: line.ScheduleRevision,
+			LineRevision: lineRevision,
 			Request:      normalized,
 			RequestHash:  requestHash(normalized),
 			DraftOrder:   req.DraftOrder,
@@ -1453,7 +1477,7 @@ func (s *PostgresStore) previewFromDB(req scheduleRequest, claims auth.Claims) (
 			Conflicts:    append([]scheduler.Conflict(nil), result.Conflicts...),
 			CreatedAt:    now,
 		},
-	}, nil
+	}
 }
 
 func (s *PostgresStore) productionLine(lineID string) (domain.ProductionLine, error) {
@@ -1598,10 +1622,10 @@ func (s *PostgresStore) resolutionOrderInputs(resolutionOrderIDs []string, lineI
 			return nil, errors.New("resolution order line must match preview line")
 		}
 		if status != string(domain.StatusScheduled) {
-			return nil, errors.New("resolution orders must be low-priority scheduled orders without locked or completed allocations")
+			return nil, errors.New(resolutionOrdersMsg)
 		}
 		if priority != domain.PriorityLow {
-			return nil, errors.New("resolution orders must be low-priority scheduled orders without locked or completed allocations")
+			return nil, errors.New(resolutionOrdersMsg)
 		}
 		if err := s.ensureResolutionOrderMovable(id); err != nil {
 			return nil, err
@@ -1649,14 +1673,14 @@ func (s *PostgresStore) ensureResolutionOrderMovable(orderID string) error {
 		}
 		hasAllocation = true
 		if locked || status == string(domain.StatusInProgress) || status == string(domain.StatusCompleted) {
-			return errors.New("resolution orders must be low-priority scheduled orders without locked or completed allocations")
+			return errors.New(resolutionOrdersMsg)
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
 	if !hasAllocation {
-		return errors.New("resolution orders must be low-priority scheduled orders without locked or completed allocations")
+		return errors.New(resolutionOrdersMsg)
 	}
 	return nil
 }
@@ -1744,7 +1768,7 @@ func (s *PostgresStore) updateOrderAndRevision(order domain.Order, actorID, acti
 	`, order.ID, order.Quantity, order.Status, order.DueDate, order.RejectionReason, order.RejectedBy, nullableTime(order.RejectedAt), order.UpdatedAt); err != nil {
 		return err
 	}
-	if _, err := tx.Exec("UPDATE production_lines SET schedule_revision = schedule_revision + 1 WHERE id = $1", order.LineID); err != nil {
+	if _, err := tx.Exec(bumpProductionLineRevisionSQL, order.LineID); err != nil {
 		return err
 	}
 	if _, err := insertAuditTx(tx, actorID, action, order.ID, reason); err != nil {

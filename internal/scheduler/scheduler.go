@@ -72,12 +72,32 @@ type Result struct {
 }
 
 func Plan(req Request) (Result, error) {
-	if req.LineID == "" || req.CapacityPerDay <= 0 || req.StartDate.IsZero() {
-		return Result{}, ErrInvalidRequest
+	if err := validateRequest(req); err != nil {
+		return Result{}, err
 	}
 
-	start := scheduleStartDate(req.StartDate, req.CurrentDate)
-	orders := append([]OrderInput(nil), req.Orders...)
+	orders := sortedOrders(req.Orders)
+	ledger := buildCapacityLedger(req)
+
+	var result Result
+	for _, order := range orders {
+		if err := planOrder(req, &ledger, order, &result); err != nil {
+			return Result{}, err
+		}
+	}
+
+	return result, nil
+}
+
+func validateRequest(req Request) error {
+	if req.LineID == "" || req.CapacityPerDay <= 0 || req.StartDate.IsZero() {
+		return ErrInvalidRequest
+	}
+	return nil
+}
+
+func sortedOrders(input []OrderInput) []OrderInput {
+	orders := append([]OrderInput(nil), input...)
 	sort.SliceStable(orders, func(i, j int) bool {
 		if orders[i].Priority != orders[j].Priority {
 			return orders[i].Priority == domain.PriorityHigh
@@ -90,11 +110,27 @@ func Plan(req Request) (Result, error) {
 		}
 		return orders[i].ID < orders[j].ID
 	})
+	return orders
+}
 
-	highUsed := map[string]int{}
-	lowUsed := map[string]int{}
-	lowByDate := map[string][]string{}
-	lockedByDate := map[string][]string{}
+type capacityLedger struct {
+	highUsed                     map[string]int
+	lowUsed                      map[string]int
+	newUsed                      map[string]int
+	lowByDate                    map[string][]string
+	lockedByDate                 map[string][]string
+	reportedManualForceConflicts map[string]bool
+}
+
+func buildCapacityLedger(req Request) capacityLedger {
+	ledger := capacityLedger{
+		highUsed:                     map[string]int{},
+		lowUsed:                      map[string]int{},
+		newUsed:                      map[string]int{},
+		lowByDate:                    map[string][]string{},
+		lockedByDate:                 map[string][]string{},
+		reportedManualForceConflicts: map[string]bool{},
+	}
 	for _, allocation := range req.ExistingAllocations {
 		if allocation.LineID != req.LineID {
 			continue
@@ -102,103 +138,137 @@ func Plan(req Request) (Result, error) {
 		key := dateKey(allocation.Date)
 		if req.ManualForce {
 			if allocation.Priority == domain.PriorityHigh || allocation.Locked {
-				lockedByDate[key] = appendUnique(lockedByDate[key], allocation.OrderID)
+				ledger.lockedByDate[key] = appendUnique(ledger.lockedByDate[key], allocation.OrderID)
 			} else {
-				lowByDate[key] = appendUnique(lowByDate[key], allocation.OrderID)
+				ledger.lowByDate[key] = appendUnique(ledger.lowByDate[key], allocation.OrderID)
 			}
 			continue
 		}
 		if allocation.Locked {
-			highUsed[key] += allocation.Quantity
-			lockedByDate[key] = appendUnique(lockedByDate[key], allocation.OrderID)
+			ledger.highUsed[key] += allocation.Quantity
+			ledger.lockedByDate[key] = appendUnique(ledger.lockedByDate[key], allocation.OrderID)
 			continue
 		}
-		lowUsed[key] += allocation.Quantity
-		lowByDate[key] = appendUnique(lowByDate[key], allocation.OrderID)
+		ledger.lowUsed[key] += allocation.Quantity
+		ledger.lowByDate[key] = appendUnique(ledger.lowByDate[key], allocation.OrderID)
+	}
+	return ledger
+}
+
+func planOrder(req Request, ledger *capacityLedger, order OrderInput, result *Result) error {
+	if err := validateOrder(req.LineID, order); err != nil {
+		return err
 	}
 
-	var result Result
-	newUsed := map[string]int{}
-	reportedAffected := map[string]bool{}
+	start := scheduleStartDate(req.StartDate, req.CurrentDate)
+	remaining := order.Quantity
+	day := start
+	due := truncateDate(order.DueDate)
 
-	for _, order := range orders {
-		if err := validateOrder(req.LineID, order); err != nil {
-			return Result{}, err
-		}
-		remaining := order.Quantity
-		day := start
-		due := truncateDate(order.DueDate)
-
-		for remaining > 0 {
-			key := dateKey(day)
-			if day.After(due) {
-				if req.AllowLateCompletion {
-					// Conflict solutions intentionally show the earliest completion plan,
-					// even when that plan finishes after the customer due date.
-				} else {
-					finish := estimateFinishDate(req, order, day, remaining, highUsed, lowUsed, newUsed)
-					affectedEnd := finish
-					if affectedEnd.Before(due) {
-						affectedEnd = due
-					}
-					result.Conflicts = append(result.Conflicts, Conflict{
-						OrderID:            order.ID,
-						Reason:             "capacity cannot satisfy order before due date",
-						EarliestFinishDate: finish,
-						AffectedOrderIDs:   affectedOrdersBetween(start, affectedEnd, lowByDate),
-					})
-					break
-				}
-			}
-
-			used := highUsed[key] + newUsed[key]
-			if !req.ManualForce {
-				used += lowUsed[key]
-			}
-			available := req.CapacityPerDay - used
-			if available <= 0 {
-				day = day.AddDate(0, 0, 1)
-				continue
-			}
-
-			qty := min(remaining, available)
-			result.Allocations = append(result.Allocations, Allocation{
-				OrderID:            order.ID,
-				Customer:           order.Customer,
-				LineID:             req.LineID,
-				Date:               day,
-				Quantity:           qty,
-				Priority:           order.Priority,
-				Status:             order.Status,
-				Locked:             order.Priority == domain.PriorityHigh,
-				DueDate:            order.DueDate,
-				CreatedAtTimestamp: order.CreatedAtTimestamp,
+	for remaining > 0 {
+		if day.After(due) && !req.AllowLateCompletion {
+			recordLateCapacityConflict(lateCapacityConflict{
+				req:       req,
+				ledger:    *ledger,
+				order:     order,
+				result:    result,
+				start:     start,
+				day:       day,
+				due:       due,
+				remaining: remaining,
 			})
-			newUsed[key] += qty
-			remaining -= qty
-			if result.FinishDate.Before(day) {
-				result.FinishDate = day
-			}
-
-			if req.ManualForce {
-				affected := append([]string{}, lowByDate[key]...)
-				if req.ManualForce {
-					affected = appendUniqueMany(affected, lockedByDate[key])
-				}
-				if len(affected) > 0 && !reportedAffected[order.ID+"@"+key] {
-					result.Conflicts = append(result.Conflicts, Conflict{
-						OrderID:            order.ID,
-						Reason:             "existing allocations require manual review or reschedule",
-						EarliestFinishDate: day,
-						AffectedOrderIDs:   affected,
-					})
-					reportedAffected[order.ID+"@"+key] = true
-				}
-			}
+			break
 		}
+
+		available := availableCapacity(req, *ledger, day)
+		if available <= 0 {
+			day = day.AddDate(0, 0, 1)
+			continue
+		}
+
+		qty := min(remaining, available)
+		result.Allocations = append(result.Allocations, Allocation{
+			OrderID:            order.ID,
+			Customer:           order.Customer,
+			LineID:             req.LineID,
+			Date:               day,
+			Quantity:           qty,
+			Priority:           order.Priority,
+			Status:             order.Status,
+			Locked:             order.Priority == domain.PriorityHigh,
+			DueDate:            order.DueDate,
+			CreatedAtTimestamp: order.CreatedAtTimestamp,
+		})
+		ledger.newUsed[dateKey(day)] += qty
+		remaining -= qty
+		if result.FinishDate.Before(day) {
+			result.FinishDate = day
+		}
+
+		recordManualForceConflict(req, ledger, order, result, day)
 	}
 
-	return result, nil
+	return nil
+}
+
+func availableCapacity(req Request, ledger capacityLedger, day time.Time) int {
+	key := dateKey(day)
+	used := ledger.highUsed[key] + ledger.newUsed[key]
+	if !req.ManualForce {
+		used += ledger.lowUsed[key]
+	}
+	return req.CapacityPerDay - used
+}
+
+func recordManualForceConflict(req Request, ledger *capacityLedger, order OrderInput, result *Result, day time.Time) {
+	if !req.ManualForce {
+		return
+	}
+
+	key := dateKey(day)
+	affected := append([]string{}, ledger.lowByDate[key]...)
+	affected = appendUniqueMany(affected, ledger.lockedByDate[key])
+	if len(affected) == 0 {
+		return
+	}
+
+	reportKey := order.ID + "@" + key
+	if ledger.reportedManualForceConflicts[reportKey] {
+		return
+	}
+
+	result.Conflicts = append(result.Conflicts, Conflict{
+		OrderID:            order.ID,
+		Reason:             "existing allocations require manual review or reschedule",
+		EarliestFinishDate: day,
+		AffectedOrderIDs:   affected,
+	})
+	ledger.reportedManualForceConflicts[reportKey] = true
+}
+
+type lateCapacityConflict struct {
+	req       Request
+	ledger    capacityLedger
+	order     OrderInput
+	result    *Result
+	start     time.Time
+	day       time.Time
+	due       time.Time
+	remaining int
+}
+
+func recordLateCapacityConflict(conflict lateCapacityConflict) {
+	finish := estimateFinishDate(conflict.req, conflict.day, conflict.remaining, conflict.ledger)
+	affectedEnd := finish
+	if affectedEnd.Before(conflict.due) {
+		affectedEnd = conflict.due
+	}
+	conflict.result.Conflicts = append(conflict.result.Conflicts, Conflict{
+		OrderID:            conflict.order.ID,
+		Reason:             "capacity cannot satisfy order before due date",
+		EarliestFinishDate: finish,
+		AffectedOrderIDs:   affectedOrdersBetween(conflict.start, affectedEnd, conflict.ledger.lowByDate),
+	})
 }
 
 type ConfirmationResult struct {
@@ -231,15 +301,10 @@ func validateOrder(lineID string, order OrderInput) error {
 	return nil
 }
 
-func estimateFinishDate(req Request, order OrderInput, start time.Time, remaining int, highUsed, lowUsed, newUsed map[string]int) time.Time {
+func estimateFinishDate(req Request, start time.Time, remaining int, ledger capacityLedger) time.Time {
 	day := truncateDate(start)
 	for remaining > 0 {
-		key := dateKey(day)
-		used := highUsed[key] + newUsed[key]
-		if !req.ManualForce {
-			used += lowUsed[key]
-		}
-		available := req.CapacityPerDay - used
+		available := availableCapacity(req, ledger, day)
 		if available > 0 {
 			remaining -= min(remaining, available)
 		}

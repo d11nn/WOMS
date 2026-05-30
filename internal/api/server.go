@@ -37,6 +37,9 @@ const unacceptableDueDateMessage = "無法被接受的交期"
 const defaultLineTimezone = "Asia/Taipei"
 const orderIDDigits = 7
 const orderIDModulo int64 = 10000000
+const notFoundMsg = "user not found"
+const removeUser = "user.disable"
+const createJob = "schedule.job.create"
 const errRouteNotFound = "route not found"
 const errMethodNotAllowed = "method not allowed"
 const errUnauthorized = "unauthorized"
@@ -1005,37 +1008,23 @@ func (s *MemoryStore) UpdateOrderDueDate(id string, req updateOrderRequest, clai
 	if !ok {
 		return domain.Order{}, errors.New(errOrderNotFound)
 	}
-	if claims.Role == domain.RoleScheduler && order.LineID != claims.LineID {
-		return domain.Order{}, errors.New("cannot update another production line")
-	}
-	if claims.Role == domain.RoleSales && order.CreatedBy != claims.Subject {
-		return domain.Order{}, errors.New("sales can update only their own orders")
-	}
-	if claims.Role != domain.RoleAdmin && claims.Role != domain.RoleSales && claims.Role != domain.RoleScheduler {
-		return domain.Order{}, errors.New("role cannot update orders")
-	}
-	if order.Status != domain.StatusPending && order.Status != domain.StatusRejected {
-		return domain.Order{}, errors.New("only pending or rejected orders can change order details")
-	}
 	if strings.TrimSpace(req.Note) != "" {
 		return domain.Order{}, errors.New(errNoteImmutable)
+	}
+	if err := canUpdateOrderDetails(order, claims); err != nil {
+		return domain.Order{}, err
 	}
 	if req.DueDate != "" {
 		currentDate, err := s.currentDateForLineLocked(order.LineID, now)
 		if err != nil {
 			return domain.Order{}, err
 		}
-		dueDate, err := validateFutureDueDate(req.DueDate, currentDate)
-		if err != nil {
+		if err := applyOptionalDueDate(&order, req.DueDate, currentDate); err != nil {
 			return domain.Order{}, err
 		}
-		order.DueDate = dueDate
 	}
-	if req.Quantity != 0 {
-		if req.Quantity < 25 || req.Quantity > 2500 {
-			return domain.Order{}, errors.New(errQuantityRange)
-		}
-		order.Quantity = req.Quantity
+	if err := applyOptionalQuantity(&order, req.Quantity); err != nil {
+		return domain.Order{}, err
 	}
 	order.UpdatedAt = now
 	s.orders[order.ID] = order
@@ -1076,6 +1065,82 @@ func (s *MemoryStore) createOrderLocked(req createOrderRequest, actorID string) 
 	return order, nil
 }
 
+func canUpdateOrderDetails(order domain.Order, claims auth.Claims) error {
+	if claims.Role == domain.RoleScheduler && order.LineID != claims.LineID {
+		return errors.New("cannot update another production line")
+	}
+	if claims.Role == domain.RoleSales && order.CreatedBy != claims.Subject {
+		return errors.New("sales can update only their own orders")
+	}
+	if claims.Role != domain.RoleAdmin && claims.Role != domain.RoleSales && claims.Role != domain.RoleScheduler {
+		return errors.New("role cannot update orders")
+	}
+	if order.Status != domain.StatusPending && order.Status != domain.StatusRejected {
+		return errors.New("only pending or rejected orders can change order details")
+	}
+	return nil
+}
+
+func canRejectOrder(order domain.Order, claims auth.Claims) error {
+	if order.LineID != claims.LineID {
+		return errors.New("cannot reject another production line")
+	}
+	if order.Status != domain.StatusPending {
+		return errors.New("only pending orders can be rejected")
+	}
+	return nil
+}
+
+func canCancelOrder(order domain.Order, claims auth.Claims) error {
+	if claims.Role == domain.RoleSales {
+		if order.CreatedBy != claims.Subject {
+			return errors.New("sales can cancel only their own orders")
+		}
+		if !canSalesCancelStatus(order.Status) {
+			return errors.New("sales can cancel only pending or rejected orders")
+		}
+	}
+	if claims.Role == domain.RoleScheduler && order.LineID != claims.LineID {
+		return errors.New("cannot cancel another production line")
+	}
+	if claims.Role != domain.RoleAdmin && claims.Role != domain.RoleSales && claims.Role != domain.RoleScheduler {
+		return errors.New("role cannot cancel orders")
+	}
+	if order.Status == domain.StatusInProgress || order.Status == domain.StatusCompleted {
+		return errors.New("cannot cancel in-progress or completed orders")
+	}
+	return nil
+}
+
+func applyOptionalQuantity(order *domain.Order, quantity int) error {
+	if quantity == 0 {
+		return nil
+	}
+	if quantity < 25 || quantity > 2500 {
+		return errors.New(errQuantityRange)
+	}
+	order.Quantity = quantity
+	return nil
+}
+
+func applyOptionalDueDate(order *domain.Order, dueDate string, currentDate time.Time) error {
+	if dueDate == "" {
+		return nil
+	}
+	parsed, err := validateFutureDueDate(dueDate, currentDate)
+	if err != nil {
+		return err
+	}
+	order.DueDate = parsed
+	return nil
+}
+
+func resetRejectedState(order *domain.Order) {
+	order.RejectionReason = ""
+	order.RejectedBy = ""
+	order.RejectedAt = time.Time{}
+}
+
 func (s *MemoryStore) RejectOrders(req rejectOrdersRequest, claims auth.Claims) (rejectOrdersResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1097,11 +1162,8 @@ func (s *MemoryStore) RejectOrders(req rejectOrdersRequest, claims auth.Claims) 
 		if !ok {
 			return rejectOrdersResponse{}, errors.New(errOrderNotFoundPrefix + id)
 		}
-		if order.LineID != claims.LineID {
-			return rejectOrdersResponse{}, errors.New("cannot reject another production line")
-		}
-		if order.Status != domain.StatusPending {
-			return rejectOrdersResponse{}, errors.New("only pending orders can be rejected")
+		if err := canRejectOrder(order, claims); err != nil {
+			return rejectOrdersResponse{}, err
 		}
 		order.Status = domain.StatusRejected
 		order.RejectionReason = reason
@@ -1134,27 +1196,20 @@ func (s *MemoryStore) ResubmitOrder(req resubmitOrderRequest, claims auth.Claims
 	if strings.TrimSpace(req.Note) != "" {
 		return domain.Order{}, errors.New(errNoteImmutable)
 	}
-	if req.Quantity != 0 {
-		if req.Quantity < 25 || req.Quantity > 2500 {
-			return domain.Order{}, errors.New(errQuantityRange)
-		}
-		order.Quantity = req.Quantity
+	if err := applyOptionalQuantity(&order, req.Quantity); err != nil {
+		return domain.Order{}, err
 	}
 	if req.DueDate != "" {
 		currentDate, err := s.currentDateForLineLocked(order.LineID, now)
 		if err != nil {
 			return domain.Order{}, err
 		}
-		dueDate, err := validateFutureDueDate(req.DueDate, currentDate)
-		if err != nil {
+		if err := applyOptionalDueDate(&order, req.DueDate, currentDate); err != nil {
 			return domain.Order{}, err
 		}
-		order.DueDate = dueDate
 	}
 	order.Status = domain.StatusPending
-	order.RejectionReason = ""
-	order.RejectedBy = ""
-	order.RejectedAt = time.Time{}
+	resetRejectedState(&order)
 	order.UpdatedAt = now
 	s.orders[order.ID] = order
 	s.bumpLineRevisionLocked(order.LineID)
@@ -1201,22 +1256,8 @@ func (s *MemoryStore) CancelOrders(req cancelOrdersRequest, claims auth.Claims) 
 			result.SkippedOrderIDs = append(result.SkippedOrderIDs, id)
 			continue
 		}
-		if claims.Role == domain.RoleSales {
-			if order.CreatedBy != claims.Subject {
-				return cancelOrdersResponse{}, errors.New("sales can cancel only their own orders")
-			}
-			if !canSalesCancelStatus(order.Status) {
-				return cancelOrdersResponse{}, errors.New("sales can cancel only pending or rejected orders")
-			}
-		}
-		if claims.Role == domain.RoleScheduler && order.LineID != claims.LineID {
-			return cancelOrdersResponse{}, errors.New("cannot cancel another production line")
-		}
-		if claims.Role != domain.RoleAdmin && claims.Role != domain.RoleSales && claims.Role != domain.RoleScheduler {
-			return cancelOrdersResponse{}, errors.New("role cannot cancel orders")
-		}
-		if order.Status == domain.StatusInProgress || order.Status == domain.StatusCompleted {
-			return cancelOrdersResponse{}, errors.New("cannot cancel in-progress or completed orders")
+		if err := canCancelOrder(order, claims); err != nil {
+			return cancelOrdersResponse{}, err
 		}
 		order.Status = domain.StatusCancelled
 		order.UpdatedAt = now
@@ -1263,7 +1304,7 @@ func (s *MemoryStore) AssignUser(req assignUserRequest, actorID string) (domain.
 
 	user, ok := s.users[req.Username]
 	if !ok {
-		return domain.User{}, errors.New("user not found")
+		return domain.User{}, errors.New(notFoundMsg)
 	}
 	if req.Role != domain.RoleAdmin && req.Role != domain.RoleSales && req.Role != domain.RoleScheduler {
 		return domain.User{}, errors.New(errRoleInvalid)
@@ -1321,7 +1362,7 @@ func (s *MemoryStore) ResetUserPassword(req resetUserPasswordRequest, actorID st
 
 	user, ok := s.users[strings.TrimSpace(req.Username)]
 	if !ok {
-		return domain.User{}, errors.New("user not found")
+		return domain.User{}, errors.New(notFoundMsg)
 	}
 	passwordHash, err := auth.HashPassword(req.Password)
 	if err != nil {
@@ -1340,51 +1381,51 @@ func (s *MemoryStore) DeleteUser(username, actorID string) (domain.User, error) 
 	username = strings.TrimSpace(username)
 	user, ok := s.users[username]
 	if !ok {
-		return domain.User{}, errors.New("user not found")
+		return domain.User{}, errors.New(notFoundMsg)
 	}
-	referenced := false
-	for _, order := range s.orders {
-		if order.CreatedBy == user.ID || order.RejectedBy == user.ID {
-			referenced = true
-			break
-		}
-	}
-	if !referenced {
-		for _, audit := range s.audits {
-			if audit.ActorID == user.ID {
-				referenced = true
-				break
-			}
-		}
-	}
-	if referenced {
-		user.Disabled = true
-		user.Deleted = false
-		s.users[username] = user
-		s.auditLocked(actorID, "user.disable", user.ID, "")
-		return user, nil
-	}
-	for _, preview := range s.previews {
-		if preview.ActorID == user.ID {
-			user.Disabled = true
-			user.Deleted = false
-			s.users[username] = user
-			s.auditLocked(actorID, "user.disable", user.ID, "")
-			return user, nil
-		}
-	}
-	if actorID == user.ID {
-		user.Disabled = true
-		user.Deleted = false
-		s.users[username] = user
-		s.auditLocked(actorID, "user.disable", user.ID, "")
-		return user, nil
+	if actorID == user.ID || s.userHasOrderReferencesLocked(user.ID) || s.userHasAuditReferencesLocked(user.ID) || s.userHasPreviewReferencesLocked(user.ID) {
+		return s.disableUserLocked(username, user, actorID), nil
 	}
 	delete(s.users, username)
 	s.auditLocked(actorID, "user.delete", user.ID, "")
 	user.Disabled = false
 	user.Deleted = true
 	return user, nil
+}
+
+func (s *MemoryStore) userHasOrderReferencesLocked(userID string) bool {
+	for _, order := range s.orders {
+		if order.CreatedBy == userID || order.RejectedBy == userID {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *MemoryStore) userHasAuditReferencesLocked(userID string) bool {
+	for _, audit := range s.audits {
+		if audit.ActorID == userID {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *MemoryStore) userHasPreviewReferencesLocked(userID string) bool {
+	for _, preview := range s.previews {
+		if preview.ActorID == userID {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *MemoryStore) disableUserLocked(username string, user domain.User, actorID string) domain.User {
+	user.Disabled = true
+	user.Deleted = false
+	s.users[username] = user
+	s.auditLocked(actorID, removeUser, user.ID, "")
+	return user
 }
 
 type scheduleRequest struct {
@@ -1454,40 +1495,15 @@ func (s *MemoryStore) CreateScheduleJob(req scheduleRequest, claims auth.Claims)
 		return domain.ScheduleJob{}, err
 	}
 
-	if req.PreviewID == "" {
-		return domain.ScheduleJob{}, errors.New("previewId is required before creating a schedule job")
+	preview, err := s.validatedScheduleJobPreviewLocked(req, claims)
+	if err != nil {
+		return domain.ScheduleJob{}, err
 	}
-	preview, ok := s.previews[req.PreviewID]
-	if !ok {
-		return domain.ScheduleJob{}, errors.New(errPreviewExpired)
-	}
-	if preview.ActorID != claims.Subject || preview.ActorRole != claims.Role {
-		return domain.ScheduleJob{}, errors.New(errPreviewOtherUser)
-	}
-	if !sameScheduleRequest(preview.Request, normalizedPreviewRequest(req)) {
-		return domain.ScheduleJob{}, errors.New("schedule request changed after preview")
-	}
-	line, ok := s.lines[preview.LineID]
-	if !ok {
-		return domain.ScheduleJob{}, errors.New(errProductionLineNotFound)
-	}
-	if line.ScheduleRevision != preview.LineRevision {
-		return domain.ScheduleJob{}, errors.New("排程資料已變更，請重新試排。")
-	}
-
-	jobLine := req.LineID
-	if jobLine == "" {
-		jobLine = claims.LineID
-	}
-	if claims.LineID != jobLine {
-		return domain.ScheduleJob{}, errors.New("cannot schedule another production line")
-	}
-
 	id := "JOB-" + strconv.Itoa(s.nextJobID)
 	s.nextJobID++
 	job := domain.ScheduleJob{
 		ID:           id,
-		LineID:       jobLine,
+		LineID:       scheduleLineID(req, claims),
 		Status:       domain.JobQueued,
 		PreviewID:    req.PreviewID,
 		RequestHash:  preview.RequestHash,
@@ -1498,11 +1514,38 @@ func (s *MemoryStore) CreateScheduleJob(req scheduleRequest, claims auth.Claims)
 	}
 	s.jobs[id] = job
 	s.jobRequests[id] = req
-	s.auditLocked(claims.Subject, "schedule.job.create", id, req.Reason)
+	s.auditLocked(claims.Subject, createJob, id, req.Reason)
 	if req.ManualForce {
 		s.auditLocked(claims.Subject, "schedule.job.manual_force", id, req.Reason)
 	}
 	return job, nil
+}
+
+func (s *MemoryStore) validatedScheduleJobPreviewLocked(req scheduleRequest, claims auth.Claims) (previewRecord, error) {
+	if req.PreviewID == "" {
+		return previewRecord{}, errors.New("previewId is required before creating a schedule job")
+	}
+	preview, ok := s.previews[req.PreviewID]
+	if !ok {
+		return previewRecord{}, errors.New(errPreviewExpired)
+	}
+	if preview.ActorID != claims.Subject || preview.ActorRole != claims.Role {
+		return previewRecord{}, errors.New(errPreviewOtherUser)
+	}
+	if !sameScheduleRequest(preview.Request, normalizedPreviewRequest(req)) {
+		return previewRecord{}, errors.New("schedule request changed after preview")
+	}
+	line, ok := s.lines[preview.LineID]
+	if !ok {
+		return previewRecord{}, errors.New(errProductionLineNotFound)
+	}
+	if line.ScheduleRevision != preview.LineRevision {
+		return previewRecord{}, errors.New("排程資料已變更，請重新試排。")
+	}
+	if claims.LineID != scheduleLineID(req, claims) {
+		return previewRecord{}, errors.New("cannot schedule another production line")
+	}
+	return preview, nil
 }
 
 func (s *MemoryStore) DeleteQueuedScheduleJob(id string) {
@@ -1530,64 +1573,61 @@ func (s *MemoryStore) ExecuteScheduleJob(id string) domain.ScheduleJob {
 	}
 	req, ok := s.jobRequests[id]
 	if !ok {
-		job.Status = domain.JobFailed
-		job.Message = "找不到排程任務內容。"
-		job.UpdatedAt = time.Now().UTC()
-		s.jobs[id] = job
-		return job
+		return s.failScheduleJobLocked(job, "找不到排程任務內容。")
 	}
 
 	if s.lineLocks[job.LineID] {
-		job.Status = domain.JobFailed
-		job.Message = "產線正在排程中，請稍後再試。"
-		job.UpdatedAt = time.Now().UTC()
-		s.jobs[id] = job
-		return job
+		return s.failScheduleJobLocked(job, "產線正在排程中，請稍後再試。")
 	}
 	s.lineLocks[job.LineID] = true
 	defer delete(s.lineLocks, job.LineID)
 
-	job.Status = domain.JobRunning
-	job.Message = "排程任務執行中。"
-	job.StartedAt = time.Now().UTC()
-	job.UpdatedAt = job.StartedAt
-	s.jobs[id] = job
+	job = s.runScheduleJobLocked(job)
 	if job.Status == domain.JobCancelled {
 		return job
 	}
 	if current := s.lines[job.LineID].ScheduleRevision; current != job.LineRevision {
-		job.Status = domain.JobFailed
-		job.Message = "排程資料已變更，請重新試排。"
-		job.UpdatedAt = time.Now().UTC()
-		s.jobs[id] = job
-		return job
+		return s.failScheduleJobLocked(job, "排程資料已變更，請重新試排。")
 	}
 	claims := s.previewClaimsLocked(job.PreviewID, job.LineID)
 	result, err := s.planLocked(req, claims)
 	if err != nil {
-		job.Status = domain.JobFailed
-		job.Message = err.Error()
-		job.UpdatedAt = time.Now().UTC()
-		s.jobs[id] = job
-		return job
+		return s.failScheduleJobLocked(job, err.Error())
 	}
 	if len(result.Conflicts) > 0 && !canPersistConflicts(req, result.Conflicts) {
-		job.Status = domain.JobFailed
-		job.Message = "排程結果仍有衝突，請重新檢查後再送出。"
-		job.UpdatedAt = time.Now().UTC()
-		s.jobs[id] = job
-		return job
+		return s.failScheduleJobLocked(job, "排程結果仍有衝突，請重新檢查後再送出。")
 	}
 
+	return s.completeScheduleJobLocked(job, req, result)
+}
+
+func (s *MemoryStore) failScheduleJobLocked(job domain.ScheduleJob, message string) domain.ScheduleJob {
+	job.Status = domain.JobFailed
+	job.Message = message
+	job.UpdatedAt = time.Now().UTC()
+	s.jobs[job.ID] = job
+	return job
+}
+
+func (s *MemoryStore) runScheduleJobLocked(job domain.ScheduleJob) domain.ScheduleJob {
+	job.Status = domain.JobRunning
+	job.Message = "排程任務執行中。"
+	job.StartedAt = time.Now().UTC()
+	job.UpdatedAt = job.StartedAt
+	s.jobs[job.ID] = job
+	return job
+}
+
+func (s *MemoryStore) completeScheduleJobLocked(job domain.ScheduleJob, req scheduleRequest, result scheduler.Result) domain.ScheduleJob {
 	job.Status = domain.JobCompleted
 	job.Message = "排程任務已完成。"
 	job.CompletedAt = time.Now().UTC()
 	job.UpdatedAt = job.CompletedAt
-	s.jobs[id] = job
+	s.jobs[job.ID] = job
 	s.persistAllocationsLocked(result.Allocations)
 	s.bumpLineRevisionLocked(job.LineID)
 	delete(s.previews, req.PreviewID)
-	delete(s.jobRequests, id)
+	delete(s.jobRequests, job.ID)
 	return job
 }
 
@@ -1628,94 +1668,143 @@ type calendarResponse struct {
 	PendingAllocations []calendarAllocation `json:"pendingAllocations,omitempty"`
 }
 
+type calendarWindow struct {
+	Month string
+	Start time.Time
+	End   time.Time
+}
+
 func (s *MemoryStore) ScheduleCalendar(lineID, month string, claims auth.Claims) (calendarResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	lineID, line, err := s.resolveCalendarLineLocked(lineID, claims)
+	if err != nil {
+		return calendarResponse{}, err
+	}
+	window, err := parseCalendarWindow(line, month)
+	if err != nil {
+		return calendarResponse{}, err
+	}
+	pendingAllocations, err := s.salesPendingBacklogCalendarAllocationsLocked(line, window, claims)
+	if err != nil {
+		return calendarResponse{}, err
+	}
+	return calendarResponse{
+		LineID:             lineID,
+		Timezone:           line.Timezone,
+		Month:              window.Month,
+		Allocations:        s.persistedCalendarAllocationsLocked(lineID, window),
+		PendingAllocations: pendingAllocations,
+	}, nil
+}
+
+func (s *MemoryStore) resolveCalendarLineLocked(lineID string, claims auth.Claims) (string, domain.ProductionLine, error) {
 	if lineID == "" && claims.Role == domain.RoleScheduler {
 		lineID = claims.LineID
 	}
 	if lineID == "" {
-		return calendarResponse{}, errors.New(errLineIDRequired)
+		return "", domain.ProductionLine{}, errors.New(errLineIDRequired)
 	}
 	if claims.Role == domain.RoleScheduler && claims.LineID != lineID {
-		return calendarResponse{}, errors.New(errCannotAccessAnotherLine)
+		return "", domain.ProductionLine{}, errors.New(errCannotAccessAnotherLine)
 	}
 	line, ok := s.lines[lineID]
 	if !ok {
-		return calendarResponse{}, errors.New(errProductionLineNotFound)
+		return "", domain.ProductionLine{}, errors.New(errProductionLineNotFound)
 	}
+	return lineID, line, nil
+}
+
+func parseCalendarWindow(line domain.ProductionLine, month string) (calendarWindow, error) {
 	if month == "" {
 		currentDate, err := currentDateInLineTimezone(line, nowUTC())
 		if err != nil {
-			return calendarResponse{}, err
+			return calendarWindow{}, err
 		}
 		month = currentDate.Format("2006-01")
 	}
 	monthStart, err := time.Parse("2006-01", month)
 	if err != nil {
-		return calendarResponse{}, errors.New("month must use YYYY-MM")
+		return calendarWindow{}, errors.New("month must use YYYY-MM")
 	}
-	calendarStart := monthStart.AddDate(0, 0, -int(monthStart.Weekday()))
-	calendarEnd := calendarStart.AddDate(0, 0, 42)
+	start := monthStart.AddDate(0, 0, -int(monthStart.Weekday()))
+	return calendarWindow{Month: month, Start: start, End: start.AddDate(0, 0, 42)}, nil
+}
 
+func (s *MemoryStore) persistedCalendarAllocationsLocked(lineID string, window calendarWindow) []calendarAllocation {
 	allocations := []calendarAllocation{}
 	for _, allocation := range s.allocations {
 		if allocation.LineID != lineID {
 			continue
 		}
 		allocationDate := truncateDate(allocation.Date)
-		if allocationDate.Before(calendarStart) || !allocationDate.Before(calendarEnd) {
+		if allocationDate.Before(window.Start) || !allocationDate.Before(window.End) {
 			continue
 		}
-		order := s.orders[allocation.OrderID]
-		status := allocation.Status
-		if status == "" {
-			status = order.Status
-		}
-		completedQuantity := 0
-		if status == domain.StatusCompleted {
-			completedQuantity = order.Quantity
-		}
-		allocations = append(allocations, calendarAllocation{
-			OrderID:            allocation.OrderID,
-			Customer:           order.Customer,
-			LineID:             allocation.LineID,
-			Date:               allocationDate,
-			Quantity:           allocation.Quantity,
-			CompletedQuantity:  completedQuantity,
-			Priority:           allocation.Priority,
-			Status:             status,
-			Locked:             allocation.Locked,
-			DueDate:            order.DueDate,
-			CreatedAtTimestamp: unixMilliseconds(order.CreatedAt),
-		})
+		allocations = append(allocations, s.calendarAllocationFromSchedule(allocation, allocationDate))
 	}
 	sortCalendarAllocations(allocations)
+	return allocations
+}
 
-	pendingAllocations := []calendarAllocation{}
-	if claims.Role == domain.RoleSales {
-		pendingInputs := []scheduler.OrderInput{}
-		for _, order := range s.orders {
-			if order.LineID != lineID || order.Status != domain.StatusPending {
-				continue
-			}
-			pendingInputs = append(pendingInputs, scheduler.OrderInput{
-				ID:                 order.ID,
-				Customer:           order.Customer,
-				LineID:             order.LineID,
-				Quantity:           order.Quantity,
-				Priority:           order.Priority,
-				Status:             order.Status,
-				DueDate:            order.DueDate,
-				CreatedAtTimestamp: unixMilliseconds(order.CreatedAt),
-			})
+func (s *MemoryStore) calendarAllocationFromSchedule(allocation domain.ScheduleAllocation, allocationDate time.Time) calendarAllocation {
+	order := s.orders[allocation.OrderID]
+	status := allocation.Status
+	if status == "" {
+		status = order.Status
+	}
+	completedQuantity := 0
+	if status == domain.StatusCompleted {
+		completedQuantity = order.Quantity
+	}
+	return calendarAllocation{
+		OrderID:            allocation.OrderID,
+		Customer:           order.Customer,
+		LineID:             allocation.LineID,
+		Date:               allocationDate,
+		Quantity:           allocation.Quantity,
+		CompletedQuantity:  completedQuantity,
+		Priority:           allocation.Priority,
+		Status:             status,
+		Locked:             allocation.Locked,
+		DueDate:            order.DueDate,
+		CreatedAtTimestamp: unixMilliseconds(order.CreatedAt),
+	}
+}
+
+func (s *MemoryStore) salesPendingBacklogCalendarAllocationsLocked(line domain.ProductionLine, window calendarWindow, claims auth.Claims) ([]calendarAllocation, error) {
+	if claims.Role != domain.RoleSales {
+		return []calendarAllocation{}, nil
+	}
+	currentDate, err := currentDateInLineTimezone(line, nowUTC())
+	if err != nil {
+		return nil, err
+	}
+	return pendingBacklogCalendarAllocations(
+		line,
+		s.pendingOrderInputsForLineLocked(line.ID),
+		s.existingAllocationsForLineLocked(line.ID),
+		currentDate,
+		window.Start,
+		window.End,
+	)
+}
+
+func (s *MemoryStore) pendingOrderInputsForLineLocked(lineID string) []scheduler.OrderInput {
+	inputs := []scheduler.OrderInput{}
+	for _, order := range s.orders {
+		if order.LineID == lineID && order.Status == domain.StatusPending {
+			inputs = append(inputs, orderInputFromOrder(order))
 		}
-		existing := []scheduler.ExistingAllocation{}
-		for _, allocation := range s.allocations {
-			if allocation.LineID != lineID {
-				continue
-			}
+	}
+	return inputs
+}
+
+func (s *MemoryStore) existingAllocationsForLineLocked(lineID string) []scheduler.ExistingAllocation {
+	existing := []scheduler.ExistingAllocation{}
+	for _, allocation := range s.allocations {
+		if allocation.LineID == lineID {
 			existing = append(existing, scheduler.ExistingAllocation{
 				OrderID:  allocation.OrderID,
 				LineID:   allocation.LineID,
@@ -1725,17 +1814,8 @@ func (s *MemoryStore) ScheduleCalendar(lineID, month string, claims auth.Claims)
 				Locked:   allocation.Locked,
 			})
 		}
-		currentDate, err := currentDateInLineTimezone(line, nowUTC())
-		if err != nil {
-			return calendarResponse{}, err
-		}
-		pendingAllocations, err = pendingBacklogCalendarAllocations(line, pendingInputs, existing, currentDate, calendarStart, calendarEnd)
-		if err != nil {
-			return calendarResponse{}, err
-		}
 	}
-
-	return calendarResponse{LineID: lineID, Timezone: line.Timezone, Month: month, Allocations: allocations, PendingAllocations: pendingAllocations}, nil
+	return existing
 }
 
 func pendingBacklogCalendarAllocations(line domain.ProductionLine, pendingInputs []scheduler.OrderInput, existing []scheduler.ExistingAllocation, currentDate, calendarStart, calendarEnd time.Time) ([]calendarAllocation, error) {
@@ -1838,7 +1918,7 @@ func (s *MemoryStore) ScheduleHistory(lineID string, claims auth.Claims) ([]doma
 
 func isSchedulerWorkflowAudit(action string) bool {
 	switch action {
-	case "schedule.job.create",
+	case createJob,
 		"schedule.job.manual_force",
 		"order.reject",
 		"order.cancel",
@@ -1902,6 +1982,20 @@ func (s *Server) handleProductionStart(w http.ResponseWriter, r *http.Request) {
 func (s *MemoryStore) StartProduction(req productionStartRequest, claims auth.Claims) (domain.Order, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	order, err := s.validateProductionStartLocked(req, claims)
+	if err != nil {
+		return domain.Order{}, err
+	}
+	order.Status = domain.StatusInProgress
+	order.UpdatedAt = time.Now().UTC()
+	s.orders[order.ID] = order
+	s.lockAllocationsLocked(order.ID)
+	s.bumpLineRevisionLocked(order.LineID)
+	s.auditLocked(claims.Subject, "production.start", order.ID, "")
+	return order, nil
+}
+
+func (s *MemoryStore) validateProductionStartLocked(req productionStartRequest, claims auth.Claims) (domain.Order, error) {
 	order, ok := s.orders[req.OrderID]
 	if !ok {
 		return domain.Order{}, errors.New(errOrderNotFound)
@@ -1915,62 +2009,70 @@ func (s *MemoryStore) StartProduction(req productionStartRequest, claims auth.Cl
 	if !s.hasAllocationLocked(order.ID) {
 		return domain.Order{}, errors.New("scheduled order has no allocation")
 	}
-	order.Status = domain.StatusInProgress
-	order.UpdatedAt = time.Now().UTC()
-	s.orders[order.ID] = order
-	s.lockAllocationsLocked(order.ID)
-	s.bumpLineRevisionLocked(order.LineID)
-	s.auditLocked(claims.Subject, "production.start", order.ID, "")
 	return order, nil
 }
 
 func (s *MemoryStore) ConfirmProduction(req productionConfirmRequest, claims auth.Claims) (productionConfirmResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	order, ok := s.orders[req.OrderID]
-	if !ok {
-		return productionConfirmResponse{}, errors.New(errOrderNotFound)
-	}
-	if order.LineID != claims.LineID {
-		return productionConfirmResponse{}, errors.New("cannot confirm another production line")
-	}
-	if order.Status != domain.StatusInProgress {
-		return productionConfirmResponse{}, errors.New("only in-progress orders can be confirmed")
-	}
-	if req.ProducedQuantity <= 0 {
-		return productionConfirmResponse{}, errors.New("producedQuantity must be greater than zero")
-	}
-	productionDate, err := time.Parse(dateLayout, req.ProductionDate)
+	order, productionDate, err := s.validateProductionConfirmLocked(req, claims)
 	if err != nil {
-		return productionConfirmResponse{}, errors.New("productionDate must use YYYY-MM-DD")
-	}
-	allocation, ok := s.productionAllocationLocked(order.ID, productionDate)
-	if !ok {
-		return productionConfirmResponse{}, errors.New("scheduled allocation not found for productionDate")
-	}
-	if allocation.Status == domain.StatusCompleted {
-		return productionConfirmResponse{}, errors.New("productionDate has already been confirmed")
-	}
-	if req.ProducedQuantity > allocation.Quantity {
-		return productionConfirmResponse{}, errors.New("producedQuantity cannot exceed scheduled allocation quantity")
+		return productionConfirmResponse{}, err
 	}
 	result, err := scheduler.ConfirmProduction(order, req.ProducedQuantity, time.Now().UTC())
 	if err != nil {
 		return productionConfirmResponse{}, err
 	}
 	if result.Completed {
-		order.Status = domain.StatusCompleted
-		order.UpdatedAt = time.Now().UTC()
-		s.orders[order.ID] = order
-		s.completeProductionAllocationLocked(order.ID, productionDate)
-		s.bumpLineRevisionLocked(order.LineID)
-		s.auditLocked(claims.Subject, "production.confirm.complete", order.ID, "")
-		return productionConfirmResponse{Order: order}, nil
+		return s.completeProductionOrderLocked(order, productionDate, claims.Subject), nil
 	}
+	return s.partialProductionOrderLocked(order, *result.Remainder, req, productionDate, claims.Subject), nil
+}
 
+func (s *MemoryStore) validateProductionConfirmLocked(req productionConfirmRequest, claims auth.Claims) (domain.Order, time.Time, error) {
+	order, ok := s.orders[req.OrderID]
+	if !ok {
+		return domain.Order{}, time.Time{}, errors.New(errOrderNotFound)
+	}
+	if order.LineID != claims.LineID {
+		return domain.Order{}, time.Time{}, errors.New("cannot confirm another production line")
+	}
+	if order.Status != domain.StatusInProgress {
+		return domain.Order{}, time.Time{}, errors.New("only in-progress orders can be confirmed")
+	}
+	if req.ProducedQuantity <= 0 {
+		return domain.Order{}, time.Time{}, errors.New("producedQuantity must be greater than zero")
+	}
+	productionDate, err := time.Parse(dateLayout, req.ProductionDate)
+	if err != nil {
+		return domain.Order{}, time.Time{}, errors.New("productionDate must use YYYY-MM-DD")
+	}
+	allocation, ok := s.productionAllocationLocked(order.ID, productionDate)
+	if !ok {
+		return domain.Order{}, time.Time{}, errors.New("scheduled allocation not found for productionDate")
+	}
+	if allocation.Status == domain.StatusCompleted {
+		return domain.Order{}, time.Time{}, errors.New("productionDate has already been confirmed")
+	}
+	if req.ProducedQuantity > allocation.Quantity {
+		return domain.Order{}, time.Time{}, errors.New("producedQuantity cannot exceed scheduled allocation quantity")
+	}
+	return order, productionDate, nil
+}
+
+func (s *MemoryStore) completeProductionOrderLocked(order domain.Order, productionDate time.Time, actorID string) productionConfirmResponse {
+	order.Status = domain.StatusCompleted
+	order.UpdatedAt = time.Now().UTC()
+	s.orders[order.ID] = order
+	s.completeProductionAllocationLocked(order.ID, productionDate)
+	s.bumpLineRevisionLocked(order.LineID)
+	s.auditLocked(actorID, "production.confirm.complete", order.ID, "")
+	return productionConfirmResponse{Order: order}
+}
+
+func (s *MemoryStore) partialProductionOrderLocked(order domain.Order, remainder domain.Order, req productionConfirmRequest, productionDate time.Time, actorID string) productionConfirmResponse {
 	originalQuantity := order.Quantity
 	now := time.Now().UTC()
-	remainder := *result.Remainder
 	remainder.ID = nextRemainderOrderID(order.ID, order.SourceOrder != "", func(id string) bool {
 		_, ok := s.orders[id]
 		return ok
@@ -1985,33 +2087,72 @@ func (s *MemoryStore) ConfirmProduction(req productionConfirmRequest, claims aut
 
 	s.replaceOrderAllocationsWithCompletedLocked(order.ID, productionDate)
 	s.bumpLineRevisionLocked(order.LineID)
-	s.auditLocked(claims.Subject, "production.confirm.partial", order.ID, "produced "+strconv.Itoa(req.ProducedQuantity)+" of "+strconv.Itoa(originalQuantity)+", remainder "+remainder.ID+" quantity "+strconv.Itoa(remainder.Quantity)+" returned to pending")
-	return productionConfirmResponse{Order: order, Remainder: &remainder}, nil
+	s.auditLocked(actorID, "production.confirm.partial", order.ID, productionAuditReason(req.ProducedQuantity, originalQuantity, remainder))
+	return productionConfirmResponse{Order: order, Remainder: &remainder}
+}
+
+func productionAuditReason(producedQuantity, originalQuantity int, remainder domain.Order) string {
+	return "produced " + strconv.Itoa(producedQuantity) +
+		" of " + strconv.Itoa(originalQuantity) +
+		", remainder " + remainder.ID +
+		" quantity " + strconv.Itoa(remainder.Quantity) +
+		" returned to pending"
 }
 
 func (s *MemoryStore) planLocked(req scheduleRequest, claims auth.Claims) (scheduler.Result, error) {
-	lineID := req.LineID
-	if lineID == "" && claims.Role == domain.RoleScheduler {
-		lineID = claims.LineID
-	}
-	if lineID == "" {
-		return scheduler.Result{}, errors.New(errLineIDRequired)
+	lineID, line, err := s.resolveScheduleLineLocked(req, claims)
+	if err != nil {
+		return scheduler.Result{}, err
 	}
 	if req.ManualForce && strings.TrimSpace(req.Reason) == "" {
 		return scheduler.Result{}, errors.New("manual force requires a reason")
 	}
+	currentDate, startDate, err := parseScheduleDates(line, req)
+	if err != nil {
+		return scheduler.Result{}, err
+	}
+	inputs, err := s.scheduleOrderInputsLocked(lineID, currentDate, req, claims)
+	if err != nil {
+		return scheduler.Result{}, err
+	}
+	resolutionOrderIDs, err := s.resolutionOrderIDSetLocked(lineID, req)
+	if err != nil {
+		return scheduler.Result{}, err
+	}
+	return runSchedulePlan(scheduler.Request{
+		LineID:              lineID,
+		CapacityPerDay:      line.CapacityPerDay,
+		StartDate:           startDate,
+		CurrentDate:         currentDate,
+		Orders:              inputs,
+		ExistingAllocations: s.existingAllocationInputsLocked(resolutionOrderIDs),
+		ManualForce:         req.ManualForce,
+		ForceReason:         req.Reason,
+		AllowLateCompletion: req.AllowLateCompletion,
+	}, req.DraftOrder != nil)
+}
+
+func (s *MemoryStore) resolveScheduleLineLocked(req scheduleRequest, claims auth.Claims) (string, domain.ProductionLine, error) {
+	lineID := scheduleLineID(req, claims)
+	if lineID == "" {
+		return "", domain.ProductionLine{}, errors.New(errLineIDRequired)
+	}
 	if claims.Role == domain.RoleScheduler && claims.LineID != lineID {
-		return scheduler.Result{}, errors.New(errCannotAccessAnotherLine)
+		return "", domain.ProductionLine{}, errors.New(errCannotAccessAnotherLine)
 	}
 	line, ok := s.lines[lineID]
 	if !ok {
-		return scheduler.Result{}, errors.New(errProductionLineNotFound)
+		return "", domain.ProductionLine{}, errors.New(errProductionLineNotFound)
 	}
+	return lineID, line, nil
+}
+
+func parseScheduleDates(line domain.ProductionLine, req scheduleRequest) (time.Time, time.Time, error) {
 	currentDate := time.Time{}
 	if req.CurrentDate != "" {
 		parsed, err := time.Parse(dateLayout, req.CurrentDate)
 		if err != nil {
-			return scheduler.Result{}, errors.New("currentDate must use YYYY-MM-DD")
+			return time.Time{}, time.Time{}, errors.New("currentDate must use YYYY-MM-DD")
 		}
 		currentDate = parsed
 	}
@@ -2019,115 +2160,123 @@ func (s *MemoryStore) planLocked(req scheduleRequest, claims auth.Claims) (sched
 	if startDate.IsZero() {
 		lineCurrentDate, err := currentDateInLineTimezone(line, nowUTC())
 		if err != nil {
-			return scheduler.Result{}, err
+			return time.Time{}, time.Time{}, err
 		}
 		startDate = lineCurrentDate
 	}
 	if req.StartDate != "" {
 		parsed, err := time.Parse(dateLayout, req.StartDate)
 		if err != nil {
-			return scheduler.Result{}, errors.New("startDate must use YYYY-MM-DD")
+			return time.Time{}, time.Time{}, errors.New("startDate must use YYYY-MM-DD")
 		}
 		startDate = parsed
 	}
+	return currentDate, startDate, nil
+}
 
+func (s *MemoryStore) scheduleOrderInputsLocked(lineID string, currentDate time.Time, req scheduleRequest, claims auth.Claims) ([]scheduler.OrderInput, error) {
+	if req.DraftOrder != nil {
+		return s.draftOrderInputsLocked(lineID, currentDate, req, claims)
+	}
+	return s.selectedOrderInputsLocked(lineID, req), nil
+}
+
+func (s *MemoryStore) draftOrderInputsLocked(lineID string, currentDate time.Time, req scheduleRequest, claims auth.Claims) ([]scheduler.OrderInput, error) {
+	if claims.Role != domain.RoleSales {
+		return nil, errors.New("only sales can preview draft orders")
+	}
+	draft := *req.DraftOrder
+	if draft.LineID == "" {
+		draft.LineID = lineID
+	}
+	if draft.LineID != lineID {
+		return nil, errors.New("draft order line must match preview line")
+	}
+	if draft.Priority == "" {
+		draft.Priority = domain.PriorityLow
+	}
+	dueDate, err := validateOrderRequest(draft, s.lines, effectiveCurrentDate(currentDate))
+	if err != nil {
+		return nil, err
+	}
+	inputs := []scheduler.OrderInput{{
+		ID:                 previewDraftOrderID,
+		Customer:           strings.TrimSpace(draft.Customer),
+		LineID:             draft.LineID,
+		Quantity:           draft.Quantity,
+		Priority:           draft.Priority,
+		Status:             domain.StatusPending,
+		DueDate:            dueDate,
+		CreatedAtTimestamp: unixMilliseconds(nowUTC()),
+	}}
+	for _, order := range s.orders {
+		if order.LineID == lineID && order.Status == domain.StatusPending {
+			inputs = append(inputs, orderInputFromOrder(order))
+		}
+	}
+	return inputs, nil
+}
+
+func (s *MemoryStore) selectedOrderInputsLocked(lineID string, req scheduleRequest) []scheduler.OrderInput {
 	selected := map[string]bool{}
 	for _, id := range req.OrderIDs {
 		selected[id] = true
 	}
 	inputs := []scheduler.OrderInput{}
-	if req.DraftOrder != nil {
-		if claims.Role != domain.RoleSales {
-			return scheduler.Result{}, errors.New("only sales can preview draft orders")
+	for _, order := range s.orders {
+		if order.LineID != lineID {
+			continue
 		}
-		draft := *req.DraftOrder
-		if draft.LineID == "" {
-			draft.LineID = lineID
-		}
-		if draft.LineID != lineID {
-			return scheduler.Result{}, errors.New("draft order line must match preview line")
-		}
-		if draft.Priority == "" {
-			draft.Priority = domain.PriorityLow
-		}
-		dueDate, err := validateOrderRequest(draft, s.lines, effectiveCurrentDate(currentDate))
-		if err != nil {
-			return scheduler.Result{}, err
-		}
-		inputs = append(inputs, scheduler.OrderInput{
-			ID:                 previewDraftOrderID,
-			Customer:           strings.TrimSpace(draft.Customer),
-			LineID:             draft.LineID,
-			Quantity:           draft.Quantity,
-			Priority:           draft.Priority,
-			Status:             domain.StatusPending,
-			DueDate:            dueDate,
-			CreatedAtTimestamp: unixMilliseconds(nowUTC()),
-		})
-		// Sales draft previews account for the pending backlog as capacity usage
-		// and return those pending preview allocations for the preview dialog only.
-		// Scheduler previews/jobs still use the non-draft branch, so formal scheduling
-		// keeps excluding unrelated pending orders from daily capacity.
-		for _, order := range s.orders {
-			if order.LineID != lineID || order.Status != domain.StatusPending {
+		if order.Status == domain.StatusPending {
+			if len(selected) > 0 && !selected[order.ID] {
 				continue
 			}
-			inputs = append(inputs, scheduler.OrderInput{
-				ID:                 order.ID,
-				Customer:           order.Customer,
-				LineID:             order.LineID,
-				Quantity:           order.Quantity,
-				Priority:           order.Priority,
-				Status:             order.Status,
-				DueDate:            order.DueDate,
-				CreatedAtTimestamp: unixMilliseconds(order.CreatedAt),
-			})
+		} else if !slicesContains(req.ResolutionOrderIDs, order.ID) {
+			continue
 		}
+		inputs = append(inputs, orderInputFromOrder(order))
 	}
-	if req.DraftOrder == nil {
-		for _, order := range s.orders {
-			if order.LineID != lineID {
-				continue
-			}
-			if order.Status == domain.StatusPending {
-				if len(selected) > 0 && !selected[order.ID] {
-					continue
-				}
-			} else if !slicesContains(req.ResolutionOrderIDs, order.ID) {
-				continue
-			}
-			inputs = append(inputs, scheduler.OrderInput{
-				ID:                 order.ID,
-				Customer:           order.Customer,
-				LineID:             order.LineID,
-				Quantity:           order.Quantity,
-				Priority:           order.Priority,
-				Status:             order.Status,
-				DueDate:            order.DueDate,
-				CreatedAtTimestamp: unixMilliseconds(order.CreatedAt),
-			})
-		}
+	return inputs
+}
+
+func orderInputFromOrder(order domain.Order) scheduler.OrderInput {
+	return scheduler.OrderInput{
+		ID:                 order.ID,
+		Customer:           order.Customer,
+		LineID:             order.LineID,
+		Quantity:           order.Quantity,
+		Priority:           order.Priority,
+		Status:             order.Status,
+		DueDate:            order.DueDate,
+		CreatedAtTimestamp: unixMilliseconds(order.CreatedAt),
 	}
+}
+
+func (s *MemoryStore) resolutionOrderIDSetLocked(lineID string, req scheduleRequest) (map[string]bool, error) {
 	resolutionOrderIDs := map[string]bool{}
 	for _, orderID := range req.ResolutionOrderIDs {
 		if orderID == "" {
 			continue
 		}
 		if req.DraftOrder != nil {
-			return scheduler.Result{}, errors.New("draft previews cannot include resolution orders")
+			return nil, errors.New("draft previews cannot include resolution orders")
 		}
 		order, ok := s.orders[orderID]
 		if !ok {
-			return scheduler.Result{}, errors.New("resolution order not found")
+			return nil, errors.New("resolution order not found")
 		}
 		if order.LineID != lineID {
-			return scheduler.Result{}, errors.New("resolution order line must match preview line")
+			return nil, errors.New("resolution order line must match preview line")
 		}
 		if !s.canMoveScheduledOrderLocked(orderID) {
-			return scheduler.Result{}, errors.New("resolution orders must be low-priority scheduled orders without locked or completed allocations")
+			return nil, errors.New("resolution orders must be low-priority scheduled orders without locked or completed allocations")
 		}
 		resolutionOrderIDs[orderID] = true
 	}
+	return resolutionOrderIDs, nil
+}
+
+func (s *MemoryStore) existingAllocationInputsLocked(resolutionOrderIDs map[string]bool) []scheduler.ExistingAllocation {
 	existingAllocations := []scheduler.ExistingAllocation{}
 	for _, allocation := range s.allocations {
 		if resolutionOrderIDs[allocation.OrderID] {
@@ -2142,23 +2291,15 @@ func (s *MemoryStore) planLocked(req scheduleRequest, claims auth.Claims) (sched
 			Locked:   allocation.Locked,
 		})
 	}
+	return existingAllocations
+}
 
-	planRequest := scheduler.Request{
-		LineID:              lineID,
-		CapacityPerDay:      line.CapacityPerDay,
-		StartDate:           startDate,
-		CurrentDate:         currentDate,
-		Orders:              inputs,
-		ExistingAllocations: existingAllocations,
-		ManualForce:         req.ManualForce,
-		ForceReason:         req.Reason,
-		AllowLateCompletion: req.AllowLateCompletion,
-	}
+func runSchedulePlan(planRequest scheduler.Request, hasDraftOrder bool) (scheduler.Result, error) {
 	var baseline scheduler.Result
 	var err error
-	if req.DraftOrder != nil {
+	if hasDraftOrder {
 		baselineRequest := planRequest
-		baselineRequest.Orders = withoutDraftOrderInputs(inputs)
+		baselineRequest.Orders = withoutDraftOrderInputs(planRequest.Orders)
 		baseline, err = scheduler.Plan(baselineRequest)
 		if err != nil {
 			return scheduler.Result{}, err
@@ -2168,7 +2309,7 @@ func (s *MemoryStore) planLocked(req scheduleRequest, claims auth.Claims) (sched
 	if err != nil {
 		return scheduler.Result{}, err
 	}
-	if req.DraftOrder != nil {
+	if hasDraftOrder {
 		result = salesDraftPreviewResult(result, baseline)
 	}
 	return result, nil
@@ -2417,7 +2558,7 @@ func (s *MemoryStore) CreateHPAPeakDemo(claims auth.Claims) (hpaPeakSummary, err
 				CreatedAt: now,
 				UpdatedAt: now,
 			}
-			s.auditLocked(claims.Subject, "schedule.job.create", jobID, hpaDemoSource)
+			s.auditLocked(claims.Subject, createJob, jobID, hpaDemoSource)
 		}
 	}
 	return s.hpaPeakSummaryLocked(), nil
@@ -3122,78 +3263,78 @@ func zhUserMessage(message string) string {
 		return "找不到訂單：" + strings.TrimPrefix(message, errOrderNotFoundPrefix)
 	}
 	translations := map[string]string{
-		errRouteNotFound:                                                       "找不到 API 路由。",
-		errMethodNotAllowed:                                                    "不支援此 HTTP 方法。",
-		"invalid credentials":                                                  "帳號或密碼錯誤。",
-		errAuthSessionUnavailable:                                              "登入狀態服務暫時無法使用，請稍後再試。",
-		errUnauthorized:                                                        "請先登入後再操作。",
-		"only sales can create orders":                                         "只有業務可以建立訂單。",
-		"only sales can confirm preview orders":                                "只有業務可以確認訂單預覽。",
-		"only schedulers can reject orders":                                    "只有排程工程師可以駁回訂單。",
-		"only sales can resubmit pending or rejected orders":                   "只有業務可以重新送出待排程或需業務處理的訂單。",
-		errAdminManageAccounts:                                                 "只有管理員可以管理帳號。",
-		"only admin or schedulers can create demo conflict orders":             "只有管理員或排程工程師可以建立衝突展示訂單。",
-		"only schedulers can create schedule jobs":                             "只有排程工程師可以建立排程任務。",
-		"schedule job not found":                                               "找不到排程任務。",
-		"only schedulers can confirm production":                               "只有排程工程師可以回報生產。",
-		"only schedulers can start production":                                 "只有排程工程師可以開始生產。",
-		errOrderNotFound:                                                       "找不到訂單。",
-		"cannot update another production line":                                "不能更新其他產線的訂單。",
-		"sales can update only their own orders":                               "業務只能更新自己的訂單。",
-		"role cannot update orders":                                            "此角色不能更新訂單。",
-		"only pending or rejected orders can change order details":             "只有待排程或需業務處理的訂單可以變更內容。",
-		errNoteImmutable:                                                       "備註建立後不能修改。",
-		"dueDate must use YYYY-MM-DD":                                          "交期格式必須是 YYYY-MM-DD。",
-		errQuantityRange:                                                       "數量必須介於 25 到 2500。",
-		errProductionLineNotFound:                                              "產線不存在。",
-		"priority must be low or high":                                         "優先級必須是 low 或 high。",
-		errOrderIDsRequired:                                                    "請至少選取一張訂單。",
-		"rejection reason is required":                                         "請填寫駁回理由。",
-		"rejection reason must be 240 characters or fewer":                     "駁回理由最多 240 個字。",
-		"cannot reject another production line":                                "不能駁回其他產線的訂單。",
-		"only pending orders can be rejected":                                  "只有待排程訂單可以被駁回。",
-		"sales can resubmit only their own orders":                             "只能重新送出自己的訂單。",
-		"only pending or rejected orders can be resubmitted":                   "只有待排程或需業務處理的訂單可以重新送出。",
-		"sales can cancel only their own orders":                               "業務只能取消自己的訂單。",
-		"sales can cancel only pending or rejected orders":                     "業務只能取消待排程或需業務處理的訂單。",
-		"cannot cancel another production line":                                "不能取消其他產線的訂單。",
-		"role cannot cancel orders":                                            "此角色不能取消訂單。",
-		"cannot cancel in-progress or completed orders":                        "不能取消生產中或已完成的訂單。",
-		"user not found":                                                       "找不到使用者。",
-		"username is required":                                                 "請填寫帳號。",
-		"username already exists":                                              "帳號已存在。",
-		"username must be 40 characters or fewer":                              "帳號最多 40 個字。",
+		errRouteNotFound:                                           "找不到 API 路由。",
+		errMethodNotAllowed:                                        "不支援此 HTTP 方法。",
+		"invalid credentials":                                      "帳號或密碼錯誤。",
+		errAuthSessionUnavailable:                                  "登入狀態服務暫時無法使用，請稍後再試。",
+		errUnauthorized:                                            "請先登入後再操作。",
+		"only sales can create orders":                             "只有業務可以建立訂單。",
+		"only sales can confirm preview orders":                    "只有業務可以確認訂單預覽。",
+		"only schedulers can reject orders":                        "只有排程工程師可以駁回訂單。",
+		"only sales can resubmit pending or rejected orders":       "只有業務可以重新送出待排程或需業務處理的訂單。",
+		errAdminManageAccounts:                                     "只有管理員可以管理帳號。",
+		"only admin or schedulers can create demo conflict orders": "只有管理員或排程工程師可以建立衝突展示訂單。",
+		"only schedulers can create schedule jobs":                 "只有排程工程師可以建立排程任務。",
+		"schedule job not found":                                   "找不到排程任務。",
+		"only schedulers can confirm production":                   "只有排程工程師可以回報生產。",
+		"only schedulers can start production":                     "只有排程工程師可以開始生產。",
+		errOrderNotFound:                                           "找不到訂單。",
+		"cannot update another production line":                    "不能更新其他產線的訂單。",
+		"sales can update only their own orders":                   "業務只能更新自己的訂單。",
+		"role cannot update orders":                                "此角色不能更新訂單。",
+		"only pending or rejected orders can change order details": "只有待排程或需業務處理的訂單可以變更內容。",
+		errNoteImmutable:                                           "備註建立後不能修改。",
+		"dueDate must use YYYY-MM-DD":                              "交期格式必須是 YYYY-MM-DD。",
+		errQuantityRange:                                           "數量必須介於 25 到 2500。",
+		errProductionLineNotFound:                                  "產線不存在。",
+		"priority must be low or high":                             "優先級必須是 low 或 high。",
+		errOrderIDsRequired:                                        "請至少選取一張訂單。",
+		"rejection reason is required":                             "請填寫駁回理由。",
+		"rejection reason must be 240 characters or fewer":         "駁回理由最多 240 個字。",
+		"cannot reject another production line":                    "不能駁回其他產線的訂單。",
+		"only pending orders can be rejected":                      "只有待排程訂單可以被駁回。",
+		"sales can resubmit only their own orders":                 "只能重新送出自己的訂單。",
+		"only pending or rejected orders can be resubmitted":       "只有待排程或需業務處理的訂單可以重新送出。",
+		"sales can cancel only their own orders":                   "業務只能取消自己的訂單。",
+		"sales can cancel only pending or rejected orders":         "業務只能取消待排程或需業務處理的訂單。",
+		"cannot cancel another production line":                    "不能取消其他產線的訂單。",
+		"role cannot cancel orders":                                "此角色不能取消訂單。",
+		"cannot cancel in-progress or completed orders":            "不能取消生產中或已完成的訂單。",
+		notFoundMsg:                               "找不到使用者。",
+		"username is required":                    "請填寫帳號。",
+		"username already exists":                 "帳號已存在。",
+		"username must be 40 characters or fewer": "帳號最多 40 個字。",
 		"username can contain only letters, numbers, dash, underscore, or dot": "帳號只能包含英文字母、數字、連字號、底線或句點。",
-		"password is required":                                                 "請填寫密碼。",
-		errRoleInvalid:                                                         "角色必須是 admin、sales 或 scheduler。",
-		errSchedulerLineInvalid:                                                "排程工程師的產線必須存在。",
-		"previewId is required before creating a schedule job":                 "建立排程任務前必須先完成試排。",
-		errPreviewExpired:                                                      "試排結果已過期或不存在。",
-		errPreviewOtherUser:                                                    "試排結果屬於其他使用者。",
-		"schedule request changed after preview":                               "排程請求與試排內容不同，請重新試排。",
-		"cannot schedule another production line":                              "不能排程其他產線。",
-		errLineIDRequired:                                                      "請選擇產線。",
-		errCannotAccessAnotherLine:                                             "不能存取其他產線。",
-		"month must use YYYY-MM":                                               "月份格式必須是 YYYY-MM。",
-		"only admin or schedulers can read schedule history":                   "只有管理員或排程工程師可以讀取排程紀錄。",
-		"only scheduled orders can start production":                           "只有已排程訂單可以開始生產。",
-		"scheduled order has no allocation":                                    "已排程訂單沒有分配紀錄。",
-		"cannot start another production line":                                 "不能開始其他產線的生產。",
-		"cannot confirm another production line":                               "不能回報其他產線的生產。",
-		"only in-progress orders can be confirmed":                             "只有生產中訂單可以回報生產。",
-		"producedQuantity must be greater than zero":                           "完成片數必須大於 0。",
-		"productionDate must use YYYY-MM-DD":                                   "生產日期格式必須是 YYYY-MM-DD。",
-		"scheduled allocation not found for productionDate":                    "找不到該生產日期的排程。",
-		"productionDate has already been confirmed":                            "該生產日期已經回報過。",
-		"producedQuantity cannot exceed scheduled allocation quantity":         "完成片數不能超過本日排程量。",
-		"manual force requires a reason":                                       "人工介入必須填寫原因。",
-		"startDate must use YYYY-MM-DD":                                        "開始日期格式必須是 YYYY-MM-DD。",
-		"currentDate must use YYYY-MM-DD":                                      "目前日期格式必須是 YYYY-MM-DD。",
-		"only sales can preview draft orders":                                  "只有業務可以試排草稿訂單。",
-		"draft order line must match preview line":                             "草稿訂單產線必須符合試排產線。",
-		"draft previews cannot include resolution orders":                      "草稿試排不能包含解法訂單。",
-		"resolution order not found":                                           "找不到解法訂單。",
-		"resolution order line must match preview line":                        "解法訂單產線必須符合試排產線。",
+		"password is required":  "請填寫密碼。",
+		errRoleInvalid:          "角色必須是 admin、sales 或 scheduler。",
+		errSchedulerLineInvalid: "排程工程師的產線必須存在。",
+		"previewId is required before creating a schedule job": "建立排程任務前必須先完成試排。",
+		errPreviewExpired:                                              "試排結果已過期或不存在。",
+		errPreviewOtherUser:                                            "試排結果屬於其他使用者。",
+		"schedule request changed after preview":                       "排程請求與試排內容不同，請重新試排。",
+		"cannot schedule another production line":                      "不能排程其他產線。",
+		errLineIDRequired:                                              "請選擇產線。",
+		errCannotAccessAnotherLine:                                     "不能存取其他產線。",
+		"month must use YYYY-MM":                                       "月份格式必須是 YYYY-MM。",
+		"only admin or schedulers can read schedule history":           "只有管理員或排程工程師可以讀取排程紀錄。",
+		"only scheduled orders can start production":                   "只有已排程訂單可以開始生產。",
+		"scheduled order has no allocation":                            "已排程訂單沒有分配紀錄。",
+		"cannot start another production line":                         "不能開始其他產線的生產。",
+		"cannot confirm another production line":                       "不能回報其他產線的生產。",
+		"only in-progress orders can be confirmed":                     "只有生產中訂單可以回報生產。",
+		"producedQuantity must be greater than zero":                   "完成片數必須大於 0。",
+		"productionDate must use YYYY-MM-DD":                           "生產日期格式必須是 YYYY-MM-DD。",
+		"scheduled allocation not found for productionDate":            "找不到該生產日期的排程。",
+		"productionDate has already been confirmed":                    "該生產日期已經回報過。",
+		"producedQuantity cannot exceed scheduled allocation quantity": "完成片數不能超過本日排程量。",
+		"manual force requires a reason":                               "人工介入必須填寫原因。",
+		"startDate must use YYYY-MM-DD":                                "開始日期格式必須是 YYYY-MM-DD。",
+		"currentDate must use YYYY-MM-DD":                              "目前日期格式必須是 YYYY-MM-DD。",
+		"only sales can preview draft orders":                          "只有業務可以試排草稿訂單。",
+		"draft order line must match preview line":                     "草稿訂單產線必須符合試排產線。",
+		"draft previews cannot include resolution orders":              "草稿試排不能包含解法訂單。",
+		"resolution order not found":                                   "找不到解法訂單。",
+		"resolution order line must match preview line":                "解法訂單產線必須符合試排產線。",
 		"resolution orders must be low-priority scheduled orders without locked or completed allocations": "解法訂單必須是低優先級、已排程、且沒有鎖定或已完成分配的訂單。",
 		"preview does not contain a draft order":                                                          "試排結果不包含草稿訂單。",
 		"cannot create demo orders for another production line":                                           "不能為其他產線建立展示訂單。",

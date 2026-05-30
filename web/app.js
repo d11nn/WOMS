@@ -142,7 +142,8 @@ document.getElementById("assign-user-form").addEventListener("submit", async (ev
       method: "PATCH",
       body: JSON.stringify(data),
     });
-    showMessage("帳號已更新", `${user.username} 現在是${roleLabel(user.role)}${user.lineId ? `，產線 ${user.lineId}` : ""}`);
+    const lineInfo = user.lineId ? `，產線 ${user.lineId}` : "";
+    showMessage("帳號已更新", `${user.username} 現在是${roleLabel(user.role)}${lineInfo}`);
     await loadUsers();
   } catch (error) {
     showMessage("帳號更新失敗", error.message, "warn");
@@ -158,7 +159,8 @@ document.getElementById("create-user-form").addEventListener("submit", async (ev
       body: JSON.stringify(data),
     });
     event.currentTarget.reset();
-    showMessage("帳號已建立", `${user.username} 可用 ${roleLabel(user.role)} 權限登入`);
+    const lineInfo = user.lineId ? `，產線 ${user.lineId}` : "";
+    showMessage("帳號已建立", `${user.username} 可用 ${roleLabel(user.role)} 權限登入${lineInfo}`);
     await loadUsers();
   } catch (error) {
     showMessage("帳號建立失敗", error.message, "warn");
@@ -182,12 +184,13 @@ document.getElementById("reset-password-form").addEventListener("submit", async 
 
 document.getElementById("delete-user-button").addEventListener("click", async () => {
   const username = document.getElementById("assign-username").value;
-  if (!username || !window.confirm(`確定要刪除或停用 ${username} 嗎？`)) {
+  if (!username || !globalThis.confirm(`確定要刪除或停用 ${username} 嗎？`)) {
     return;
   }
   try {
     const user = await request(`/api/users/${encodeURIComponent(username)}`, { method: "DELETE" });
-    showMessage("帳號已處理", user.deleted ? `${username} 已刪除` : `${user.username} 已停用`);
+    const lineInfo = user.lineId ? `，產線 ${user.lineId}` : "";
+    showMessage("帳號已處理", user.deleted ? `${username} 已刪除` : `${user.username} 已停用${lineInfo}`);
     await loadUsers();
   } catch (error) {
     showMessage("帳號刪除失敗", error.message, "warn");
@@ -214,7 +217,7 @@ document.getElementById("refresh-hpa-peak").addEventListener("click", async () =
 });
 
 document.getElementById("clear-hpa-peak").addEventListener("click", async () => {
-  const ok = window.confirm("確定要清除舊版 L001-L200 排程尖峰資料嗎？web traffic autoscaling demo 本身不需要建立訂單或任務。");
+  const ok = globalThis.confirm("確定要清除舊版 L001-L200 排程尖峰資料嗎？web traffic autoscaling demo 本身不需要建立訂單或任務。");
   if (!ok) {
     return;
   }
@@ -278,7 +281,7 @@ document.getElementById("cancel-selected").addEventListener("click", async () =>
     showMessage("請先選取訂單", "沒有可以取消的訂單。", "warn");
     return;
   }
-  const ok = window.confirm(`確定取消 ${state.selectedOrderIds.size} 張已選取訂單嗎？`);
+  const ok = globalThis.confirm(`確定取消 ${state.selectedOrderIds.size} 張已選取訂單嗎？`);
   if (!ok) {
     return;
   }
@@ -403,7 +406,6 @@ document.getElementById("confirm-schedule-job").addEventListener("click", async 
       return;
     }
     const scheduledOrderIds = state.preview.request.orderIds;
-    const scheduledCount = scheduledOrderIds.length;
     closePreviewPage();
     scheduledOrderIds.forEach((orderId) => state.selectedOrderIds.delete(orderId));
     if (payload.status === "queued" || payload.status === "running") {
@@ -419,84 +421,28 @@ document.getElementById("confirm-schedule-job").addEventListener("click", async 
 });
 
 document.getElementById("close-preview-page").addEventListener("click", closePreviewPage);
+const previewActionHandlers = {
+  "return-workstation": handleReturnWorkstationPreviewAction,
+  "retry-today": handleRetryTodayPreviewAction,
+  "retry-suggested-start": handleRetrySuggestedStartPreviewAction,
+  "update-conflict-due-date": handleUpdateConflictDueDatePreviewAction,
+  "unselect-conflict-order": handleUnselectConflictOrderPreviewAction,
+  "reject-preview-orders": handleRejectPreviewOrdersPreviewAction,
+  "preview-conflict-solution": handlePreviewConflictSolutionPreviewAction,
+  "retry-manual-force": handleRetryManualForcePreviewAction,
+};
+
 document.getElementById("preview-page-list").addEventListener("click", async (event) => {
   const action = event.target.dataset.previewAction;
   if (!action || !state.preview) {
     return;
   }
-  if (action === "return-workstation") {
-    closePreviewPage();
+  const handler = previewActionHandlers[action];
+  if (!handler) {
     return;
   }
   try {
-    if (action === "retry-today") {
-      await retryPreview({ startDate: tomorrowDateInputValue(), manualForce: false, reason: "" });
-      return;
-    }
-    if (action === "retry-suggested-start") {
-      await retryPreview({ startDate: suggestedStartDate(state.preview), manualForce: false, reason: "" });
-      return;
-    }
-    if (action === "update-conflict-due-date") {
-      const orderId = event.target.dataset.orderId;
-      const input = document.querySelector(`[data-conflict-due-date="${cssEscape(orderId)}"]`);
-      if (!input?.value) {
-        showMessage("請選擇交期", "修改交期後才能重新試排。", "warn");
-        return;
-      }
-      assertFutureDueDate(input.value);
-      await updateOrderDueDate(orderId, input.value);
-      await loadOrders();
-      await retryPreview({});
-      return;
-    }
-    if (action === "unselect-conflict-order") {
-      const orderId = event.target.dataset.orderId;
-      state.selectedOrderIds.delete(orderId);
-      const orderIds = state.preview.request.orderIds.filter((id) => id !== orderId);
-      if (orderIds.length === 0) {
-        closePreviewPage();
-        renderOrders();
-        showMessage("已取消選取", "沒有剩餘訂單可試排。");
-        return;
-      }
-      await retryPreview({ orderIds });
-      renderOrders();
-      return;
-    }
-    if (action === "reject-preview-orders") {
-      openRejectDialog(state.preview.request.orderIds);
-      return;
-    }
-    if (action === "preview-conflict-solution") {
-      const orderIds = checkedValues("[data-conflict-solution-order]");
-      const resolutionOrderIds = checkedValues("[data-conflict-resolution-order]");
-      if (orderIds.length === 0) {
-        showMessage("請選取訂單", "至少選取一張訂單才能產生最早完成解法。", "warn");
-        return;
-      }
-      await retryPreview({
-        orderIds,
-        resolutionOrderIds,
-        allowLateCompletion: true,
-        manualForce: false,
-        reason: "",
-      });
-      return;
-    }
-    if (action === "retry-manual-force") {
-      const conflicts = state.preview.conflicts ?? [];
-      if (!conflictsCanBeManuallyForced(conflicts)) {
-        showMessage("無法人工介入", "容量無法在交期前排完的衝突不能強制送出，請調整開始日期、交期或拆單。", "warn");
-        return;
-      }
-      const reason = document.getElementById("conflict-force-reason").value.trim();
-      if (!reason) {
-        showMessage("請填寫原因", "人工強制介入必須留下原因，才能重新試排。", "warn");
-        return;
-      }
-      await retryPreview({ manualForce: true, reason });
-    }
+    await handler(event);
   } catch (error) {
     showMessage("重新試排失敗", error.message, "warn");
   }
@@ -520,17 +466,19 @@ document.getElementById("today-month").addEventListener("click", async () => {
 configureLineForUser();
 renderAuthState();
 if (state.token) {
-  refreshWorkspace().catch((error) => {
+  try {
+    await refreshWorkspace();
+  } catch (error) {
     renderAuthState();
     if (error.status === 401) {
       clearSession();
       renderAuthState();
       showMessage("登入狀態已失效", error.message, "warn");
-      return;
+    } else {
+      renderWorkspace();
+      showMessage("工作區重新整理失敗", error.message, "warn");
     }
-    renderWorkspace();
-    showMessage("工作區重新整理失敗", error.message, "warn");
-  });
+  }
 } else {
   renderWorkspace();
 }
@@ -560,6 +508,79 @@ function renderWorkspace() {
   renderScheduleHistory();
   renderHPAPeakSummary();
   syncDueDateMinimums();
+}
+
+async function handleReturnWorkstationPreviewAction() {
+  closePreviewPage();
+}
+
+async function handleRetryTodayPreviewAction() {
+  await retryPreview({ startDate: tomorrowDateInputValue(), manualForce: false, reason: "" });
+}
+
+async function handleRetrySuggestedStartPreviewAction() {
+  await retryPreview({ startDate: suggestedStartDate(state.preview), manualForce: false, reason: "" });
+}
+
+async function handleUpdateConflictDueDatePreviewAction(event) {
+  const orderId = event.target.dataset.orderId;
+  const input = document.querySelector(`[data-conflict-due-date="${cssEscape(orderId)}"]`);
+  if (!input?.value) {
+    showMessage("請選擇交期", "修改交期後才能重新試排。", "warn");
+    return;
+  }
+  assertFutureDueDate(input.value);
+  await updateOrderDueDate(orderId, input.value);
+  await loadOrders();
+  await retryPreview({});
+}
+
+async function handleUnselectConflictOrderPreviewAction(event) {
+  const orderId = event.target.dataset.orderId;
+  state.selectedOrderIds.delete(orderId);
+  const orderIds = state.preview.request.orderIds.filter((id) => id !== orderId);
+  if (orderIds.length === 0) {
+    closePreviewPage();
+    renderOrders();
+    showMessage("已取消選取", "沒有剩餘訂單可試排。");
+    return;
+  }
+  await retryPreview({ orderIds });
+  renderOrders();
+}
+
+async function handleRejectPreviewOrdersPreviewAction() {
+  openRejectDialog(state.preview.request.orderIds);
+}
+
+async function handlePreviewConflictSolutionPreviewAction() {
+  const orderIds = checkedValues("[data-conflict-solution-order]");
+  const resolutionOrderIds = checkedValues("[data-conflict-resolution-order]");
+  if (orderIds.length === 0) {
+    showMessage("請選取訂單", "至少選取一張訂單才能產生最早完成解法。", "warn");
+    return;
+  }
+  await retryPreview({
+    orderIds,
+    resolutionOrderIds,
+    allowLateCompletion: true,
+    manualForce: false,
+    reason: "",
+  });
+}
+
+async function handleRetryManualForcePreviewAction() {
+  const conflicts = state.preview.conflicts ?? [];
+  if (!conflictsCanBeManuallyForced(conflicts)) {
+    showMessage("無法人工介入", "容量無法在交期前排完的衝突不能強制送出，請調整開始日期、交期或拆單。", "warn");
+    return;
+  }
+  const reason = document.getElementById("conflict-force-reason").value.trim();
+  if (!reason) {
+    showMessage("請填寫原因", "人工強制介入必須留下原因，才能重新試排。", "warn");
+    return;
+  }
+  await retryPreview({ manualForce: true, reason });
 }
 
 async function loadOrders() {
@@ -602,7 +623,7 @@ function syncHPAPeakPolling() {
     && isHPAPeakActive(state.hpaPeak);
   if (!active) {
     if (hpaPeakPoller) {
-      window.clearInterval(hpaPeakPoller);
+      globalThis.clearInterval(hpaPeakPoller);
       hpaPeakPoller = null;
     }
     return;
@@ -610,7 +631,7 @@ function syncHPAPeakPolling() {
   if (hpaPeakPoller) {
     return;
   }
-  hpaPeakPoller = window.setInterval(async () => {
+  hpaPeakPoller = globalThis.setInterval(async () => {
     if (hpaPeakPollInFlight) {
       return;
     }
@@ -757,7 +778,6 @@ function renderHPAPeakSummary() {
     panel.textContent = "尚未載入 web autoscaling 狀態";
     return;
   }
-  const hpaStatuses = summary.statuses ?? {};
   const failedMessages = summary.failedMessages?.length
     ? `<div class="hpa-failures">${summary.failedMessages.map((message) => `<span>${escapeHtml(message)}</span>`).join("")}</div>`
     : "";
@@ -1970,10 +1990,10 @@ function suggestedStartDate(preview) {
 }
 
 function cssEscape(value) {
-  if (window.CSS?.escape) {
+  if (globalThis.CSS?.escape) {
     return CSS.escape(value);
   }
-  return String(value).replaceAll('"', '\\"');
+  return String(value).replaceAll('"', String.raw`\"`);
 }
 
 function checkedValues(selector) {
@@ -2154,14 +2174,14 @@ async function waitForScheduleJob(jobId, attempts = 20) {
 
 function delay(ms) {
   return new Promise((resolve) => {
-    window.setTimeout(resolve, ms);
+    globalThis.setTimeout(resolve, ms);
   });
 }
 
 async function request(path, options = {}, needsAuth = true) {
   const headers = {
     "Content-Type": "application/json",
-    ...(options.headers ?? {}),
+    ...(options.headers),
   };
   if (needsAuth) {
     if (!state.token) {
@@ -2305,7 +2325,7 @@ function selectableOrders() {
 
 function allConflictAcknowledgementsChecked() {
   const boxes = Array.from(document.querySelectorAll("[data-conflict-ack]"));
-  return boxes.length === 0 || boxes.every((box) => box.checked);
+  return boxes.every((box) => box.checked);
 }
 
 function canScheduleOnDate(dateKey) {

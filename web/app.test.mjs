@@ -385,6 +385,11 @@ function installBrowserGlobalsWithFetch(document, fetchImpl, initialStorage = {}
     HTMLElement: MiniElement,
     HTMLDialogElement: MiniElement,
     CSS: { escape: (value) => String(value).replaceAll('"', '\\"') },
+    confirm: window.confirm,
+    setInterval: window.setInterval,
+    clearInterval: window.clearInterval,
+    setTimeout: window.setTimeout,
+    clearTimeout: window.clearTimeout,
   };
   for (const [key, value] of Object.entries(globals)) {
     previous.set(key, globalThis[key]);
@@ -1593,20 +1598,20 @@ test("conflict preview actions retry edit unselect reject solve and validate man
   const previewHandlerEnd = app.indexOf('document.getElementById("prev-month")', previewHandlerStart);
   const previewHandler = app.slice(previewHandlerStart, previewHandlerEnd);
 
-  assert.match(previewHandler, /action === "retry-today"/);
-  assert.match(previewHandler, /action === "retry-suggested-start"/);
+  assert.match(app, /"retry-today": handleRetryTodayPreviewAction/);
+  assert.match(app, /"retry-suggested-start": handleRetrySuggestedStartPreviewAction/);
   assert.match(app, /data-preview-action="update-conflict-due-date"/);
   assert.match(app, /data-preview-action="unselect-conflict-order"/);
   assert.match(app, /data-preview-action="reject-preview-orders"/);
   assert.match(app, /data-preview-action="preview-conflict-solution"/);
-  assert.match(previewHandler, /action === "retry-manual-force"/);
-  assert.match(previewHandler, /await retryPreview\(\{ startDate: tomorrowDateInputValue\(\), manualForce: false, reason: "" \}\)/);
-  assert.match(previewHandler, /await updateOrderDueDate\(orderId, input\.value\)/);
-  assert.match(previewHandler, /state\.selectedOrderIds\.delete\(orderId\)/);
-  assert.match(previewHandler, /openRejectDialog\(state\.preview\.request\.orderIds\)/);
-  assert.match(previewHandler, /orderIds\.length === 0[\s\S]*至少選取一張訂單/);
-  assert.match(previewHandler, /!reason[\s\S]*人工強制介入必須留下原因/);
-  assert.match(previewHandler, /await retryPreview\(\{ manualForce: true, reason \}\)/);
+  assert.match(app, /"retry-manual-force": handleRetryManualForcePreviewAction/);
+  assert.match(app, /async function handleRetryTodayPreviewAction\(\)[\s\S]*await retryPreview\(\{ startDate: tomorrowDateInputValue\(\), manualForce: false, reason: "" \}\)/);
+  assert.match(app, /async function handleUpdateConflictDueDatePreviewAction\(event\)[\s\S]*await updateOrderDueDate\(orderId, input\.value\)/);
+  assert.match(app, /async function handleUnselectConflictOrderPreviewAction\(event\)[\s\S]*state\.selectedOrderIds\.delete\(orderId\)/);
+  assert.match(app, /async function handleRejectPreviewOrdersPreviewAction\(\)[\s\S]*openRejectDialog\(state\.preview\.request\.orderIds\)/);
+  assert.match(app, /async function handlePreviewConflictSolutionPreviewAction\(\)[\s\S]*orderIds\.length === 0[\s\S]*至少選取一張訂單/);
+  assert.match(app, /async function handleRetryManualForcePreviewAction\(\)[\s\S]*!reason[\s\S]*人工強制介入必須留下原因/);
+  assert.match(app, /async function handleRetryManualForcePreviewAction\(\)[\s\S]*await retryPreview\(\{ manualForce: true, reason \}\)/);
 });
 
 test("production flow starts scheduled orders and confirms allocation quantities", () => {

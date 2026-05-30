@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"net"
 	"os"
 	"os/exec"
@@ -8,6 +10,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/d11nn/woms/internal/api"
+	"github.com/d11nn/woms/internal/auth"
+	"github.com/d11nn/woms/internal/domain"
 )
 
 func TestParseAPIConfigDefaults(t *testing.T) {
@@ -90,6 +96,73 @@ func TestParseAPIConfigFallsBackForMalformedAndNegativeDurations(t *testing.T) {
 	}
 	if config.DependencyInterval != 2*time.Second {
 		t.Fatalf("DependencyInterval = %s, want fallback", config.DependencyInterval)
+	}
+}
+
+func TestBuildStoreSelectsMemoryStore(t *testing.T) {
+	store, cleanup, err := buildStore(apiConfig{
+		StoreMode:    "memory",
+		DemoSeedData: false,
+	})
+	if err != nil {
+		t.Fatalf("buildStore returned error: %v", err)
+	}
+	defer cleanup()
+
+	if _, ok := store.(*api.MemoryStore); !ok {
+		t.Fatalf("store type = %T, want *api.MemoryStore", store)
+	}
+	orders := store.ListOrders(auth.Claims{Role: domain.RoleAdmin})
+	if len(orders) != 0 {
+		t.Fatalf("memory store seeded %d orders, want none", len(orders))
+	}
+}
+
+func TestBuildStoreSelectsDemoMemoryStore(t *testing.T) {
+	store, cleanup, err := buildStore(apiConfig{
+		StoreMode:    "memory",
+		DemoSeedData: true,
+	})
+	if err != nil {
+		t.Fatalf("buildStore returned error: %v", err)
+	}
+	defer cleanup()
+
+	orders := store.ListOrders(auth.Claims{Role: domain.RoleAdmin})
+	if len(orders) != 9 {
+		t.Fatalf("demo memory store seeded %d orders, want 9", len(orders))
+	}
+}
+
+func TestBuildTokenSessionsRejectsRedisWithoutAddress(t *testing.T) {
+	_, cleanup, err := buildTokenSessions(apiConfig{AuthSessionStore: "redis"})
+	defer cleanup()
+
+	if err == nil {
+		t.Fatal("buildTokenSessions returned nil error, want missing REDIS_ADDR error")
+	}
+	if !strings.Contains(err.Error(), "AUTH_SESSION_STORE=redis requires REDIS_ADDR") {
+		t.Fatalf("buildTokenSessions error = %q, want REDIS_ADDR validation", err)
+	}
+}
+
+func TestRetryDependencyWrapperUsesInjectedOperation(t *testing.T) {
+	attempts := 0
+	err := retryKafka(apiConfig{
+		DependencyTimeout:  time.Second,
+		DependencyInterval: time.Nanosecond,
+	}, func(context.Context) error {
+		attempts++
+		if attempts == 1 {
+			return errors.New("not ready")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("retryKafka returned error: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
 	}
 }
 

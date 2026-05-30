@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -15,58 +17,24 @@ import (
 
 func main() {
 	config := parseAPIConfig(os.Getenv)
-	var store api.Store
-	if config.StoreMode == "postgres" {
-		ctx, cancel := context.WithTimeout(context.Background(), config.DependencyTimeout)
-		var postgresStore *api.PostgresStore
-		err := startup.RetryDependency(ctx, "postgres store", config.DependencyInterval, log.Printf, func(ctx context.Context) error {
-			var err error
-			postgresStore, err = api.NewPostgresStoreContext(ctx, config.DatabaseURL, config.DemoSeedData)
-			return err
-		})
-		cancel()
-		if err != nil {
-			log.Fatalf("postgres store failed: %v", err)
-		}
-		defer postgresStore.Close()
-		store = postgresStore
-	} else {
-		memoryStore := api.NewMemoryStore()
-		if config.DemoSeedData {
-			memoryStore = api.NewDemoMemoryStore()
-		}
-		store = memoryStore
+
+	store, closeStore, err := buildStore(config)
+	if err != nil {
+		log.Fatalf("postgres store failed: %v", err)
 	}
-	publisher := api.ScheduleJobPublisher(api.NoopScheduleJobPublisher{})
-	if config.KafkaPublishEnabled {
-		ctx, cancel := context.WithTimeout(context.Background(), config.DependencyTimeout)
-		if err := startup.RetryDependency(ctx, "kafka broker", config.DependencyInterval, log.Printf, func(ctx context.Context) error {
-			return startup.PingAnyTCP(ctx, config.KafkaBrokers)
-		}); err != nil {
-			cancel()
-			log.Fatalf("kafka broker failed: %v", err)
-		}
-		cancel()
-		publisher = api.NewKafkaScheduleJobPublisher(config.KafkaBrokers, config.KafkaScheduleTopic)
-		defer publisher.Close()
+	defer closeStore()
+
+	publisher, closePublisher, err := buildPublisher(config)
+	if err != nil {
+		log.Fatalf("kafka broker failed: %v", err)
 	}
-	tokenSessions := api.TokenSessionStore(api.NoopTokenSessionStore{})
-	if config.AuthSessionStore == "redis" {
-		if config.RedisAddr == "" {
-			log.Fatal("AUTH_SESSION_STORE=redis requires REDIS_ADDR")
-		}
-		redisSessions := api.NewRedisTokenSessionStore(config.RedisAddr)
-		ctx, cancel := context.WithTimeout(context.Background(), config.DependencyTimeout)
-		if err := startup.RetryDependency(ctx, "redis auth session store", config.DependencyInterval, log.Printf, func(ctx context.Context) error {
-			return redisSessions.Ping(ctx)
-		}); err != nil {
-			cancel()
-			log.Fatalf("redis auth session store failed: %v", err)
-		}
-		cancel()
-		tokenSessions = redisSessions
-		defer tokenSessions.Close()
+	defer closePublisher()
+
+	tokenSessions, closeTokenSessions, err := buildTokenSessions(config)
+	if err != nil {
+		log.Fatal(err)
 	}
+	defer closeTokenSessions()
 
 	server := &http.Server{
 		Addr: config.HTTPAddr,
@@ -99,6 +67,83 @@ type apiConfig struct {
 	AuthMode            string
 	DependencyTimeout   time.Duration
 	DependencyInterval  time.Duration
+}
+
+func buildStore(config apiConfig) (api.Store, func(), error) {
+	if config.StoreMode == "postgres" {
+		var postgresStore *api.PostgresStore
+		err := retryPostgres(config, func(ctx context.Context) error {
+			var err error
+			postgresStore, err = api.NewPostgresStoreContext(ctx, config.DatabaseURL, config.DemoSeedData)
+			return err
+		})
+		if err != nil {
+			return nil, noopCleanup, err
+		}
+		return postgresStore, func() { postgresStore.Close() }, nil
+	}
+
+	memoryStore := api.NewMemoryStore()
+	if config.DemoSeedData {
+		memoryStore = api.NewDemoMemoryStore()
+	}
+	return memoryStore, noopCleanup, nil
+}
+
+func buildPublisher(config apiConfig) (api.ScheduleJobPublisher, func(), error) {
+	publisher := api.ScheduleJobPublisher(api.NoopScheduleJobPublisher{})
+	if config.KafkaPublishEnabled {
+		if err := retryKafka(config, func(ctx context.Context) error {
+			return startup.PingAnyTCP(ctx, config.KafkaBrokers)
+		}); err != nil {
+			return nil, noopCleanup, err
+		}
+		publisher = api.NewKafkaScheduleJobPublisher(config.KafkaBrokers, config.KafkaScheduleTopic)
+		return publisher, func() { publisher.Close() }, nil
+	}
+
+	return publisher, noopCleanup, nil
+}
+
+func buildTokenSessions(config apiConfig) (api.TokenSessionStore, func(), error) {
+	tokenSessions := api.TokenSessionStore(api.NoopTokenSessionStore{})
+	if config.AuthSessionStore == "redis" {
+		if config.RedisAddr == "" {
+			return nil, noopCleanup, errors.New("AUTH_SESSION_STORE=redis requires REDIS_ADDR")
+		}
+		redisSessions := api.NewRedisTokenSessionStore(config.RedisAddr)
+		if err := retryRedis(config, func(ctx context.Context) error {
+			return redisSessions.Ping(ctx)
+		}); err != nil {
+			return nil, noopCleanup, fmt.Errorf("redis auth session store failed: %w", err)
+		}
+		tokenSessions = redisSessions
+		return tokenSessions, func() { tokenSessions.Close() }, nil
+	}
+
+	return tokenSessions, noopCleanup, nil
+}
+
+func retryPostgres(config apiConfig, operation func(context.Context) error) error {
+	return retryDependency(config, "postgres store", operation)
+}
+
+func retryKafka(config apiConfig, operation func(context.Context) error) error {
+	return retryDependency(config, "kafka broker", operation)
+}
+
+func retryRedis(config apiConfig, operation func(context.Context) error) error {
+	return retryDependency(config, "redis auth session store", operation)
+}
+
+func retryDependency(config apiConfig, name string, operation func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), config.DependencyTimeout)
+	defer cancel()
+	return startup.RetryDependency(ctx, name, config.DependencyInterval, log.Printf, operation)
+}
+
+func noopCleanup() {
+	// No resources to clean up
 }
 
 func parseAPIConfig(lookup func(string) string) apiConfig {

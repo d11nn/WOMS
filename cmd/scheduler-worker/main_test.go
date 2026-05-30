@@ -221,7 +221,7 @@ func TestAcquireLineLockStopsOnNonContentionError(t *testing.T) {
 
 func TestProcessJobPayloadRejectsInvalidJSON(t *testing.T) {
 	executor := &fakeJobExecutor{}
-	err := processJobPayload(context.Background(), executor, nil, []byte("{"), 3, time.Second, 0, time.Second)
+	err := processJobPayload(context.Background(), executor, nil, []byte("{"), workerJobConfig{maxRetries: 3, lockTTL: time.Second, lockTimeout: time.Second})
 	if err == nil {
 		t.Fatal("expected invalid JSON error")
 	}
@@ -238,7 +238,7 @@ func TestProcessJobPayloadIgnoresMissingJobOrLineID(t *testing.T) {
 	for _, job := range cases {
 		payload := mustMarshalJob(t, job)
 		executor := &fakeJobExecutor{}
-		if err := processJobPayload(context.Background(), executor, nil, payload, 3, time.Second, 0, time.Second); err != nil {
+		if err := processJobPayload(context.Background(), executor, nil, payload, workerJobConfig{maxRetries: 3, lockTTL: time.Second, lockTimeout: time.Second}); err != nil {
 			t.Fatalf("missing ID/line should be ignored: %v", err)
 		}
 		if executor.failedJobs != 0 || executor.retryJobs != 0 || executor.lockedJobs != 0 {
@@ -250,7 +250,7 @@ func TestProcessJobPayloadIgnoresMissingJobOrLineID(t *testing.T) {
 func TestProcessJobPayloadMarksFailedWhenLockProviderMissing(t *testing.T) {
 	executor := &fakeJobExecutor{}
 	payload := mustMarshalJob(t, domain.ScheduleJob{ID: "JOB-1", LineID: "A"})
-	if err := processJobPayload(context.Background(), executor, nil, payload, 3, time.Second, 0, time.Second); err != nil {
+	if err := processJobPayload(context.Background(), executor, nil, payload, workerJobConfig{maxRetries: 3, lockTTL: time.Second, lockTimeout: time.Second}); err != nil {
 		t.Fatalf("process payload: %v", err)
 	}
 	if executor.failedJobs != 1 || executor.failedJobID != "JOB-1" {
@@ -265,7 +265,7 @@ func TestProcessJobPayloadMarksRetryWhenLockAcquisitionTimesOut(t *testing.T) {
 	executor := &fakeJobExecutor{}
 	provider := &retryLockProvider{failures: 100}
 	payload := mustMarshalJob(t, domain.ScheduleJob{ID: "JOB-2", LineID: "A"})
-	if err := processJobPayload(context.Background(), executor, provider, payload, 3, time.Second, 0, time.Nanosecond); err != nil {
+	if err := processJobPayload(context.Background(), executor, provider, payload, workerJobConfig{maxRetries: 3, lockTTL: time.Second, lockTimeout: time.Nanosecond}); err != nil {
 		t.Fatalf("process payload: %v", err)
 	}
 	if executor.retryJobs != 1 || executor.retryJobID != "JOB-2" {
@@ -305,7 +305,7 @@ func TestProcessJobPayloadStopsLockedWorkWhenRenewalFails(t *testing.T) {
 		},
 	}
 	payload := mustMarshalJob(t, domain.ScheduleJob{ID: "JOB-3", LineID: "A"})
-	err := processJobPayload(context.Background(), executor, provider, payload, 3, time.Second, time.Millisecond, time.Second)
+	err := processJobPayload(context.Background(), executor, provider, payload, workerJobConfig{maxRetries: 3, lockTTL: time.Second, lockRenewInterval: time.Millisecond, lockTimeout: time.Second})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected canceled work after renewal failure, got %v", err)
 	}
@@ -988,7 +988,7 @@ func TestProcessDBJob(t *testing.T) {
 		WithArgs("job-1", "Redis 排程鎖未設定。").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
-	err = processDBJob(context.Background(), db, nil, payload, 3, time.Second, time.Second, time.Second)
+	err = processDBJob(context.Background(), db, nil, payload, workerJobConfig{maxRetries: 3, lockTTL: time.Second, lockRenewInterval: time.Second, lockTimeout: time.Second})
 	if err != nil {
 		t.Fatalf("processDBJob failed: %v", err)
 	}
@@ -1389,14 +1389,14 @@ func TestProcessJobPayloadErrorPropagation(t *testing.T) {
 	// 1. markJobFailed error propagation when lockProvider is nil
 	executor := errorJobExecutor{err: errors.New("failed to mark failed")}
 	payload := mustMarshalJob(t, domain.ScheduleJob{ID: "JOB-1", LineID: "A"})
-	err := processJobPayload(context.Background(), &executor, nil, payload, 3, time.Second, 0, time.Second)
+	err := processJobPayload(context.Background(), &executor, nil, payload, workerJobConfig{maxRetries: 3, lockTTL: time.Second, lockTimeout: time.Second})
 	if err == nil || err.Error() != "failed to mark failed" {
 		t.Errorf("expected error, got %v", err)
 	}
 
 	// 2. markJobRetry error propagation when lock acquisition times out
 	provider := &retryLockProvider{failures: 100}
-	err = processJobPayload(context.Background(), &executor, provider, payload, 3, time.Second, 0, time.Nanosecond)
+	err = processJobPayload(context.Background(), &executor, provider, payload, workerJobConfig{maxRetries: 3, lockTTL: time.Second, lockTimeout: time.Nanosecond})
 	if err == nil || err.Error() != "failed to mark failed" {
 		t.Errorf("expected error, got %v", err)
 	}

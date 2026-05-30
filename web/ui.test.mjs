@@ -156,7 +156,7 @@ test("compose NGINX status allows the separate exporter container", () => {
 test("web Dockerfile keeps non-root NGINX pid in writable tmp", () => {
   const dockerfile = readFileSync(new URL("../Dockerfile.web", import.meta.url), "utf8");
 
-  assert.match(dockerfile, /sed -i 's\|pid\s+\/var\/run\/nginx\.pid;\|pid\s+\/tmp\/nginx\.pid;\|'/);
+  assert.match(dockerfile, /sed -i -E 's\|pid\[\[:space:\]\]\+\/run\/nginx\.pid;\|pid\s+\/tmp\/nginx\.pid;\|; s\|pid\[\[:space:\]\]\+\/var\/run\/nginx\.pid;\|pid\s+\/tmp\/nginx\.pid;\|'/);
   assert.match(dockerfile, /USER nginx/);
   assert.doesNotMatch(dockerfile, /USER root/);
 });

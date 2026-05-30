@@ -4,7 +4,7 @@ ENV GRAFANA_UPSTREAM=grafana:3000
 COPY web/docker-entrypoints.sh /docker-entrypoint.d/40-resolver.sh
 COPY web/nginx.conf.template /etc/nginx/templates/default.conf.template
 COPY web /usr/share/nginx/html
-RUN sed -i 's|pid        /var/run/nginx.pid;|pid        /tmp/nginx.pid;|' /etc/nginx/nginx.conf \
+RUN sed -i -E 's|pid[[:space:]]+/run/nginx.pid;|pid        /tmp/nginx.pid;|; s|pid[[:space:]]+/var/run/nginx.pid;|pid        /tmp/nginx.pid;|' /etc/nginx/nginx.conf \
     && chmod 755 /docker-entrypoint.d/40-resolver.sh \
     && chmod 644 /etc/nginx/templates/default.conf.template \
     && chmod -R a+rX /usr/share/nginx/html \

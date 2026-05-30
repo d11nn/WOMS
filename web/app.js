@@ -1364,9 +1364,8 @@ function renderPreviewCalendar(allocations) {
   const calendarAllocations = isSalesDraft
     ? visibleAllocations
     : [...mergePreviewCalendarAllocations(markedPreviewAllocations, state.calendarAllocations, resolutionOrderIds), ...movedFromAllocations];
-  const previewMonth = firstPreviewDate(visibleAllocations) ?? firstPreviewDate(previewAllocations) ?? state.calendarDate;
-  const year = previewMonth.getUTCFullYear();
-  const monthIndex = previewMonth.getUTCMonth();
+  const year = state.calendarDate.getUTCFullYear();
+  const monthIndex = state.calendarDate.getUTCMonth();
   const groups = groupAllocationsByDate(calendarAllocations);
   const grid = document.getElementById("preview-calendar-grid");
   grid.innerHTML = "";
@@ -1375,6 +1374,7 @@ function renderPreviewCalendar(allocations) {
     const effectiveAllocations = dayAllocations.filter((allocation) => !allocation.movedFromPreview);
     const cell = document.createElement("div");
     cell.className = `calendar-day ${day.inMonth ? "" : "outside"} ${dayAllocations.some((item) => item.preview) ? "preview-highlight" : ""}`;
+    cell.dataset.date = day.key;
     cell.innerHTML = `
       <div class="calendar-day-number">
         <span>${day.date.getUTCDate()}</span>
@@ -2314,13 +2314,6 @@ function canScheduleOnDate(dateKey) {
 
 function conflictsCanBeManuallyForced(conflicts) {
   return conflicts.every((conflict) => conflict.reason === "existing allocations require manual review or reschedule");
-}
-
-function firstPreviewDate(allocations) {
-  if (!allocations.length) {
-    return null;
-  }
-  return new Date(allocations[0].date);
 }
 
 function dateOnly(value) {

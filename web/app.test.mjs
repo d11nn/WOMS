@@ -451,6 +451,10 @@ function renderedMarkup(element) {
   ].join("");
 }
 
+function calendarDateKeys(element) {
+  return element.children.map((child) => child.dataset.date);
+}
+
 async function settleApp() {
   for (let index = 0; index < 100; index += 1) {
     await Promise.resolve();
@@ -1489,6 +1493,57 @@ test("sales draft conflict preview shows successful draft schedule and excludes 
     assert.match(allMarkup, /ORD-SCHEDULED/);
     assert.match(allMarkup, /ORD-A[\s\S]*ORD-B[\s\S]*PREVIEW-DRAFT[\s\S]*ORD-C/);
     assert.doesNotMatch(allMarkup, /ORD-D/);
+  } finally {
+    restoreGlobals();
+  }
+});
+
+test("preview calendars keep the same visible dates as the monthly calendar", async () => {
+  const document = buildDomFromIndex();
+  const distantPreviewDate = dateKeyAfter(45);
+  const fetchImpl = async (path, options = {}) => {
+    if (path === "/api/auth/login") {
+      return jsonResponse({
+        token: "token-sales",
+        user: { id: "user-sales", username: "sales", role: "sales" },
+      });
+    }
+    if (path === "/api/lines") {
+      return jsonResponse({
+        lines: [{ id: "A", name: "Line A", capacityPerDay: 10000, timezone: "Asia/Taipei" }],
+      });
+    }
+    if (path === "/api/orders") {
+      return jsonResponse({ orders: [] });
+    }
+    if (String(path).startsWith("/api/schedules/calendar?")) {
+      return jsonResponse({ allocations: [], pendingAllocations: [] });
+    }
+    if (path === "/api/schedules/preview") {
+      assert.equal(options.method, "POST");
+      return jsonResponse({
+        previewId: "PREVIEW-DRAFT",
+        currentDate: dateKeyAfter(0),
+        allocations: [
+          { orderId: "PREVIEW-DRAFT", customer: "Far", lineId: "A", date: distantPreviewDate, quantity: 2500, priority: "low", status: "待排程" },
+        ],
+        conflicts: [],
+      });
+    }
+    throw new Error(`unexpected fetch ${path}`);
+  };
+  const restoreGlobals = installBrowserGlobalsWithFetch(document, fetchImpl);
+  try {
+    await import(appModuleUrl("preview-calendar-grid-dates"));
+
+    await document.getElementById("login-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+    const monthlyDates = calendarDateKeys(document.getElementById("calendar-grid"));
+
+    await document.getElementById("order-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+
+    assert.deepEqual(calendarDateKeys(document.getElementById("preview-calendar-grid")), monthlyDates);
   } finally {
     restoreGlobals();
   }

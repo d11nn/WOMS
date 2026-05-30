@@ -184,7 +184,7 @@ document.getElementById("reset-password-form").addEventListener("submit", async 
 
 document.getElementById("delete-user-button").addEventListener("click", async () => {
   const username = document.getElementById("assign-username").value;
-  if (!username || !window.confirm(`確定要刪除或停用 ${username} 嗎？`)) {
+  if (!username || !globalThis.confirm(`確定要刪除或停用 ${username} 嗎？`)) {
     return;
   }
   try {
@@ -217,7 +217,7 @@ document.getElementById("refresh-hpa-peak").addEventListener("click", async () =
 });
 
 document.getElementById("clear-hpa-peak").addEventListener("click", async () => {
-  const ok = window.confirm("確定要清除舊版 L001-L200 排程尖峰資料嗎？web traffic autoscaling demo 本身不需要建立訂單或任務。");
+  const ok = globalThis.confirm("確定要清除舊版 L001-L200 排程尖峰資料嗎？web traffic autoscaling demo 本身不需要建立訂單或任務。");
   if (!ok) {
     return;
   }
@@ -281,7 +281,7 @@ document.getElementById("cancel-selected").addEventListener("click", async () =>
     showMessage("請先選取訂單", "沒有可以取消的訂單。", "warn");
     return;
   }
-  const ok = window.confirm(`確定取消 ${state.selectedOrderIds.size} 張已選取訂單嗎？`);
+  const ok = globalThis.confirm(`確定取消 ${state.selectedOrderIds.size} 張已選取訂單嗎？`);
   if (!ok) {
     return;
   }

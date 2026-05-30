@@ -143,6 +143,7 @@ func retryDependency(config apiConfig, name string, operation func(context.Conte
 }
 
 func noopCleanup() {
+	// No resources to clean up
 }
 
 func parseAPIConfig(lookup func(string) string) apiConfig {

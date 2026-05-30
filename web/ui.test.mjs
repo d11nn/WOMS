@@ -19,6 +19,7 @@ import {
   matchesOrder,
   monthGrid,
   priorityLabel,
+  sortCalendarAllocations,
   sortOrdersForWorkstation,
   statusClass,
   statusCounts,
@@ -437,6 +438,20 @@ test("groupAllocationsByDate groups calendar allocations by ISO date", () => {
   ]);
   assert.deepEqual(groups["2026-05-02"].map((item) => item.orderId), ["ORD-0000001", "ORD-0000002"]);
   assert.deepEqual(groups["2026-05-03"].map((item) => item.orderId), ["ORD-0000003"]);
+});
+
+test("sortCalendarAllocations orders by priority due date and older created timestamp", () => {
+  const allocations = [
+    { orderId: "ORD-B", priority: "low", dueDate: "2026-05-30", createdAtTimestamp: 1772271715000 },
+    { orderId: "ORD-HIGH", priority: "high", dueDate: "2026-06-10", createdAtTimestamp: 1772271719000 },
+    { orderId: "ORD-LATE", priority: "low", dueDate: "2026-06-01", createdAtTimestamp: 1772271710000 },
+    { orderId: "ORD-A", priority: "low", dueDate: "2026-05-30", createdAtTimestamp: 1772271713000 },
+  ];
+
+  assert.deepEqual(
+    sortCalendarAllocations(allocations).map((allocation) => allocation.orderId),
+    ["ORD-HIGH", "ORD-A", "ORD-B", "ORD-LATE"],
+  );
 });
 
 test("mergePreviewCalendarAllocations replaces touched orders with preview entries", () => {

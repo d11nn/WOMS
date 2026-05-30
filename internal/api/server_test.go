@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -1867,6 +1868,33 @@ func TestSchedulerPreviewKeepsUnselectedPendingOrdersOutOfCapacity(t *testing.T)
 	}
 	if len(payload.Allocations) != 1 || payload.Allocations[0].OrderID != selectedOrderID || !strings.HasPrefix(payload.Allocations[0].Date, "2026-05-01") {
 		t.Fatalf("scheduler preview should ignore unselected pending capacity, got %+v", payload.Allocations)
+	}
+}
+
+func TestScheduleCalendarOrdersSameDayByPriorityDueDateAndCreatedTimestamp(t *testing.T) {
+	store := NewMemoryStore()
+	lineID := "A"
+	allocationDate := mustAPIDate(t, "2026-05-10")
+	dueDate := mustAPIDate(t, "2026-05-30")
+	store.orders["ORD-A"] = domain.Order{ID: "ORD-A", Customer: "ACME", LineID: lineID, Quantity: 100, Priority: domain.PriorityLow, Status: domain.StatusScheduled, DueDate: dueDate, CreatedAt: time.Unix(1772271713, 0).UTC()}
+	store.orders["ORD-B"] = domain.Order{ID: "ORD-B", Customer: "Beta", LineID: lineID, Quantity: 100, Priority: domain.PriorityLow, Status: domain.StatusScheduled, DueDate: dueDate, CreatedAt: time.Unix(1772271715, 0).UTC()}
+	store.orders["ORD-HIGH"] = domain.Order{ID: "ORD-HIGH", Customer: "Core", LineID: lineID, Quantity: 100, Priority: domain.PriorityHigh, Status: domain.StatusScheduled, DueDate: mustAPIDate(t, "2026-06-01"), CreatedAt: time.Unix(1772271719, 0).UTC()}
+	store.allocations = append(store.allocations,
+		domain.ScheduleAllocation{OrderID: "ORD-B", LineID: lineID, Date: allocationDate, Quantity: 100, Priority: domain.PriorityLow, Status: domain.StatusScheduled},
+		domain.ScheduleAllocation{OrderID: "ORD-HIGH", LineID: lineID, Date: allocationDate, Quantity: 100, Priority: domain.PriorityHigh, Status: domain.StatusScheduled},
+		domain.ScheduleAllocation{OrderID: "ORD-A", LineID: lineID, Date: allocationDate, Quantity: 100, Priority: domain.PriorityLow, Status: domain.StatusScheduled},
+	)
+
+	calendar, err := store.ScheduleCalendar(lineID, "2026-05", auth.Claims{Subject: "admin", Role: domain.RoleAdmin})
+	if err != nil {
+		t.Fatalf("ScheduleCalendar failed: %v", err)
+	}
+
+	if got := []string{calendar.Allocations[0].OrderID, calendar.Allocations[1].OrderID, calendar.Allocations[2].OrderID}; !reflect.DeepEqual(got, []string{"ORD-HIGH", "ORD-A", "ORD-B"}) {
+		t.Fatalf("unexpected calendar order: %+v", got)
+	}
+	if calendar.Allocations[1].CreatedAtTimestamp != 1772271713000 || calendar.Allocations[2].CreatedAtTimestamp != 1772271715000 {
+		t.Fatalf("expected unix millisecond created timestamps, got %+v", calendar.Allocations)
 	}
 }
 

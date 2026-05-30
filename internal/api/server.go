@@ -1607,16 +1607,17 @@ func (s *MemoryStore) previewClaimsLocked(previewID, lineID string) auth.Claims 
 }
 
 type calendarAllocation struct {
-	OrderID           string             `json:"orderId"`
-	Customer          string             `json:"customer"`
-	LineID            string             `json:"lineId"`
-	Date              time.Time          `json:"date"`
-	Quantity          int                `json:"quantity"`
-	CompletedQuantity int                `json:"completedQuantity,omitempty"`
-	Priority          domain.Priority    `json:"priority"`
-	Status            domain.OrderStatus `json:"status"`
-	Locked            bool               `json:"locked"`
-	DueDate           time.Time          `json:"dueDate"`
+	OrderID            string             `json:"orderId"`
+	Customer           string             `json:"customer"`
+	LineID             string             `json:"lineId"`
+	Date               time.Time          `json:"date"`
+	Quantity           int                `json:"quantity"`
+	CompletedQuantity  int                `json:"completedQuantity,omitempty"`
+	Priority           domain.Priority    `json:"priority"`
+	Status             domain.OrderStatus `json:"status"`
+	Locked             bool               `json:"locked"`
+	DueDate            time.Time          `json:"dueDate"`
+	CreatedAtTimestamp int64              `json:"createdAtTimestamp"`
 }
 
 type calendarResponse struct {
@@ -1677,24 +1678,20 @@ func (s *MemoryStore) ScheduleCalendar(lineID, month string, claims auth.Claims)
 			completedQuantity = order.Quantity
 		}
 		allocations = append(allocations, calendarAllocation{
-			OrderID:           allocation.OrderID,
-			Customer:          order.Customer,
-			LineID:            allocation.LineID,
-			Date:              allocationDate,
-			Quantity:          allocation.Quantity,
-			CompletedQuantity: completedQuantity,
-			Priority:          allocation.Priority,
-			Status:            status,
-			Locked:            allocation.Locked,
-			DueDate:           order.DueDate,
+			OrderID:            allocation.OrderID,
+			Customer:           order.Customer,
+			LineID:             allocation.LineID,
+			Date:               allocationDate,
+			Quantity:           allocation.Quantity,
+			CompletedQuantity:  completedQuantity,
+			Priority:           allocation.Priority,
+			Status:             status,
+			Locked:             allocation.Locked,
+			DueDate:            order.DueDate,
+			CreatedAtTimestamp: unixMilliseconds(order.CreatedAt),
 		})
 	}
-	sort.Slice(allocations, func(i, j int) bool {
-		if !allocations[i].Date.Equal(allocations[j].Date) {
-			return allocations[i].Date.Before(allocations[j].Date)
-		}
-		return allocations[i].OrderID < allocations[j].OrderID
-	})
+	sortCalendarAllocations(allocations)
 
 	pendingAllocations := []calendarAllocation{}
 	if claims.Role == domain.RoleSales {
@@ -1704,13 +1701,14 @@ func (s *MemoryStore) ScheduleCalendar(lineID, month string, claims auth.Claims)
 				continue
 			}
 			pendingInputs = append(pendingInputs, scheduler.OrderInput{
-				ID:       order.ID,
-				Customer: order.Customer,
-				LineID:   order.LineID,
-				Quantity: order.Quantity,
-				Priority: order.Priority,
-				Status:   order.Status,
-				DueDate:  order.DueDate,
+				ID:                 order.ID,
+				Customer:           order.Customer,
+				LineID:             order.LineID,
+				Quantity:           order.Quantity,
+				Priority:           order.Priority,
+				Status:             order.Status,
+				DueDate:            order.DueDate,
+				CreatedAtTimestamp: unixMilliseconds(order.CreatedAt),
 			})
 		}
 		existing := []scheduler.ExistingAllocation{}
@@ -1745,8 +1743,10 @@ func pendingBacklogCalendarAllocations(line domain.ProductionLine, pendingInputs
 		return []calendarAllocation{}, nil
 	}
 	orderDueDates := map[string]time.Time{}
+	orderCreatedAtTimestamps := map[string]int64{}
 	for _, input := range pendingInputs {
 		orderDueDates[input.ID] = input.DueDate
+		orderCreatedAtTimestamps[input.ID] = input.CreatedAtTimestamp
 	}
 	result, err := scheduler.Plan(scheduler.Request{
 		LineID:              line.ID,
@@ -1766,24 +1766,45 @@ func pendingBacklogCalendarAllocations(line domain.ProductionLine, pendingInputs
 			continue
 		}
 		allocations = append(allocations, calendarAllocation{
-			OrderID:  allocation.OrderID,
-			Customer: allocation.Customer,
-			LineID:   allocation.LineID,
-			Date:     allocationDate,
-			Quantity: allocation.Quantity,
-			Priority: allocation.Priority,
-			Status:   domain.StatusPending,
-			Locked:   allocation.Locked,
-			DueDate:  orderDueDates[allocation.OrderID],
+			OrderID:            allocation.OrderID,
+			Customer:           allocation.Customer,
+			LineID:             allocation.LineID,
+			Date:               allocationDate,
+			Quantity:           allocation.Quantity,
+			Priority:           allocation.Priority,
+			Status:             domain.StatusPending,
+			Locked:             allocation.Locked,
+			DueDate:            orderDueDates[allocation.OrderID],
+			CreatedAtTimestamp: orderCreatedAtTimestamps[allocation.OrderID],
 		})
 	}
+	sortCalendarAllocations(allocations)
+	return allocations, nil
+}
+
+func sortCalendarAllocations(allocations []calendarAllocation) {
 	sort.Slice(allocations, func(i, j int) bool {
 		if !allocations[i].Date.Equal(allocations[j].Date) {
 			return allocations[i].Date.Before(allocations[j].Date)
 		}
+		if allocations[i].Priority != allocations[j].Priority {
+			return allocations[i].Priority == domain.PriorityHigh
+		}
+		if !allocations[i].DueDate.Equal(allocations[j].DueDate) {
+			return allocations[i].DueDate.Before(allocations[j].DueDate)
+		}
+		if allocations[i].CreatedAtTimestamp != allocations[j].CreatedAtTimestamp {
+			return allocations[i].CreatedAtTimestamp < allocations[j].CreatedAtTimestamp
+		}
 		return allocations[i].OrderID < allocations[j].OrderID
 	})
-	return allocations, nil
+}
+
+func unixMilliseconds(value time.Time) int64 {
+	if value.IsZero() {
+		return 0
+	}
+	return value.UTC().UnixNano() / int64(time.Millisecond)
 }
 
 func (s *MemoryStore) ScheduleHistory(lineID string, claims auth.Claims) ([]domain.AuditEntry, error) {
@@ -2034,13 +2055,14 @@ func (s *MemoryStore) planLocked(req scheduleRequest, claims auth.Claims) (sched
 			return scheduler.Result{}, err
 		}
 		inputs = append(inputs, scheduler.OrderInput{
-			ID:       previewDraftOrderID,
-			Customer: strings.TrimSpace(draft.Customer),
-			LineID:   draft.LineID,
-			Quantity: draft.Quantity,
-			Priority: draft.Priority,
-			Status:   domain.StatusPending,
-			DueDate:  dueDate,
+			ID:                 previewDraftOrderID,
+			Customer:           strings.TrimSpace(draft.Customer),
+			LineID:             draft.LineID,
+			Quantity:           draft.Quantity,
+			Priority:           draft.Priority,
+			Status:             domain.StatusPending,
+			DueDate:            dueDate,
+			CreatedAtTimestamp: unixMilliseconds(nowUTC()),
 		})
 		// Sales draft previews account for the pending backlog as capacity usage
 		// and return those pending preview allocations for the preview dialog only.
@@ -2051,13 +2073,14 @@ func (s *MemoryStore) planLocked(req scheduleRequest, claims auth.Claims) (sched
 				continue
 			}
 			inputs = append(inputs, scheduler.OrderInput{
-				ID:       order.ID,
-				Customer: order.Customer,
-				LineID:   order.LineID,
-				Quantity: order.Quantity,
-				Priority: order.Priority,
-				Status:   order.Status,
-				DueDate:  order.DueDate,
+				ID:                 order.ID,
+				Customer:           order.Customer,
+				LineID:             order.LineID,
+				Quantity:           order.Quantity,
+				Priority:           order.Priority,
+				Status:             order.Status,
+				DueDate:            order.DueDate,
+				CreatedAtTimestamp: unixMilliseconds(order.CreatedAt),
 			})
 		}
 	}
@@ -2074,13 +2097,14 @@ func (s *MemoryStore) planLocked(req scheduleRequest, claims auth.Claims) (sched
 				continue
 			}
 			inputs = append(inputs, scheduler.OrderInput{
-				ID:       order.ID,
-				Customer: order.Customer,
-				LineID:   order.LineID,
-				Quantity: order.Quantity,
-				Priority: order.Priority,
-				Status:   order.Status,
-				DueDate:  order.DueDate,
+				ID:                 order.ID,
+				Customer:           order.Customer,
+				LineID:             order.LineID,
+				Quantity:           order.Quantity,
+				Priority:           order.Priority,
+				Status:             order.Status,
+				DueDate:            order.DueDate,
+				CreatedAtTimestamp: unixMilliseconds(order.CreatedAt),
 			})
 		}
 	}

@@ -156,12 +156,31 @@ export function monthGrid(year, monthIndex) {
 }
 
 export function groupAllocationsByDate(allocations) {
-	return allocations.reduce((groups, allocation) => {
+	return sortCalendarAllocations(allocations).reduce((groups, allocation) => {
     const key = new Date(allocation.date).toISOString().slice(0, 10);
     groups[key] = groups[key] ?? [];
     groups[key].push(allocation);
     return groups;
 	}, {});
+}
+
+export function sortCalendarAllocations(allocations) {
+  return [...allocations].sort(compareCalendarAllocations);
+}
+
+function compareCalendarAllocations(a, b) {
+  if (a.priority !== b.priority) {
+    return a.priority === "high" ? -1 : 1;
+  }
+  const dueDelta = dateValue(a.dueDate) - dateValue(b.dueDate);
+  if (dueDelta !== 0) {
+    return dueDelta;
+  }
+  const createdDelta = createdAtTimestampValue(a) - createdAtTimestampValue(b);
+  if (createdDelta !== 0) {
+    return createdDelta;
+  }
+  return compareOrderIds(a.orderId ?? a.orderID ?? "", b.orderId ?? b.orderID ?? "");
 }
 
 export function mergePreviewCalendarAllocations(previewAllocations, calendarAllocations, resolutionOrderIds = []) {
@@ -268,6 +287,14 @@ function orderStatusRank(status) {
 function dateValue(value) {
   const timestamp = new Date(value).getTime();
   return Number.isNaN(timestamp) ? Number.MAX_SAFE_INTEGER : timestamp;
+}
+
+function createdAtTimestampValue(allocation) {
+  const explicit = Number(allocation.createdAtTimestamp);
+  if (Number.isFinite(explicit)) {
+    return explicit;
+  }
+  return dateValue(allocation.createdAt);
 }
 
 function naturalOrderNumber(value) {

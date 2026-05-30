@@ -455,11 +455,11 @@ func TestPostgresStore_PreviewSchedule(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "capacity_per_day", "timezone", "schedule_revision"}).
 			AddRow("A", "Line A", 1000, "Asia/Taipei", 1))
 
-	// pendingOrderInputs query - expects 7 columns
-	mock.ExpectQuery("SELECT id, customer, line_id, quantity, priority, status, due_date FROM orders WHERE line_id = \\$1 AND status = '待排程'").
+	// pendingOrderInputs query
+	mock.ExpectQuery("SELECT id, customer, line_id, quantity, priority, status, due_date, created_at[\\s\\S]*FROM orders[\\s\\S]*WHERE line_id = \\$1 AND status = '待排程'").
 		WithArgs("A").
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "customer", "line_id", "quantity", "priority", "status", "due_date",
+			"id", "customer", "line_id", "quantity", "priority", "status", "due_date", "created_at",
 		}))
 
 	// existingAllocations query - expects 6 columns
@@ -511,15 +511,15 @@ func TestPostgresStore_ScheduleCalendar(t *testing.T) {
 	mock.ExpectQuery("SELECT a.order_id, o.customer, a.line_id").
 		WithArgs("A", sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"order_id", "customer", "line_id", "allocation_date", "quantity", "completed_quantity", "priority", "status", "locked", "due_date",
-		}).AddRow("ORD-1", "ACME", "A", time.Now(), 500, 0, "high", "已排程", false, time.Now()))
+			"order_id", "customer", "line_id", "allocation_date", "quantity", "completed_quantity", "priority", "status", "locked", "due_date", "created_at",
+		}).AddRow("ORD-1", "ACME", "A", time.Now(), 500, 0, "high", "已排程", false, time.Now(), time.Now()))
 
-	// pendingOrderInputs query for Sales - expects 7 columns
-	mock.ExpectQuery("SELECT id, customer, line_id, quantity, priority, status, due_date FROM orders WHERE line_id = \\$1 AND status = '待排程'").
+	// pendingOrderInputs query for Sales
+	mock.ExpectQuery("SELECT id, customer, line_id, quantity, priority, status, due_date, created_at[\\s\\S]*FROM orders[\\s\\S]*WHERE line_id = \\$1 AND status = '待排程'").
 		WithArgs("A").
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "customer", "line_id", "quantity", "priority", "status", "due_date",
-		}).AddRow("ORD-2", "ACME", "A", 300, string(domain.PriorityLow), string(domain.StatusPending), time.Now()))
+			"id", "customer", "line_id", "quantity", "priority", "status", "due_date", "created_at",
+		}).AddRow("ORD-2", "ACME", "A", 300, string(domain.PriorityLow), string(domain.StatusPending), time.Now(), time.Now()))
 
 	// existingAllocations query - expects 6 columns
 	mock.ExpectQuery("SELECT order_id, line_id, allocation_date, quantity, priority, locked FROM schedule_allocations").
@@ -820,10 +820,10 @@ func TestPostgresStore_PreviewSchedule_DraftAndResolution(t *testing.T) {
 			AddRow("A", "Line A", 1000, "Asia/Taipei", 1))
 
 	// pendingOrderInputs query for A
-	mock.ExpectQuery("SELECT id, customer, line_id, quantity, priority, status, due_date FROM orders WHERE line_id = \\$1 AND status = '待排程'").
+	mock.ExpectQuery("SELECT id, customer, line_id, quantity, priority, status, due_date, created_at[\\s\\S]*FROM orders[\\s\\S]*WHERE line_id = \\$1 AND status = '待排程'").
 		WithArgs("A").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "customer", "line_id", "quantity", "priority", "status", "due_date"}).
-			AddRow("ORD-PENDING", "PENDING_C", "A", 200, "low", "待排程", time.Now().AddDate(0, 0, 1)))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "customer", "line_id", "quantity", "priority", "status", "due_date", "created_at"}).
+			AddRow("ORD-PENDING", "PENDING_C", "A", 200, "low", "待排程", time.Now().AddDate(0, 0, 1), time.Now()))
 
 	// existingAllocations query (empty)
 	mock.ExpectQuery("SELECT order_id, line_id, allocation_date, quantity, priority, locked FROM schedule_allocations").
@@ -861,15 +861,15 @@ func TestPostgresStore_PreviewSchedule_DraftAndResolution(t *testing.T) {
 			AddRow("A", "Line A", 1000, "Asia/Taipei", 1))
 
 	// pendingOrderInputs query (returns ORD-2)
-	mock.ExpectQuery("SELECT id, customer, line_id, quantity, priority, status, due_date FROM orders WHERE line_id = \\$1 AND status = '待排程'").
+	mock.ExpectQuery("SELECT id, customer, line_id, quantity, priority, status, due_date, created_at[\\s\\S]*FROM orders[\\s\\S]*WHERE line_id = \\$1 AND status = '待排程'").
 		WithArgs("A").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "customer", "line_id", "quantity", "priority", "status", "due_date"}).
-			AddRow("ORD-2", "C1", "A", 100, "high", "待排程", time.Now().AddDate(0, 0, 2)))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "customer", "line_id", "quantity", "priority", "status", "due_date", "created_at"}).
+			AddRow("ORD-2", "C1", "A", 100, "high", "待排程", time.Now().AddDate(0, 0, 2), time.Now()))
 
-	// resolutionOrderInputs query (returns RES-1) - expects 7 columns: id, customer, line_id, quantity, priority, status, due_date
-	mock.ExpectQuery("SELECT id, customer, line_id, quantity, priority, status, due_date FROM orders").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "customer", "line_id", "quantity", "priority", "status", "due_date"}).
-			AddRow("RES-1", "C2", "A", 50, "low", "已排程", time.Now().AddDate(0, 0, 2)))
+	// resolutionOrderInputs query (returns RES-1)
+	mock.ExpectQuery("SELECT id, customer, line_id, quantity, priority, status, due_date, created_at[\\s\\S]*FROM orders").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "customer", "line_id", "quantity", "priority", "status", "due_date", "created_at"}).
+			AddRow("RES-1", "C2", "A", 50, "low", "已排程", time.Now().AddDate(0, 0, 2), time.Now()))
 
 	// ensureResolutionOrderMovable query (returns one unlocked, scheduled allocation to pass)
 	mock.ExpectQuery("SELECT locked, COALESCE\\(status, \\$1\\) FROM schedule_allocations WHERE order_id = \\$2").

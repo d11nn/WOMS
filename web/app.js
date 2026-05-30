@@ -1353,10 +1353,13 @@ function renderPreviewCalendar(allocations) {
   });
   const conflicts = state.preview?.conflicts ?? [];
   const resolutionOrderIds = state.preview?.request?.resolutionOrderIds ?? [];
+  const hasSalesDraftConflicts = isSalesDraft && conflicts.length > 0;
   const previewAllocations = conflicts.length > 0 ? [] : allocations;
   const markedPreviewAllocations = markMovedPreviewAllocations(previewAllocations);
   const movedFromAllocations = buildMovedFromAllocations(markedPreviewAllocations);
-  const pendingAllocations = markedPreviewAllocations.map((allocation) => ({ ...allocation, preview: true }));
+  const pendingAllocations = hasSalesDraftConflicts
+    ? state.pendingCalendarAllocations.map((allocation) => ({ ...allocation, preview: true }))
+    : markedPreviewAllocations.map((allocation) => ({ ...allocation, preview: true }));
   const visibleAllocations = isSalesDraft
     ? previewCalendarAllocationsForMode(mode, pendingAllocations)
     : markedPreviewAllocations;

@@ -1315,6 +1315,93 @@ test("sales draft flow validates future due dates previews and confirms through 
   assert.match(app, /showMessage\("無法加入待排程", error\.message, "warn"\)/);
 });
 
+test("sales draft conflict preview keeps baseline pending and scheduled calendars", async () => {
+  const document = buildDomFromIndex();
+  const fetchImpl = async (path, options = {}) => {
+    if (path === "/api/auth/login") {
+      return jsonResponse({
+        token: "token-sales",
+        user: { id: "user-sales", username: "sales", role: "sales" },
+      });
+    }
+    if (path === "/api/lines") {
+      return jsonResponse({
+        lines: [{ id: "A", name: "Line A", capacityPerDay: 1000, timezone: "Asia/Taipei" }],
+      });
+    }
+    if (path === "/api/orders") {
+      return jsonResponse({
+        orders: [
+          { id: "ORD-PENDING", customer: "ACME", lineId: "A", quantity: 500, priority: "low", status: "待排程", dueDate: dateKeyAfter(4), createdBy: "user-sales" },
+          { id: "ORD-SCHEDULED", customer: "Beta", lineId: "A", quantity: 700, priority: "low", status: "已排程", dueDate: dateKeyAfter(5), createdBy: "user-sales" },
+        ],
+      });
+    }
+    if (String(path).startsWith("/api/schedules/calendar?")) {
+      return jsonResponse({
+        allocations: [
+          { orderId: "ORD-SCHEDULED", customer: "Beta", lineId: "A", date: dateKeyAfter(2), quantity: 700, priority: "low", status: "已排程" },
+        ],
+        pendingAllocations: [
+          { orderId: "ORD-PENDING", customer: "ACME", lineId: "A", date: dateKeyAfter(1), quantity: 500, priority: "low", status: "待排程" },
+        ],
+      });
+    }
+    if (path === "/api/schedules/preview") {
+      assert.equal(options.method, "POST");
+      return jsonResponse({
+        previewId: "PREVIEW-DRAFT",
+        currentDate: dateKeyAfter(0),
+        allocations: [
+          { orderId: "PREVIEW-DRAFT", customer: "ACME", lineId: "A", date: dateKeyAfter(1), quantity: 1000, priority: "low", status: "待排程" },
+        ],
+        conflicts: [
+          {
+            orderId: "PREVIEW-DRAFT",
+            reason: "capacity cannot satisfy order before due date",
+            earliestFinishDate: `${dateKeyAfter(6)}T00:00:00Z`,
+            affectedOrderIds: [],
+          },
+        ],
+      });
+    }
+    throw new Error(`unexpected fetch ${path}`);
+  };
+  const restoreGlobals = installBrowserGlobalsWithFetch(document, fetchImpl);
+  try {
+    await import(appModuleUrl("sales-draft-conflict-calendar"));
+
+    await document.getElementById("login-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+    await document.getElementById("order-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+
+    const pendingMarkup = renderedMarkup(document.getElementById("preview-calendar-grid"));
+    assert.match(pendingMarkup, /ORD-PENDING/);
+    assert.doesNotMatch(pendingMarkup, /PREVIEW-DRAFT/);
+
+    const previewCalendarModes = document.getElementById("preview-calendar-mode").children;
+    await document.getElementById("preview-calendar-mode").dispatchEvent({
+      type: "click",
+      target: previewCalendarModes.find((button) => button.dataset.previewCalendarMode === "scheduled"),
+    });
+    const scheduledMarkup = renderedMarkup(document.getElementById("preview-calendar-grid"));
+    assert.match(scheduledMarkup, /ORD-SCHEDULED/);
+    assert.doesNotMatch(scheduledMarkup, /ORD-PENDING/);
+
+    await document.getElementById("preview-calendar-mode").dispatchEvent({
+      type: "click",
+      target: previewCalendarModes.find((button) => button.dataset.previewCalendarMode === "all"),
+    });
+    const allMarkup = renderedMarkup(document.getElementById("preview-calendar-grid"));
+    assert.match(allMarkup, /ORD-PENDING/);
+    assert.match(allMarkup, /ORD-SCHEDULED/);
+    assert.doesNotMatch(allMarkup, /PREVIEW-DRAFT/);
+  } finally {
+    restoreGlobals();
+  }
+});
+
 test("scheduler bulk controls filter select preview reject cancel and schedule selected orders", () => {
   const app = readFileSync(new URL("./app.js", import.meta.url), "utf8");
   const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
@@ -2449,4 +2536,3 @@ test.skip("extreme app.js coverage booster", async () => {
     restoreGlobals();
   }
 });
-

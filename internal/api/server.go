@@ -37,6 +37,23 @@ const unacceptableDueDateMessage = "無法被接受的交期"
 const defaultLineTimezone = "Asia/Taipei"
 const orderIDDigits = 7
 const orderIDModulo int64 = 10000000
+const errRouteNotFound = "route not found"
+const errMethodNotAllowed = "method not allowed"
+const errUnauthorized = "unauthorized"
+const errAuthSessionUnavailable = "auth session store unavailable"
+const errAdminManageAccounts = "only admin can manage accounts"
+const errOrderNotFound = "order not found"
+const errOrderNotFoundPrefix = "order not found: "
+const errProductionLineNotFound = "production line does not exist"
+const errCannotAccessAnotherLine = "cannot access another production line"
+const errLineIDRequired = "lineId is required"
+const errOrderIDsRequired = "orderIds is required"
+const errQuantityRange = "quantity must be between 25 and 2500"
+const errNoteImmutable = "note cannot be updated after order creation"
+const errPreviewExpired = "preview result expired or not found"
+const errPreviewOtherUser = "preview result belongs to another user"
+const errRoleInvalid = "role must be admin, sales, or scheduler"
+const errSchedulerLineInvalid = "scheduler lineId must be A, B, C, or D"
 
 var nowUTC = func() time.Time {
 	return time.Now().UTC()
@@ -65,6 +82,13 @@ type ServerConfig struct {
 }
 
 type claimsContextKey struct{}
+
+type serverRoute struct {
+	method  string
+	path    string
+	prefix  string
+	handler http.HandlerFunc
+}
 
 func NewServer(jwtSecret string, store *MemoryStore) *Server {
 	return NewServerWithPublisher(jwtSecret, store, NoopScheduleJobPublisher{})
@@ -156,8 +180,6 @@ type Store interface {
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w, s.corsAllowedOrigin)
-	// Wrap the writer before auth gating so unauthorized API requests are
-	// included in HTTPRequestsTotal.
 	start := time.Now()
 	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 	defer func() {
@@ -179,7 +201,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Expose Prometheus metrics endpoint (unauthenticated, for scraping).
 	if r.Method == http.MethodGet && r.URL.Path == "/metrics" {
 		metrics.Handler().ServeHTTP(rec, r)
 		return
@@ -193,56 +214,66 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(context.WithValue(r.Context(), claimsContextKey{}, claims))
 	}
 
-	switch {
-	case r.Method == http.MethodGet && r.URL.Path == "/healthz":
-		writeJSON(rec, http.StatusOK, map[string]string{"status": "ok"})
-	case r.Method == http.MethodGet && r.URL.Path == "/readyz":
-		writeJSON(rec, http.StatusOK, map[string]string{"status": "ready"})
-	case r.Method == http.MethodPost && r.URL.Path == "/api/auth/login":
-		s.handleLogin(rec, r)
-	case r.Method == http.MethodPost && r.URL.Path == "/api/auth/logout":
-		s.handleLogout(rec, r)
-	case r.Method == http.MethodGet && r.URL.Path == "/internal/auth/verify":
-		s.handleIngressAuth(rec, r)
-	case r.URL.Path == "/api/orders":
-		s.handleOrders(rec, r)
-	case r.Method == http.MethodGet && r.URL.Path == "/api/lines":
-		s.handleLines(rec, r)
-	case r.Method == http.MethodPost && r.URL.Path == "/api/orders/preview-confirm":
-		s.handleConfirmPreviewOrder(rec, r)
-	case r.Method == http.MethodPost && r.URL.Path == "/api/orders/reject":
-		s.handleRejectOrders(rec, r)
-	case r.Method == http.MethodPost && r.URL.Path == "/api/orders/resubmit":
-		s.handleResubmitOrder(rec, r)
-	case r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/api/orders/"):
-		s.handleUpdateOrder(rec, r)
-	case r.Method == http.MethodPatch && r.URL.Path == "/api/users/password":
-		s.handleResetUserPassword(rec, r)
-	case strings.HasPrefix(r.URL.Path, "/api/users/"):
-		s.handleUserByUsername(rec, r)
-	case r.URL.Path == "/api/users":
-		s.handleUsers(rec, r)
-	case r.URL.Path == "/api/demo/conflict-orders":
-		s.handleDemoConflictOrders(rec, r)
-	case r.URL.Path == "/api/demo/hpa-peak":
-		s.handleHPAPeakDemo(rec, r)
-	case r.Method == http.MethodPost && r.URL.Path == "/api/schedules/preview":
-		s.handleSchedulePreview(rec, r)
-	case r.Method == http.MethodGet && r.URL.Path == "/api/schedules/calendar":
-		s.handleScheduleCalendar(rec, r)
-	case r.Method == http.MethodGet && r.URL.Path == "/api/schedules/history":
-		s.handleScheduleHistory(rec, r)
-	case r.URL.Path == "/api/schedules/jobs":
-		s.handleScheduleJobs(rec, r)
-	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/schedules/jobs/"):
-		s.handleGetScheduleJob(rec, r)
-	case r.Method == http.MethodPost && r.URL.Path == "/api/production/confirm":
-		s.handleProductionConfirm(rec, r)
-	case r.Method == http.MethodPost && r.URL.Path == "/api/production/start":
-		s.handleProductionStart(rec, r)
-	default:
-		writeError(rec, http.StatusNotFound, "route not found")
+	if handler := s.routeHandler(r); handler != nil {
+		handler(rec, r)
+		return
 	}
+	writeError(rec, http.StatusNotFound, errRouteNotFound)
+}
+
+func (s *Server) routeHandler(r *http.Request) http.HandlerFunc {
+	for _, route := range s.routes() {
+		if route.matches(r) {
+			return route.handler
+		}
+	}
+	return nil
+}
+
+func (s *Server) routes() []serverRoute {
+	return []serverRoute{
+		{method: http.MethodGet, path: "/healthz", handler: healthzHandler},
+		{method: http.MethodGet, path: "/readyz", handler: readyzHandler},
+		{method: http.MethodPost, path: "/api/auth/login", handler: s.handleLogin},
+		{method: http.MethodPost, path: "/api/auth/logout", handler: s.handleLogout},
+		{method: http.MethodGet, path: "/internal/auth/verify", handler: s.handleIngressAuth},
+		{path: "/api/orders", handler: s.handleOrders},
+		{method: http.MethodGet, path: "/api/lines", handler: s.handleLines},
+		{method: http.MethodPost, path: "/api/orders/preview-confirm", handler: s.handleConfirmPreviewOrder},
+		{method: http.MethodPost, path: "/api/orders/reject", handler: s.handleRejectOrders},
+		{method: http.MethodPost, path: "/api/orders/resubmit", handler: s.handleResubmitOrder},
+		{method: http.MethodPatch, prefix: "/api/orders/", handler: s.handleUpdateOrder},
+		{method: http.MethodPatch, path: "/api/users/password", handler: s.handleResetUserPassword},
+		{prefix: "/api/users/", handler: s.handleUserByUsername},
+		{path: "/api/users", handler: s.handleUsers},
+		{path: "/api/demo/conflict-orders", handler: s.handleDemoConflictOrders},
+		{path: "/api/demo/hpa-peak", handler: s.handleHPAPeakDemo},
+		{method: http.MethodPost, path: "/api/schedules/preview", handler: s.handleSchedulePreview},
+		{method: http.MethodGet, path: "/api/schedules/calendar", handler: s.handleScheduleCalendar},
+		{method: http.MethodGet, path: "/api/schedules/history", handler: s.handleScheduleHistory},
+		{path: "/api/schedules/jobs", handler: s.handleScheduleJobs},
+		{method: http.MethodGet, prefix: "/api/schedules/jobs/", handler: s.handleGetScheduleJob},
+		{method: http.MethodPost, path: "/api/production/confirm", handler: s.handleProductionConfirm},
+		{method: http.MethodPost, path: "/api/production/start", handler: s.handleProductionStart},
+	}
+}
+
+func (r serverRoute) matches(req *http.Request) bool {
+	if r.method != "" && r.method != req.Method {
+		return false
+	}
+	if r.path != "" {
+		return r.path == req.URL.Path
+	}
+	return strings.HasPrefix(req.URL.Path, r.prefix)
+}
+
+func healthzHandler(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func readyzHandler(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
 type loginRequest struct {
@@ -279,7 +310,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.tokenSessions.Save(r.Context(), token, claims); err != nil {
-		writeError(w, http.StatusServiceUnavailable, "auth session store unavailable")
+		writeError(w, http.StatusServiceUnavailable, errAuthSessionUnavailable)
 		return
 	}
 	metrics.CurrentOnlineUserCount.Inc()
@@ -315,7 +346,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleOrders(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.claimsFromRequest(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		writeError(w, http.StatusUnauthorized, errUnauthorized)
 		return
 	}
 	switch r.Method {
@@ -351,13 +382,13 @@ func (s *Server) handleOrders(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, result)
 	default:
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		writeError(w, http.StatusMethodNotAllowed, errMethodNotAllowed)
 	}
 }
 
 func (s *Server) handleLines(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.claimsFromRequest(r); err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		writeError(w, http.StatusUnauthorized, errUnauthorized)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"lines": s.store.ListLines()})
@@ -366,7 +397,7 @@ func (s *Server) handleLines(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleConfirmPreviewOrder(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.claimsFromRequest(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		writeError(w, http.StatusUnauthorized, errUnauthorized)
 		return
 	}
 	if claims.Role != domain.RoleSales {
@@ -389,7 +420,7 @@ func (s *Server) handleConfirmPreviewOrder(w http.ResponseWriter, r *http.Reques
 func (s *Server) handleRejectOrders(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.claimsFromRequest(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		writeError(w, http.StatusUnauthorized, errUnauthorized)
 		return
 	}
 	if claims.Role != domain.RoleScheduler {
@@ -412,7 +443,7 @@ func (s *Server) handleRejectOrders(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleResubmitOrder(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.claimsFromRequest(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		writeError(w, http.StatusUnauthorized, errUnauthorized)
 		return
 	}
 	if claims.Role != domain.RoleSales {
@@ -435,11 +466,11 @@ func (s *Server) handleResubmitOrder(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.claimsFromRequest(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		writeError(w, http.StatusUnauthorized, errUnauthorized)
 		return
 	}
 	if claims.Role != domain.RoleAdmin {
-		writeError(w, http.StatusForbidden, "only admin can manage accounts")
+		writeError(w, http.StatusForbidden, errAdminManageAccounts)
 		return
 	}
 	switch r.Method {
@@ -470,18 +501,18 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, user)
 	default:
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		writeError(w, http.StatusMethodNotAllowed, errMethodNotAllowed)
 	}
 }
 
 func (s *Server) handleResetUserPassword(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.claimsFromRequest(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		writeError(w, http.StatusUnauthorized, errUnauthorized)
 		return
 	}
 	if claims.Role != domain.RoleAdmin {
-		writeError(w, http.StatusForbidden, "only admin can manage accounts")
+		writeError(w, http.StatusForbidden, errAdminManageAccounts)
 		return
 	}
 	var req resetUserPasswordRequest
@@ -500,20 +531,20 @@ func (s *Server) handleResetUserPassword(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleUserByUsername(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.claimsFromRequest(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		writeError(w, http.StatusUnauthorized, errUnauthorized)
 		return
 	}
 	if claims.Role != domain.RoleAdmin {
-		writeError(w, http.StatusForbidden, "only admin can manage accounts")
+		writeError(w, http.StatusForbidden, errAdminManageAccounts)
 		return
 	}
 	username := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/users/"))
 	if username == "" || strings.Contains(username, "/") {
-		writeError(w, http.StatusNotFound, "route not found")
+		writeError(w, http.StatusNotFound, errRouteNotFound)
 		return
 	}
 	if r.Method != http.MethodDelete {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		writeError(w, http.StatusMethodNotAllowed, errMethodNotAllowed)
 		return
 	}
 	user, err := s.store.DeleteUser(username, claims.Subject)
@@ -526,12 +557,12 @@ func (s *Server) handleUserByUsername(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDemoConflictOrders(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		writeError(w, http.StatusMethodNotAllowed, errMethodNotAllowed)
 		return
 	}
 	claims, err := s.claimsFromRequest(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		writeError(w, http.StatusUnauthorized, errUnauthorized)
 		return
 	}
 	if claims.Role != domain.RoleAdmin && claims.Role != domain.RoleScheduler {
@@ -554,7 +585,7 @@ func (s *Server) handleDemoConflictOrders(w http.ResponseWriter, r *http.Request
 func (s *Server) handleSchedulePreview(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.claimsFromRequest(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		writeError(w, http.StatusUnauthorized, errUnauthorized)
 		return
 	}
 	var req scheduleRequest
@@ -573,7 +604,7 @@ func (s *Server) handleSchedulePreview(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleHPAPeakDemo(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.claimsFromRequest(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		writeError(w, http.StatusUnauthorized, errUnauthorized)
 		return
 	}
 	if claims.Role != domain.RoleAdmin {
@@ -593,7 +624,7 @@ func (s *Server) handleHPAPeakDemo(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, hpaPeakResponse{Summary: summary})
 	default:
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		writeError(w, http.StatusMethodNotAllowed, errMethodNotAllowed)
 	}
 }
 
@@ -612,7 +643,7 @@ func (s *Server) publishHPAPeakJobs(ctx context.Context, jobs []domain.ScheduleJ
 func (s *Server) handleScheduleCalendar(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.claimsFromRequest(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		writeError(w, http.StatusUnauthorized, errUnauthorized)
 		return
 	}
 	lineID := r.URL.Query().Get("lineId")
@@ -628,7 +659,7 @@ func (s *Server) handleScheduleCalendar(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleScheduleHistory(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.claimsFromRequest(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		writeError(w, http.StatusUnauthorized, errUnauthorized)
 		return
 	}
 	lineID := r.URL.Query().Get("lineId")
@@ -643,7 +674,7 @@ func (s *Server) handleScheduleHistory(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleScheduleJobs(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.claimsFromRequest(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		writeError(w, http.StatusUnauthorized, errUnauthorized)
 		return
 	}
 	if claims.Role != domain.RoleScheduler {
@@ -651,7 +682,7 @@ func (s *Server) handleScheduleJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		writeError(w, http.StatusMethodNotAllowed, errMethodNotAllowed)
 		return
 	}
 	var req scheduleRequest
@@ -678,7 +709,7 @@ func (s *Server) handleScheduleJobs(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetScheduleJob(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.claimsFromRequest(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		writeError(w, http.StatusUnauthorized, errUnauthorized)
 		return
 	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/schedules/jobs/")
@@ -688,7 +719,7 @@ func (s *Server) handleGetScheduleJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if claims.Role == domain.RoleScheduler && claims.LineID != job.LineID {
-		writeError(w, http.StatusForbidden, "cannot access another production line")
+		writeError(w, http.StatusForbidden, errCannotAccessAnotherLine)
 		return
 	}
 	writeJSON(w, http.StatusOK, job)
@@ -697,7 +728,7 @@ func (s *Server) handleGetScheduleJob(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleProductionConfirm(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.claimsFromRequest(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		writeError(w, http.StatusUnauthorized, errUnauthorized)
 		return
 	}
 	if claims.Role != domain.RoleScheduler {
@@ -740,10 +771,10 @@ func (s *Server) claimsFromRequest(r *http.Request) (auth.Claims, error) {
 
 func writeClaimsError(w http.ResponseWriter, err error) {
 	if errors.Is(err, auth.ErrInvalidToken) || errors.Is(err, auth.ErrExpiredToken) || errors.Is(err, ErrTokenSessionNotFound) {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		writeError(w, http.StatusUnauthorized, errUnauthorized)
 		return
 	}
-	writeError(w, http.StatusServiceUnavailable, "auth session store unavailable")
+	writeError(w, http.StatusServiceUnavailable, errAuthSessionUnavailable)
 }
 
 func isPublicAPIPath(r *http.Request) bool {
@@ -949,7 +980,7 @@ func (s *MemoryStore) CreateOrder(req createOrderRequest, actorID string) (domai
 func (s *Server) handleUpdateOrder(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.claimsFromRequest(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		writeError(w, http.StatusUnauthorized, errUnauthorized)
 		return
 	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/orders/")
@@ -972,7 +1003,7 @@ func (s *MemoryStore) UpdateOrderDueDate(id string, req updateOrderRequest, clai
 	now := nowUTC()
 	order, ok := s.orders[id]
 	if !ok {
-		return domain.Order{}, errors.New("order not found")
+		return domain.Order{}, errors.New(errOrderNotFound)
 	}
 	if claims.Role == domain.RoleScheduler && order.LineID != claims.LineID {
 		return domain.Order{}, errors.New("cannot update another production line")
@@ -987,7 +1018,7 @@ func (s *MemoryStore) UpdateOrderDueDate(id string, req updateOrderRequest, clai
 		return domain.Order{}, errors.New("only pending or rejected orders can change order details")
 	}
 	if strings.TrimSpace(req.Note) != "" {
-		return domain.Order{}, errors.New("note cannot be updated after order creation")
+		return domain.Order{}, errors.New(errNoteImmutable)
 	}
 	if req.DueDate != "" {
 		currentDate, err := s.currentDateForLineLocked(order.LineID, now)
@@ -1002,7 +1033,7 @@ func (s *MemoryStore) UpdateOrderDueDate(id string, req updateOrderRequest, clai
 	}
 	if req.Quantity != 0 {
 		if req.Quantity < 25 || req.Quantity > 2500 {
-			return domain.Order{}, errors.New("quantity must be between 25 and 2500")
+			return domain.Order{}, errors.New(errQuantityRange)
 		}
 		order.Quantity = req.Quantity
 	}
@@ -1050,7 +1081,7 @@ func (s *MemoryStore) RejectOrders(req rejectOrdersRequest, claims auth.Claims) 
 	defer s.mu.Unlock()
 
 	if len(req.OrderIDs) == 0 {
-		return rejectOrdersResponse{}, errors.New("orderIds is required")
+		return rejectOrdersResponse{}, errors.New(errOrderIDsRequired)
 	}
 	reason := strings.TrimSpace(req.Reason)
 	if reason == "" {
@@ -1064,7 +1095,7 @@ func (s *MemoryStore) RejectOrders(req rejectOrdersRequest, claims auth.Claims) 
 	for _, id := range req.OrderIDs {
 		order, ok := s.orders[id]
 		if !ok {
-			return rejectOrdersResponse{}, errors.New("order not found: " + id)
+			return rejectOrdersResponse{}, errors.New(errOrderNotFoundPrefix + id)
 		}
 		if order.LineID != claims.LineID {
 			return rejectOrdersResponse{}, errors.New("cannot reject another production line")
@@ -1092,7 +1123,7 @@ func (s *MemoryStore) ResubmitOrder(req resubmitOrderRequest, claims auth.Claims
 
 	order, ok := s.orders[req.OrderID]
 	if !ok {
-		return domain.Order{}, errors.New("order not found")
+		return domain.Order{}, errors.New(errOrderNotFound)
 	}
 	if order.CreatedBy != claims.Subject {
 		return domain.Order{}, errors.New("sales can resubmit only their own orders")
@@ -1101,11 +1132,11 @@ func (s *MemoryStore) ResubmitOrder(req resubmitOrderRequest, claims auth.Claims
 		return domain.Order{}, errors.New("only pending or rejected orders can be resubmitted")
 	}
 	if strings.TrimSpace(req.Note) != "" {
-		return domain.Order{}, errors.New("note cannot be updated after order creation")
+		return domain.Order{}, errors.New(errNoteImmutable)
 	}
 	if req.Quantity != 0 {
 		if req.Quantity < 25 || req.Quantity > 2500 {
-			return domain.Order{}, errors.New("quantity must be between 25 and 2500")
+			return domain.Order{}, errors.New(errQuantityRange)
 		}
 		order.Quantity = req.Quantity
 	}
@@ -1156,7 +1187,7 @@ func (s *MemoryStore) CancelOrders(req cancelOrdersRequest, claims auth.Claims) 
 	defer s.mu.Unlock()
 
 	if len(req.OrderIDs) == 0 {
-		return cancelOrdersResponse{}, errors.New("orderIds is required")
+		return cancelOrdersResponse{}, errors.New(errOrderIDsRequired)
 	}
 	result := cancelOrdersResponse{}
 	now := nowUTC()
@@ -1235,11 +1266,11 @@ func (s *MemoryStore) AssignUser(req assignUserRequest, actorID string) (domain.
 		return domain.User{}, errors.New("user not found")
 	}
 	if req.Role != domain.RoleAdmin && req.Role != domain.RoleSales && req.Role != domain.RoleScheduler {
-		return domain.User{}, errors.New("role must be admin, sales, or scheduler")
+		return domain.User{}, errors.New(errRoleInvalid)
 	}
 	if req.Role == domain.RoleScheduler {
 		if _, ok := s.lines[req.LineID]; !ok {
-			return domain.User{}, errors.New("scheduler lineId must be A, B, C, or D")
+			return domain.User{}, errors.New(errSchedulerLineInvalid)
 		}
 	} else {
 		req.LineID = ""
@@ -1428,17 +1459,17 @@ func (s *MemoryStore) CreateScheduleJob(req scheduleRequest, claims auth.Claims)
 	}
 	preview, ok := s.previews[req.PreviewID]
 	if !ok {
-		return domain.ScheduleJob{}, errors.New("preview result expired or not found")
+		return domain.ScheduleJob{}, errors.New(errPreviewExpired)
 	}
 	if preview.ActorID != claims.Subject || preview.ActorRole != claims.Role {
-		return domain.ScheduleJob{}, errors.New("preview result belongs to another user")
+		return domain.ScheduleJob{}, errors.New(errPreviewOtherUser)
 	}
 	if !sameScheduleRequest(preview.Request, normalizedPreviewRequest(req)) {
 		return domain.ScheduleJob{}, errors.New("schedule request changed after preview")
 	}
 	line, ok := s.lines[preview.LineID]
 	if !ok {
-		return domain.ScheduleJob{}, errors.New("production line does not exist")
+		return domain.ScheduleJob{}, errors.New(errProductionLineNotFound)
 	}
 	if line.ScheduleRevision != preview.LineRevision {
 		return domain.ScheduleJob{}, errors.New("排程資料已變更，請重新試排。")
@@ -1604,14 +1635,14 @@ func (s *MemoryStore) ScheduleCalendar(lineID, month string, claims auth.Claims)
 		lineID = claims.LineID
 	}
 	if lineID == "" {
-		return calendarResponse{}, errors.New("lineId is required")
+		return calendarResponse{}, errors.New(errLineIDRequired)
 	}
 	if claims.Role == domain.RoleScheduler && claims.LineID != lineID {
-		return calendarResponse{}, errors.New("cannot access another production line")
+		return calendarResponse{}, errors.New(errCannotAccessAnotherLine)
 	}
 	line, ok := s.lines[lineID]
 	if !ok {
-		return calendarResponse{}, errors.New("production line does not exist")
+		return calendarResponse{}, errors.New(errProductionLineNotFound)
 	}
 	if month == "" {
 		currentDate, err := currentDateInLineTimezone(line, nowUTC())
@@ -1766,7 +1797,7 @@ func (s *MemoryStore) ScheduleHistory(lineID string, claims auth.Claims) ([]doma
 		lineID = claims.LineID
 	} else if lineID != "" {
 		if _, ok := s.lines[lineID]; !ok {
-			return nil, errors.New("production line does not exist")
+			return nil, errors.New(errProductionLineNotFound)
 		}
 	}
 
@@ -1827,7 +1858,7 @@ type productionConfirmResponse struct {
 func (s *Server) handleProductionStart(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.claimsFromRequest(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		writeError(w, http.StatusUnauthorized, errUnauthorized)
 		return
 	}
 	if claims.Role != domain.RoleScheduler {
@@ -1852,7 +1883,7 @@ func (s *MemoryStore) StartProduction(req productionStartRequest, claims auth.Cl
 	defer s.mu.Unlock()
 	order, ok := s.orders[req.OrderID]
 	if !ok {
-		return domain.Order{}, errors.New("order not found")
+		return domain.Order{}, errors.New(errOrderNotFound)
 	}
 	if order.LineID != claims.LineID {
 		return domain.Order{}, errors.New("cannot start another production line")
@@ -1877,7 +1908,7 @@ func (s *MemoryStore) ConfirmProduction(req productionConfirmRequest, claims aut
 	defer s.mu.Unlock()
 	order, ok := s.orders[req.OrderID]
 	if !ok {
-		return productionConfirmResponse{}, errors.New("order not found")
+		return productionConfirmResponse{}, errors.New(errOrderNotFound)
 	}
 	if order.LineID != claims.LineID {
 		return productionConfirmResponse{}, errors.New("cannot confirm another production line")
@@ -1943,17 +1974,17 @@ func (s *MemoryStore) planLocked(req scheduleRequest, claims auth.Claims) (sched
 		lineID = claims.LineID
 	}
 	if lineID == "" {
-		return scheduler.Result{}, errors.New("lineId is required")
+		return scheduler.Result{}, errors.New(errLineIDRequired)
 	}
 	if req.ManualForce && strings.TrimSpace(req.Reason) == "" {
 		return scheduler.Result{}, errors.New("manual force requires a reason")
 	}
 	if claims.Role == domain.RoleScheduler && claims.LineID != lineID {
-		return scheduler.Result{}, errors.New("cannot access another production line")
+		return scheduler.Result{}, errors.New(errCannotAccessAnotherLine)
 	}
 	line, ok := s.lines[lineID]
 	if !ok {
-		return scheduler.Result{}, errors.New("production line does not exist")
+		return scheduler.Result{}, errors.New(errProductionLineNotFound)
 	}
 	currentDate := time.Time{}
 	if req.CurrentDate != "" {
@@ -2251,10 +2282,10 @@ func (s *MemoryStore) ConfirmPreviewOrder(previewID string, claims auth.Claims) 
 
 	preview, ok := s.previews[previewID]
 	if !ok {
-		return domain.Order{}, errors.New("preview result expired or not found")
+		return domain.Order{}, errors.New(errPreviewExpired)
 	}
 	if preview.ActorID != claims.Subject || preview.ActorRole != claims.Role {
-		return domain.Order{}, errors.New("preview result belongs to another user")
+		return domain.Order{}, errors.New(errPreviewOtherUser)
 	}
 	if preview.DraftOrder == nil {
 		return domain.Order{}, errors.New("preview does not contain a draft order")
@@ -2280,7 +2311,7 @@ func (s *MemoryStore) CreateDemoConflictOrders(req demoConflictRequest, claims a
 		return nil, errors.New("cannot create demo orders for another production line")
 	}
 	if _, ok := s.lines[lineID]; !ok {
-		return nil, errors.New("production line does not exist")
+		return nil, errors.New(errProductionLineNotFound)
 	}
 	if req.Count == 0 {
 		req.Count = 6
@@ -2794,7 +2825,7 @@ func validateOrderRequest(req createOrderRequest, lines map[string]domain.Produc
 		return time.Time{}, err
 	}
 	if _, ok := lines[req.LineID]; !ok {
-		return time.Time{}, errors.New("production line does not exist")
+		return time.Time{}, errors.New(errProductionLineNotFound)
 	}
 	if req.Priority == "" {
 		req.Priority = domain.PriorityLow
@@ -2833,11 +2864,11 @@ func validateUsername(username string) error {
 
 func validateUserRole(role domain.Role, lineID string, lines map[string]domain.ProductionLine) error {
 	if role != domain.RoleAdmin && role != domain.RoleSales && role != domain.RoleScheduler {
-		return errors.New("role must be admin, sales, or scheduler")
+		return errors.New(errRoleInvalid)
 	}
 	if role == domain.RoleScheduler {
 		if _, ok := lines[lineID]; !ok {
-			return errors.New("scheduler lineId must be A, B, C, or D")
+			return errors.New(errSchedulerLineInvalid)
 		}
 	}
 	return nil
@@ -2948,7 +2979,7 @@ func scheduleRequestLineID(req scheduleRequest, claims auth.Claims) string {
 func (s *MemoryStore) currentDateForLineLocked(lineID string, now time.Time) (time.Time, error) {
 	line, ok := s.lines[lineID]
 	if !ok {
-		return time.Time{}, errors.New("production line does not exist")
+		return time.Time{}, errors.New(errProductionLineNotFound)
 	}
 	return currentDateInLineTimezone(line, now)
 }
@@ -3063,36 +3094,36 @@ func zhUserMessage(message string) string {
 	if strings.HasPrefix(message, "json: unknown field ") {
 		return "請求包含不支援的欄位。"
 	}
-	if strings.HasPrefix(message, "order not found: ") {
-		return "找不到訂單：" + strings.TrimPrefix(message, "order not found: ")
+	if strings.HasPrefix(message, errOrderNotFoundPrefix) {
+		return "找不到訂單：" + strings.TrimPrefix(message, errOrderNotFoundPrefix)
 	}
 	translations := map[string]string{
-		"route not found":                                                      "找不到 API 路由。",
-		"method not allowed":                                                   "不支援此 HTTP 方法。",
+		errRouteNotFound:                                                       "找不到 API 路由。",
+		errMethodNotAllowed:                                                    "不支援此 HTTP 方法。",
 		"invalid credentials":                                                  "帳號或密碼錯誤。",
-		"auth session store unavailable":                                       "登入狀態服務暫時無法使用，請稍後再試。",
-		"unauthorized":                                                         "請先登入後再操作。",
+		errAuthSessionUnavailable:                                              "登入狀態服務暫時無法使用，請稍後再試。",
+		errUnauthorized:                                                        "請先登入後再操作。",
 		"only sales can create orders":                                         "只有業務可以建立訂單。",
 		"only sales can confirm preview orders":                                "只有業務可以確認訂單預覽。",
 		"only schedulers can reject orders":                                    "只有排程工程師可以駁回訂單。",
 		"only sales can resubmit pending or rejected orders":                   "只有業務可以重新送出待排程或需業務處理的訂單。",
-		"only admin can manage accounts":                                       "只有管理員可以管理帳號。",
+		errAdminManageAccounts:                                                 "只有管理員可以管理帳號。",
 		"only admin or schedulers can create demo conflict orders":             "只有管理員或排程工程師可以建立衝突展示訂單。",
 		"only schedulers can create schedule jobs":                             "只有排程工程師可以建立排程任務。",
 		"schedule job not found":                                               "找不到排程任務。",
 		"only schedulers can confirm production":                               "只有排程工程師可以回報生產。",
 		"only schedulers can start production":                                 "只有排程工程師可以開始生產。",
-		"order not found":                                                      "找不到訂單。",
+		errOrderNotFound:                                                       "找不到訂單。",
 		"cannot update another production line":                                "不能更新其他產線的訂單。",
 		"sales can update only their own orders":                               "業務只能更新自己的訂單。",
 		"role cannot update orders":                                            "此角色不能更新訂單。",
 		"only pending or rejected orders can change order details":             "只有待排程或需業務處理的訂單可以變更內容。",
-		"note cannot be updated after order creation":                          "備註建立後不能修改。",
+		errNoteImmutable:                                                       "備註建立後不能修改。",
 		"dueDate must use YYYY-MM-DD":                                          "交期格式必須是 YYYY-MM-DD。",
-		"quantity must be between 25 and 2500":                                 "數量必須介於 25 到 2500。",
-		"production line does not exist":                                       "產線不存在。",
+		errQuantityRange:                                                       "數量必須介於 25 到 2500。",
+		errProductionLineNotFound:                                              "產線不存在。",
 		"priority must be low or high":                                         "優先級必須是 low 或 high。",
-		"orderIds is required":                                                 "請至少選取一張訂單。",
+		errOrderIDsRequired:                                                    "請至少選取一張訂單。",
 		"rejection reason is required":                                         "請填寫駁回理由。",
 		"rejection reason must be 240 characters or fewer":                     "駁回理由最多 240 個字。",
 		"cannot reject another production line":                                "不能駁回其他產線的訂單。",
@@ -3110,15 +3141,15 @@ func zhUserMessage(message string) string {
 		"username must be 40 characters or fewer":                              "帳號最多 40 個字。",
 		"username can contain only letters, numbers, dash, underscore, or dot": "帳號只能包含英文字母、數字、連字號、底線或句點。",
 		"password is required":                                                 "請填寫密碼。",
-		"role must be admin, sales, or scheduler":                              "角色必須是 admin、sales 或 scheduler。",
-		"scheduler lineId must be A, B, C, or D":                               "排程工程師的產線必須存在。",
+		errRoleInvalid:                                                         "角色必須是 admin、sales 或 scheduler。",
+		errSchedulerLineInvalid:                                                "排程工程師的產線必須存在。",
 		"previewId is required before creating a schedule job":                 "建立排程任務前必須先完成試排。",
-		"preview result expired or not found":                                  "試排結果已過期或不存在。",
-		"preview result belongs to another user":                               "試排結果屬於其他使用者。",
+		errPreviewExpired:                                                      "試排結果已過期或不存在。",
+		errPreviewOtherUser:                                                    "試排結果屬於其他使用者。",
 		"schedule request changed after preview":                               "排程請求與試排內容不同，請重新試排。",
 		"cannot schedule another production line":                              "不能排程其他產線。",
-		"lineId is required":                                                   "請選擇產線。",
-		"cannot access another production line":                                "不能存取其他產線。",
+		errLineIDRequired:                                                      "請選擇產線。",
+		errCannotAccessAnotherLine:                                             "不能存取其他產線。",
 		"month must use YYYY-MM":                                               "月份格式必須是 YYYY-MM。",
 		"only admin or schedulers can read schedule history":                   "只有管理員或排程工程師可以讀取排程紀錄。",
 		"only scheduled orders can start production":                           "只有已排程訂單可以開始生產。",

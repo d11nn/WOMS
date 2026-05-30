@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -1870,6 +1871,33 @@ func TestSchedulerPreviewKeepsUnselectedPendingOrdersOutOfCapacity(t *testing.T)
 	}
 }
 
+func TestScheduleCalendarOrdersSameDayByPriorityDueDateAndCreatedTimestamp(t *testing.T) {
+	store := NewMemoryStore()
+	lineID := "A"
+	allocationDate := mustAPIDate(t, "2026-05-10")
+	dueDate := mustAPIDate(t, "2026-05-30")
+	store.orders["ORD-A"] = domain.Order{ID: "ORD-A", Customer: "ACME", LineID: lineID, Quantity: 100, Priority: domain.PriorityLow, Status: domain.StatusScheduled, DueDate: dueDate, CreatedAt: time.Unix(1772271713, 0).UTC()}
+	store.orders["ORD-B"] = domain.Order{ID: "ORD-B", Customer: "Beta", LineID: lineID, Quantity: 100, Priority: domain.PriorityLow, Status: domain.StatusScheduled, DueDate: dueDate, CreatedAt: time.Unix(1772271715, 0).UTC()}
+	store.orders["ORD-HIGH"] = domain.Order{ID: "ORD-HIGH", Customer: "Core", LineID: lineID, Quantity: 100, Priority: domain.PriorityHigh, Status: domain.StatusScheduled, DueDate: mustAPIDate(t, "2026-06-01"), CreatedAt: time.Unix(1772271719, 0).UTC()}
+	store.allocations = append(store.allocations,
+		domain.ScheduleAllocation{OrderID: "ORD-B", LineID: lineID, Date: allocationDate, Quantity: 100, Priority: domain.PriorityLow, Status: domain.StatusScheduled},
+		domain.ScheduleAllocation{OrderID: "ORD-HIGH", LineID: lineID, Date: allocationDate, Quantity: 100, Priority: domain.PriorityHigh, Status: domain.StatusScheduled},
+		domain.ScheduleAllocation{OrderID: "ORD-A", LineID: lineID, Date: allocationDate, Quantity: 100, Priority: domain.PriorityLow, Status: domain.StatusScheduled},
+	)
+
+	calendar, err := store.ScheduleCalendar(lineID, "2026-05", auth.Claims{Subject: "admin", Role: domain.RoleAdmin})
+	if err != nil {
+		t.Fatalf("ScheduleCalendar failed: %v", err)
+	}
+
+	if got := []string{calendar.Allocations[0].OrderID, calendar.Allocations[1].OrderID, calendar.Allocations[2].OrderID}; !reflect.DeepEqual(got, []string{"ORD-HIGH", "ORD-A", "ORD-B"}) {
+		t.Fatalf("unexpected calendar order: %+v", got)
+	}
+	if calendar.Allocations[1].CreatedAtTimestamp != 1772271713000 || calendar.Allocations[2].CreatedAtTimestamp != 1772271715000 {
+		t.Fatalf("expected unix millisecond created timestamps, got %+v", calendar.Allocations)
+	}
+}
+
 func TestScheduleCalendarSeparatesPersistedAndPendingPreviewAllocations(t *testing.T) {
 	server := NewServer("secret", NewMemoryStore())
 	salesToken := login(t, server, "sales", "demo")
@@ -1934,6 +1962,43 @@ func TestSalesDraftPreviewReportsPendingOrderConflictCausedByDraft(t *testing.T)
 	}
 	if payload.Conflicts[0].OrderID != pendingOrderID || payload.Conflicts[0].Reason != "capacity cannot satisfy order before due date" || !strings.HasPrefix(payload.Conflicts[0].EarliestFinishDate, "2026-05-02") {
 		t.Fatalf("unexpected draft-caused pending conflict: %+v", payload.Conflicts)
+	}
+}
+
+func TestSalesDraftPreviewReturnsSuccessfulAllocationsWhenDraftDisplacesPendingOrder(t *testing.T) {
+	store := NewMemoryStore()
+	server := NewServer("secret", store)
+	salesToken := login(t, server, "sales", "demo")
+	lineID := "A"
+	dueDate := mustAPIDate(t, "2026-05-30")
+	store.orders["ORD-A"] = domain.Order{ID: "ORD-A", Customer: "A", LineID: lineID, Quantity: 2500, Priority: domain.PriorityHigh, Status: domain.StatusPending, DueDate: dueDate, CreatedAt: time.UnixMilli(1772271711000).UTC()}
+	store.orders["ORD-B"] = domain.Order{ID: "ORD-B", Customer: "B", LineID: lineID, Quantity: 2500, Priority: domain.PriorityHigh, Status: domain.StatusPending, DueDate: dueDate, CreatedAt: time.UnixMilli(1772271712000).UTC()}
+	store.orders["ORD-C"] = domain.Order{ID: "ORD-C", Customer: "C", LineID: lineID, Quantity: 2500, Priority: domain.PriorityLow, Status: domain.StatusPending, DueDate: dueDate, CreatedAt: time.UnixMilli(1772271713000).UTC()}
+	store.orders["ORD-D"] = domain.Order{ID: "ORD-D", Customer: "D", LineID: lineID, Quantity: 2500, Priority: domain.PriorityLow, Status: domain.StatusPending, DueDate: dueDate, CreatedAt: time.UnixMilli(1772271714000).UTC()}
+
+	body := bytes.NewBufferString(`{"lineId":"A","startDate":"2026-05-30","currentDate":"2026-05-29","draftOrder":{"customer":"E","lineId":"A","quantity":2500,"priority":"high","dueDate":"2026-05-30"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/schedules/preview", body)
+	req.Header.Set("Authorization", "Bearer "+salesToken)
+	res := httptest.NewRecorder()
+
+	server.ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("preview failed: %d %s", res.Code, res.Body.String())
+	}
+	var preview schedulePreviewResponse
+	if err := json.Unmarshal(res.Body.Bytes(), &preview); err != nil {
+		t.Fatalf("decode preview response: %v", err)
+	}
+	got := make([]string, 0, len(preview.Allocations))
+	for _, allocation := range preview.Allocations {
+		got = append(got, allocation.OrderID)
+	}
+	if !reflect.DeepEqual(got, []string{"ORD-A", "ORD-B", previewDraftOrderID, "ORD-C"}) {
+		t.Fatalf("expected successful draft allocations A, B, draft, C; got %+v", got)
+	}
+	if len(preview.Conflicts) != 1 || preview.Conflicts[0].OrderID != "ORD-D" {
+		t.Fatalf("expected ORD-D conflict, got %+v", preview.Conflicts)
 	}
 }
 

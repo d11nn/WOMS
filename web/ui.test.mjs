@@ -19,6 +19,7 @@ import {
   matchesOrder,
   monthGrid,
   priorityLabel,
+  sortCalendarAllocations,
   sortOrdersForWorkstation,
   statusClass,
   statusCounts,
@@ -95,30 +96,42 @@ test("order status badges stay on one line in scheduler and sales cards", () => 
   assert.match(styles, /\.tag\s*\{[\s\S]*flex:\s+0 0 auto;[\s\S]*white-space:\s+nowrap;/);
 });
 
+test("calendar preview highlights only outline days and colors conflicted orders", () => {
+  const styles = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
+  const previewHighlight = styles.slice(
+    styles.indexOf(".calendar-day.preview-highlight"),
+    styles.indexOf(".calendar-day.drop-target"),
+  );
+  assert.match(previewHighlight, /outline:\s+2px solid #f79009;/);
+  assert.doesNotMatch(previewHighlight, /background:/);
+  assert.match(styles, /\.calendar-item\.conflict-preview,\s*\.preview-item\.conflict-preview\s*\{[\s\S]*background:\s+#f7fdab;/);
+});
+
 test("sales draft preview calendar can switch pending draft and scheduled allocations", () => {
   const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
   const app = readFileSync(new URL("./app.js", import.meta.url), "utf8");
-  assert.match(html, /id="preview-calendar-mode"[\s\S]*data-preview-calendar-mode="pending"[\s\S]*待排程/);
-  assert.match(html, /data-preview-calendar-mode="scheduled"[\s\S]*已排程/);
-  assert.match(html, /data-preview-calendar-mode="all"[\s\S]*所有訂單/);
-  assert.match(app, /previewCalendarMode:\s+"pending"/);
+  assert.match(html, /id="preview-calendar-mode"[\s\S]*data-preview-calendar-mode="all"[\s\S]*所有訂單[\s\S]*data-preview-calendar-mode="pending"[\s\S]*待排程[\s\S]*data-preview-calendar-mode="scheduled"[\s\S]*已排程/);
+  assert.match(app, /previewCalendarMode:\s+"all"/);
+  assert.match(app, /state\.previewCalendarMode = "all"/);
   assert.match(app, /document\.getElementById\("preview-calendar-mode"\)\.addEventListener\("click"/);
   assert.match(app, /const isSalesDraft = state\.preview\?\.kind === "sales-draft"/);
   assert.match(app, /function previewCalendarAllocationsForMode\(mode, pendingAllocations\)/);
   assert.match(app, /return \[\.\.\.state\.calendarAllocations, \.\.\.pendingAllocations\]/);
-  assert.match(app, /const previewAllocations = conflicts\.length > 0 \? \[\] : allocations;/);
-  assert.match(app, /const markedPreviewAllocations = markMovedPreviewAllocations\(previewAllocations\)/);
-  assert.match(app, /const pendingAllocations = markedPreviewAllocations\.map\(\(allocation\) => \(\{ \.\.\.allocation, preview: true \}\)\)/);
+  assert.match(app, /const previewAllocations = conflicts\.length > 0 && !isSalesDraft \? \[\] : allocations;/);
+  assert.match(app, /markConflictedPreviewAllocations\(markMovedPreviewAllocations\(previewAllocations\), conflictedOrderIds\)/);
+  assert.match(app, /function markConflictedPreviewAllocations\(previewAllocations, conflictedOrderIds\)/);
+  assert.match(app, /function salesDraftPendingPreviewAllocations\(markedPreviewAllocations, conflicts = \[\]\)/);
+  assert.match(app, /const conflictedOrderIds = new Set\(conflicts\.map\(\(conflict\) => conflict\.orderId\)\.filter\(Boolean\)\)/);
+  assert.match(app, /state\.pendingCalendarAllocations\.map\(\(allocation\) => \(\{ \.\.\.allocation, preview: true \}\)\)/);
+  assert.match(app, /markedPreviewAllocations\.map\(\(allocation\) => \(\{ \.\.\.allocation, preview: true \}\)\)/);
 });
 
 test("sales main calendar can switch pending scheduled and all allocations", () => {
   const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
   const app = readFileSync(new URL("./app.js", import.meta.url), "utf8");
-  assert.match(html, /id="main-calendar-mode"[\s\S]*data-calendar-mode="pending"[\s\S]*待排程/);
-  assert.match(html, /data-calendar-mode="scheduled"[\s\S]*已排程/);
-  assert.match(html, /data-calendar-mode="all"[\s\S]*所有訂單/);
+  assert.match(html, /id="main-calendar-mode"[\s\S]*data-calendar-mode="all"[\s\S]*所有訂單[\s\S]*data-calendar-mode="pending"[\s\S]*待排程[\s\S]*data-calendar-mode="scheduled"[\s\S]*已排程/);
   assert.match(app, /pendingCalendarAllocations:\s+\[\]/);
-  assert.match(app, /calendarMode:\s+"scheduled"/);
+  assert.match(app, /calendarMode:\s+"all"/);
   assert.match(app, /payload\.pendingAllocations/);
   assert.match(app, /function mainCalendarAllocations\(\)/);
   assert.match(app, /return \[\.\.\.state\.calendarAllocations, \.\.\.state\.pendingCalendarAllocations\]/);
@@ -435,6 +448,20 @@ test("groupAllocationsByDate groups calendar allocations by ISO date", () => {
   ]);
   assert.deepEqual(groups["2026-05-02"].map((item) => item.orderId), ["ORD-0000001", "ORD-0000002"]);
   assert.deepEqual(groups["2026-05-03"].map((item) => item.orderId), ["ORD-0000003"]);
+});
+
+test("sortCalendarAllocations orders by priority due date and older created timestamp", () => {
+  const allocations = [
+    { orderId: "ORD-B", priority: "low", dueDate: "2026-05-30", createdAtTimestamp: 1772271715000 },
+    { orderId: "ORD-HIGH", priority: "high", dueDate: "2026-06-10", createdAtTimestamp: 1772271719000 },
+    { orderId: "ORD-LATE", priority: "low", dueDate: "2026-06-01", createdAtTimestamp: 1772271710000 },
+    { orderId: "ORD-A", priority: "low", dueDate: "2026-05-30", createdAtTimestamp: 1772271713000 },
+  ];
+
+  assert.deepEqual(
+    sortCalendarAllocations(allocations).map((allocation) => allocation.orderId),
+    ["ORD-HIGH", "ORD-A", "ORD-B", "ORD-LATE"],
+  );
 });
 
 test("mergePreviewCalendarAllocations replaces touched orders with preview entries", () => {

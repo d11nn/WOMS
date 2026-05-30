@@ -765,11 +765,11 @@ func (s *PostgresStore) ScheduleCalendar(lineID, month string, claims auth.Claim
 	calendarStart := monthStart.AddDate(0, 0, -int(monthStart.Weekday()))
 	calendarEnd := calendarStart.AddDate(0, 0, 42)
 	rows, err := s.db.Query(`
-		SELECT a.order_id, o.customer, a.line_id, a.allocation_date, a.quantity, CASE WHEN COALESCE(a.status, o.status) = '已完成' THEN o.quantity ELSE 0 END, a.priority, COALESCE(a.status, o.status), a.locked, o.due_date
+		SELECT a.order_id, o.customer, a.line_id, a.allocation_date, a.quantity, CASE WHEN COALESCE(a.status, o.status) = '已完成' THEN o.quantity ELSE 0 END, a.priority, COALESCE(a.status, o.status), a.locked, o.due_date, o.created_at
 		FROM schedule_allocations a
 		JOIN orders o ON o.id = a.order_id
 		WHERE a.line_id = $1 AND a.allocation_date >= $2 AND a.allocation_date < $3
-		ORDER BY a.allocation_date, a.order_id
+		ORDER BY a.allocation_date, CASE WHEN a.priority = 'high' THEN 0 ELSE 1 END, o.due_date, o.created_at, a.order_id
 	`, lineID, calendarStart, calendarEnd)
 	if err != nil {
 		return calendarResponse{}, err
@@ -778,14 +778,17 @@ func (s *PostgresStore) ScheduleCalendar(lineID, month string, claims auth.Claim
 	allocations := []calendarAllocation{}
 	for rows.Next() {
 		var allocation calendarAllocation
-		if err := rows.Scan(&allocation.OrderID, &allocation.Customer, &allocation.LineID, &allocation.Date, &allocation.Quantity, &allocation.CompletedQuantity, &allocation.Priority, &allocation.Status, &allocation.Locked, &allocation.DueDate); err != nil {
+		var createdAt time.Time
+		if err := rows.Scan(&allocation.OrderID, &allocation.Customer, &allocation.LineID, &allocation.Date, &allocation.Quantity, &allocation.CompletedQuantity, &allocation.Priority, &allocation.Status, &allocation.Locked, &allocation.DueDate, &createdAt); err != nil {
 			return calendarResponse{}, err
 		}
+		allocation.CreatedAtTimestamp = unixMilliseconds(createdAt)
 		allocations = append(allocations, allocation)
 	}
 	if err := rows.Err(); err != nil {
 		return calendarResponse{}, err
 	}
+	sortCalendarAllocations(allocations)
 	pendingAllocations := []calendarAllocation{}
 	if claims.Role == domain.RoleSales {
 		pendingInputs, err := s.pendingOrderInputs(lineID, nil)
@@ -1505,13 +1508,14 @@ func (s *PostgresStore) schedulerInputs(req scheduleRequest, claims auth.Claims,
 		// Scheduler previews/jobs do not use this draft branch, so formal scheduling
 		// keeps excluding unrelated pending orders from daily capacity.
 		inputs = append(inputs, scheduler.OrderInput{
-			ID:       previewDraftOrderID,
-			Customer: strings.TrimSpace(draft.Customer),
-			LineID:   draft.LineID,
-			Quantity: draft.Quantity,
-			Priority: draft.Priority,
-			Status:   domain.StatusPending,
-			DueDate:  dueDate,
+			ID:                 previewDraftOrderID,
+			Customer:           strings.TrimSpace(draft.Customer),
+			LineID:             draft.LineID,
+			Quantity:           draft.Quantity,
+			Priority:           draft.Priority,
+			Status:             domain.StatusPending,
+			DueDate:            dueDate,
+			CreatedAtTimestamp: unixMilliseconds(time.Now().UTC()),
 		})
 		return inputs, nil
 	}
@@ -1533,10 +1537,10 @@ func (s *PostgresStore) schedulerInputs(req scheduleRequest, claims auth.Claims,
 
 func (s *PostgresStore) pendingOrderInputs(lineID string, selected map[string]bool) ([]scheduler.OrderInput, error) {
 	rows, err := s.db.Query(`
-		SELECT id, customer, line_id, quantity, priority, status, due_date
+		SELECT id, customer, line_id, quantity, priority, status, due_date, created_at
 		FROM orders
 		WHERE line_id = $1 AND status = '待排程'
-		ORDER BY due_date, id
+		ORDER BY CASE WHEN priority = 'high' THEN 0 ELSE 1 END, due_date, created_at, id
 	`, lineID)
 	if err != nil {
 		return nil, err
@@ -1545,9 +1549,11 @@ func (s *PostgresStore) pendingOrderInputs(lineID string, selected map[string]bo
 	inputs := []scheduler.OrderInput{}
 	for rows.Next() {
 		var input scheduler.OrderInput
-		if err := rows.Scan(&input.ID, &input.Customer, &input.LineID, &input.Quantity, &input.Priority, &input.Status, &input.DueDate); err != nil {
+		var createdAt time.Time
+		if err := rows.Scan(&input.ID, &input.Customer, &input.LineID, &input.Quantity, &input.Priority, &input.Status, &input.DueDate, &createdAt); err != nil {
 			return nil, err
 		}
+		input.CreatedAtTimestamp = unixMilliseconds(createdAt)
 		if len(selected) > 0 && !selected[input.ID] {
 			continue
 		}
@@ -1565,7 +1571,7 @@ func (s *PostgresStore) resolutionOrderInputs(resolutionOrderIDs []string, lineI
 		return nil, nil
 	}
 	rows, err := s.db.Query(`
-		SELECT id, customer, line_id, quantity, priority, status, due_date
+		SELECT id, customer, line_id, quantity, priority, status, due_date, created_at
 		FROM orders
 		WHERE id = ANY($1)
 	`, pq.Array(ids))
@@ -1584,7 +1590,8 @@ func (s *PostgresStore) resolutionOrderInputs(resolutionOrderIDs []string, lineI
 		var priority domain.Priority
 		var status string
 		var dueDate time.Time
-		if err := rows.Scan(&id, &customer, &orderLineID, &quantity, &priority, &status, &dueDate); err != nil {
+		var createdAt time.Time
+		if err := rows.Scan(&id, &customer, &orderLineID, &quantity, &priority, &status, &dueDate, &createdAt); err != nil {
 			return nil, err
 		}
 		if orderLineID != lineID {
@@ -1600,13 +1607,14 @@ func (s *PostgresStore) resolutionOrderInputs(resolutionOrderIDs []string, lineI
 			return nil, err
 		}
 		inputs = append(inputs, scheduler.OrderInput{
-			ID:       id,
-			Customer: customer,
-			LineID:   orderLineID,
-			Quantity: quantity,
-			Priority: priority,
-			Status:   domain.OrderStatus(status),
-			DueDate:  dueDate,
+			ID:                 id,
+			Customer:           customer,
+			LineID:             orderLineID,
+			Quantity:           quantity,
+			Priority:           priority,
+			Status:             domain.OrderStatus(status),
+			DueDate:            dueDate,
+			CreatedAtTimestamp: unixMilliseconds(createdAt),
 		})
 		found[id] = true
 	}

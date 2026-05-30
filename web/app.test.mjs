@@ -328,7 +328,7 @@ function buildDomFromIndex() {
   byId("reset-password-form").appendChild(byId("reset-password-username"));
   addNamedControl(byId("reset-password-form"), "input", "password");
 
-  for (const mode of ["pending", "scheduled", "all"]) {
+  for (const mode of ["all", "pending", "scheduled"]) {
     appendElement(byId("main-calendar-mode"), "button", { "data-calendar-mode": mode });
     appendElement(byId("preview-calendar-mode"), "button", { "data-preview-calendar-mode": mode });
   }
@@ -449,6 +449,10 @@ function renderedMarkup(element) {
     element.textContent,
     ...element.children.map((child) => renderedMarkup(child)),
   ].join("");
+}
+
+function calendarDateKeys(element) {
+  return element.children.map((child) => child.dataset.date);
 }
 
 async function settleApp() {
@@ -1315,6 +1319,236 @@ test("sales draft flow validates future due dates previews and confirms through 
   assert.match(app, /showMessage\("無法加入待排程", error\.message, "warn"\)/);
 });
 
+test("sales draft conflict preview keeps baseline pending and scheduled calendars", async () => {
+  const document = buildDomFromIndex();
+  const fetchImpl = async (path, options = {}) => {
+    if (path === "/api/auth/login") {
+      return jsonResponse({
+        token: "token-sales",
+        user: { id: "user-sales", username: "sales", role: "sales" },
+      });
+    }
+    if (path === "/api/lines") {
+      return jsonResponse({
+        lines: [{ id: "A", name: "Line A", capacityPerDay: 1000, timezone: "Asia/Taipei" }],
+      });
+    }
+    if (path === "/api/orders") {
+      return jsonResponse({
+        orders: [
+          { id: "ORD-PENDING", customer: "ACME", lineId: "A", quantity: 500, priority: "low", status: "待排程", dueDate: dateKeyAfter(4), createdBy: "user-sales" },
+          { id: "ORD-SCHEDULED", customer: "Beta", lineId: "A", quantity: 700, priority: "low", status: "已排程", dueDate: dateKeyAfter(5), createdBy: "user-sales" },
+        ],
+      });
+    }
+    if (String(path).startsWith("/api/schedules/calendar?")) {
+      return jsonResponse({
+        allocations: [
+          { orderId: "ORD-SCHEDULED", customer: "Beta", lineId: "A", date: dateKeyAfter(2), quantity: 700, priority: "low", status: "已排程" },
+        ],
+        pendingAllocations: [
+          { orderId: "ORD-PENDING", customer: "ACME", lineId: "A", date: dateKeyAfter(1), quantity: 500, priority: "low", status: "待排程" },
+        ],
+      });
+    }
+    if (path === "/api/schedules/preview") {
+      assert.equal(options.method, "POST");
+      return jsonResponse({
+        previewId: "PREVIEW-DRAFT",
+        currentDate: dateKeyAfter(0),
+        allocations: [
+          { orderId: "PREVIEW-DRAFT", customer: "ACME", lineId: "A", date: dateKeyAfter(1), quantity: 1000, priority: "low", status: "待排程" },
+        ],
+        conflicts: [
+          {
+            orderId: "PREVIEW-DRAFT",
+            reason: "capacity cannot satisfy order before due date",
+            earliestFinishDate: `${dateKeyAfter(6)}T00:00:00Z`,
+            affectedOrderIds: [],
+          },
+        ],
+      });
+    }
+    throw new Error(`unexpected fetch ${path}`);
+  };
+  const restoreGlobals = installBrowserGlobalsWithFetch(document, fetchImpl);
+  try {
+    await import(appModuleUrl("sales-draft-conflict-calendar"));
+
+    await document.getElementById("login-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+    await document.getElementById("order-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+
+    const pendingMarkup = renderedMarkup(document.getElementById("preview-calendar-grid"));
+    assert.match(pendingMarkup, /ORD-PENDING/);
+    assert.doesNotMatch(pendingMarkup, /PREVIEW-DRAFT/);
+    assert.match(document.getElementById("preview-page-list").innerHTML, /conflict-preview[\s\S]*PREVIEW-DRAFT/);
+
+    const previewCalendarModes = document.getElementById("preview-calendar-mode").children;
+    await document.getElementById("preview-calendar-mode").dispatchEvent({
+      type: "click",
+      target: previewCalendarModes.find((button) => button.dataset.previewCalendarMode === "scheduled"),
+    });
+    const scheduledMarkup = renderedMarkup(document.getElementById("preview-calendar-grid"));
+    assert.match(scheduledMarkup, /ORD-SCHEDULED/);
+    assert.doesNotMatch(scheduledMarkup, /ORD-PENDING/);
+
+    await document.getElementById("preview-calendar-mode").dispatchEvent({
+      type: "click",
+      target: previewCalendarModes.find((button) => button.dataset.previewCalendarMode === "all"),
+    });
+    const allMarkup = renderedMarkup(document.getElementById("preview-calendar-grid"));
+    assert.match(allMarkup, /ORD-PENDING/);
+    assert.match(allMarkup, /ORD-SCHEDULED/);
+    assert.doesNotMatch(allMarkup, /PREVIEW-DRAFT/);
+  } finally {
+    restoreGlobals();
+  }
+});
+
+test("sales draft conflict preview shows successful draft schedule and excludes conflicted pending order", async () => {
+  const document = buildDomFromIndex();
+  const previewDate = dateKeyAfter(1);
+  const fetchImpl = async (path, options = {}) => {
+    if (path === "/api/auth/login") {
+      return jsonResponse({
+        token: "token-sales",
+        user: { id: "user-sales", username: "sales", role: "sales" },
+      });
+    }
+    if (path === "/api/lines") {
+      return jsonResponse({
+        lines: [{ id: "A", name: "Line A", capacityPerDay: 10000, timezone: "Asia/Taipei" }],
+      });
+    }
+    if (path === "/api/orders") {
+      return jsonResponse({
+        orders: [
+          { id: "ORD-A", customer: "A", lineId: "A", quantity: 2500, priority: "high", status: "待排程", dueDate: previewDate, createdBy: "user-sales" },
+          { id: "ORD-B", customer: "B", lineId: "A", quantity: 2500, priority: "high", status: "待排程", dueDate: previewDate, createdBy: "user-sales" },
+          { id: "ORD-C", customer: "C", lineId: "A", quantity: 2500, priority: "low", status: "待排程", dueDate: previewDate, createdBy: "user-sales" },
+          { id: "ORD-D", customer: "D", lineId: "A", quantity: 2500, priority: "low", status: "待排程", dueDate: previewDate, createdBy: "user-sales" },
+          { id: "ORD-SCHEDULED", customer: "Scheduled", lineId: "A", quantity: 1000, priority: "low", status: "已排程", dueDate: dateKeyAfter(4), createdBy: "user-sales" },
+        ],
+      });
+    }
+    if (String(path).startsWith("/api/schedules/calendar?")) {
+      return jsonResponse({
+        allocations: [
+          { orderId: "ORD-SCHEDULED", customer: "Scheduled", lineId: "A", date: dateKeyAfter(4), quantity: 1000, priority: "low", status: "已排程", dueDate: dateKeyAfter(4), createdAtTimestamp: 1772271700000 },
+        ],
+        pendingAllocations: [
+          { orderId: "ORD-A", customer: "A", lineId: "A", date: previewDate, quantity: 2500, priority: "high", status: "待排程", dueDate: previewDate, createdAtTimestamp: 1772271711000 },
+          { orderId: "ORD-B", customer: "B", lineId: "A", date: previewDate, quantity: 2500, priority: "high", status: "待排程", dueDate: previewDate, createdAtTimestamp: 1772271712000 },
+          { orderId: "ORD-C", customer: "C", lineId: "A", date: previewDate, quantity: 2500, priority: "low", status: "待排程", dueDate: previewDate, createdAtTimestamp: 1772271713000 },
+          { orderId: "ORD-D", customer: "D", lineId: "A", date: previewDate, quantity: 2500, priority: "low", status: "待排程", dueDate: previewDate, createdAtTimestamp: 1772271714000 },
+        ],
+      });
+    }
+    if (path === "/api/schedules/preview") {
+      assert.equal(options.method, "POST");
+      return jsonResponse({
+        previewId: "PREVIEW-DRAFT",
+        currentDate: dateKeyAfter(0),
+        allocations: [
+          { orderId: "ORD-A", customer: "A", lineId: "A", date: previewDate, quantity: 2500, priority: "high", status: "待排程", dueDate: previewDate, createdAtTimestamp: 1772271711000 },
+          { orderId: "ORD-B", customer: "B", lineId: "A", date: previewDate, quantity: 2500, priority: "high", status: "待排程", dueDate: previewDate, createdAtTimestamp: 1772271712000 },
+          { orderId: "PREVIEW-DRAFT", customer: "E", lineId: "A", date: previewDate, quantity: 2500, priority: "high", status: "待排程", dueDate: previewDate, createdAtTimestamp: 1772271715000 },
+          { orderId: "ORD-C", customer: "C", lineId: "A", date: previewDate, quantity: 2500, priority: "low", status: "待排程", dueDate: previewDate, createdAtTimestamp: 1772271713000 },
+        ],
+        conflicts: [
+          {
+            orderId: "ORD-D",
+            reason: "capacity cannot satisfy order before due date",
+            earliestFinishDate: `${dateKeyAfter(2)}T00:00:00Z`,
+            affectedOrderIds: [],
+          },
+        ],
+      });
+    }
+    throw new Error(`unexpected fetch ${path}`);
+  };
+  const restoreGlobals = installBrowserGlobalsWithFetch(document, fetchImpl);
+  try {
+    await import(appModuleUrl("sales-draft-conflict-successful-allocations"));
+
+    await document.getElementById("login-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+    await document.getElementById("order-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+
+    const pendingMarkup = renderedMarkup(document.getElementById("preview-calendar-grid"));
+    assert.match(pendingMarkup, /ORD-A[\s\S]*ORD-B[\s\S]*PREVIEW-DRAFT[\s\S]*ORD-C/);
+    assert.doesNotMatch(pendingMarkup, /ORD-D/);
+    assert.match(document.getElementById("preview-page-list").innerHTML, /ORD-D/);
+    assert.match(document.getElementById("preview-page-list").innerHTML, /conflict-preview[\s\S]*ORD-D/);
+
+    const previewCalendarModes = document.getElementById("preview-calendar-mode").children;
+    await document.getElementById("preview-calendar-mode").dispatchEvent({
+      type: "click",
+      target: previewCalendarModes.find((button) => button.dataset.previewCalendarMode === "all"),
+    });
+    const allMarkup = renderedMarkup(document.getElementById("preview-calendar-grid"));
+    assert.match(allMarkup, /ORD-SCHEDULED/);
+    assert.match(allMarkup, /ORD-A[\s\S]*ORD-B[\s\S]*PREVIEW-DRAFT[\s\S]*ORD-C/);
+    assert.doesNotMatch(allMarkup, /ORD-D/);
+  } finally {
+    restoreGlobals();
+  }
+});
+
+test("preview calendars keep the same visible dates as the monthly calendar", async () => {
+  const document = buildDomFromIndex();
+  const distantPreviewDate = dateKeyAfter(45);
+  const fetchImpl = async (path, options = {}) => {
+    if (path === "/api/auth/login") {
+      return jsonResponse({
+        token: "token-sales",
+        user: { id: "user-sales", username: "sales", role: "sales" },
+      });
+    }
+    if (path === "/api/lines") {
+      return jsonResponse({
+        lines: [{ id: "A", name: "Line A", capacityPerDay: 10000, timezone: "Asia/Taipei" }],
+      });
+    }
+    if (path === "/api/orders") {
+      return jsonResponse({ orders: [] });
+    }
+    if (String(path).startsWith("/api/schedules/calendar?")) {
+      return jsonResponse({ allocations: [], pendingAllocations: [] });
+    }
+    if (path === "/api/schedules/preview") {
+      assert.equal(options.method, "POST");
+      return jsonResponse({
+        previewId: "PREVIEW-DRAFT",
+        currentDate: dateKeyAfter(0),
+        allocations: [
+          { orderId: "PREVIEW-DRAFT", customer: "Far", lineId: "A", date: distantPreviewDate, quantity: 2500, priority: "low", status: "待排程" },
+        ],
+        conflicts: [],
+      });
+    }
+    throw new Error(`unexpected fetch ${path}`);
+  };
+  const restoreGlobals = installBrowserGlobalsWithFetch(document, fetchImpl);
+  try {
+    await import(appModuleUrl("preview-calendar-grid-dates"));
+
+    await document.getElementById("login-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+    const monthlyDates = calendarDateKeys(document.getElementById("calendar-grid"));
+
+    await document.getElementById("order-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+
+    assert.deepEqual(calendarDateKeys(document.getElementById("preview-calendar-grid")), monthlyDates);
+  } finally {
+    restoreGlobals();
+  }
+});
+
 test("scheduler bulk controls filter select preview reject cancel and schedule selected orders", () => {
   const app = readFileSync(new URL("./app.js", import.meta.url), "utf8");
   const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
@@ -1344,7 +1578,7 @@ test("calendar modes and drag or drop scheduling target visible future dates", (
   const app = readFileSync(new URL("./app.js", import.meta.url), "utf8");
   const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
 
-  assert.match(html, /id="main-calendar-mode"[\s\S]*data-calendar-mode="pending"[\s\S]*data-calendar-mode="scheduled"[\s\S]*data-calendar-mode="all"/);
+  assert.match(html, /id="main-calendar-mode"[\s\S]*data-calendar-mode="all"[\s\S]*data-calendar-mode="pending"[\s\S]*data-calendar-mode="scheduled"/);
   assert.match(app, /document\.getElementById\("main-calendar-mode"\)\.addEventListener\("click"[\s\S]*state\.calendarMode = mode[\s\S]*renderCalendar\(\)/);
   assert.match(app, /function mainCalendarAllocations\(\)[\s\S]*state\.calendarMode === "pending"[\s\S]*state\.calendarMode === "all"/);
   assert.match(app, /cell\.addEventListener\("drop", async \(event\) => \{[\s\S]*await scheduleDroppedOrders\(orderIds, day\.key\)/);
@@ -2449,4 +2683,3 @@ test.skip("extreme app.js coverage booster", async () => {
     restoreGlobals();
   }
 });
-

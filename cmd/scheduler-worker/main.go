@@ -480,7 +480,7 @@ func persistLineSchedule(ctx context.Context, tx *sql.Tx, job domain.ScheduleJob
 		SELECT id, quantity, priority
 		FROM orders
 		WHERE line_id = $1 AND status = '待排程'
-		ORDER BY due_date, id
+		ORDER BY CASE WHEN priority = 'high' THEN 0 ELSE 1 END, due_date, created_at, id
 	`, job.LineID)
 	if err != nil {
 		return err

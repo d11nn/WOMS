@@ -111,7 +111,7 @@ func main() {
 			time.Sleep(config.minJobDuration)
 		}
 		if db != nil {
-			if err := processDBJob(context.Background(), db, lockProvider, message.Value, config.maxRetries, config.lockTTL, config.lockRenewInterval, config.lockTimeout); err != nil {
+			if err := processDBJob(context.Background(), db, lockProvider, message.Value, workerJobConfigFromConfig(config)); err != nil {
 				log.Printf("scheduler job db execution failed key=%s error=%v", string(message.Key), err)
 				time.Sleep(2 * time.Second)
 				continue
@@ -182,8 +182,24 @@ func loadWorkerConfig(lookup func(string) (string, bool)) (workerConfig, error) 
 	return config, nil
 }
 
-func processDBJob(ctx context.Context, db *sql.DB, lockProvider womslock.Provider, payload []byte, maxRetries int, lockTTL, lockRenewInterval, lockTimeout time.Duration) error {
-	return processJobPayload(ctx, sqlScheduleJobExecutor{db: db}, lockProvider, payload, maxRetries, lockTTL, lockRenewInterval, lockTimeout)
+type workerJobConfig struct {
+	maxRetries        int
+	lockTTL           time.Duration
+	lockRenewInterval time.Duration
+	lockTimeout       time.Duration
+}
+
+func workerJobConfigFromConfig(config workerConfig) workerJobConfig {
+	return workerJobConfig{
+		maxRetries:        config.maxRetries,
+		lockTTL:           config.lockTTL,
+		lockRenewInterval: config.lockRenewInterval,
+		lockTimeout:       config.lockTimeout,
+	}
+}
+
+func processDBJob(ctx context.Context, db *sql.DB, lockProvider womslock.Provider, payload []byte, config workerJobConfig) error {
+	return processJobPayload(ctx, sqlScheduleJobExecutor{db: db}, lockProvider, payload, config)
 }
 
 type scheduleJobExecutor interface {
@@ -208,7 +224,7 @@ func (e sqlScheduleJobExecutor) processJobLocked(ctx context.Context, job domain
 	return processDBJobLocked(ctx, e.db, job, maxRetries)
 }
 
-func processJobPayload(ctx context.Context, executor scheduleJobExecutor, lockProvider womslock.Provider, payload []byte, maxRetries int, lockTTL, lockRenewInterval, lockTimeout time.Duration) error {
+func processJobPayload(ctx context.Context, executor scheduleJobExecutor, lockProvider womslock.Provider, payload []byte, config workerJobConfig) error {
 	var job domain.ScheduleJob
 	if err := json.Unmarshal(payload, &job); err != nil {
 		return err
@@ -222,9 +238,9 @@ func processJobPayload(ctx context.Context, executor scheduleJobExecutor, lockPr
 		}
 		return nil
 	}
-	lockCtx, cancel := context.WithTimeout(ctx, lockTimeout)
+	lockCtx, cancel := context.WithTimeout(ctx, config.lockTimeout)
 	defer cancel()
-	lineLock, err := acquireLineLock(lockCtx, lockProvider, scheduleLineLockKey(job.LineID), lockTTL)
+	lineLock, err := acquireLineLock(lockCtx, lockProvider, scheduleLineLockKey(job.LineID), config.lockTTL)
 	if err != nil {
 		message := "Redis 排程鎖取得失敗，等待重試：" + err.Error()
 		if lockCtx.Err() != nil || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
@@ -240,9 +256,9 @@ func processJobPayload(ctx context.Context, executor scheduleJobExecutor, lockPr
 			log.Printf("failed to release line lock for job %s on line %s: %v", job.ID, job.LineID, err)
 		}
 	}()
-	runCtx, stopRenewal := startLockRenewal(ctx, lineLock, lockTTL, lockRenewInterval)
+	runCtx, stopRenewal := startLockRenewal(ctx, lineLock, config.lockTTL, config.lockRenewInterval)
 	defer stopRenewal()
-	return executor.processJobLocked(runCtx, job, maxRetries)
+	return executor.processJobLocked(runCtx, job, config.maxRetries)
 }
 
 func validateLockConfig(lockTTL, lockRenewInterval, lockTimeout time.Duration) error {
@@ -687,7 +703,12 @@ func backfillQueuedJobs(ctx context.Context, db *sql.DB, lockProvider womslock.P
 				rows.Close()
 				return err
 			}
-			if err := processDBJob(ctx, db, lockProvider, payload, maxRetries, lockTTL, lockRenewInterval, lockTimeout); err != nil {
+			if err := processDBJob(ctx, db, lockProvider, payload, workerJobConfig{
+				maxRetries:        maxRetries,
+				lockTTL:           lockTTL,
+				lockRenewInterval: lockRenewInterval,
+				lockTimeout:       lockTimeout,
+			}); err != nil {
 				log.Printf("scheduler backfill job failed id=%s error=%v", job.ID, err)
 			}
 

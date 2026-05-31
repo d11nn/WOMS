@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, readFileSync, unlinkSync } from "node:fs";
-import { execFileSync } from "node:child_process";
 import { join } from "node:path";
+import { mergeLcovFile, mergeLcovText } from "../scripts/merge-lcov.mjs";
 
 test("merge-lcov.mjs merges duplicate LCOV records correctly", () => {
   const tempFile = join(process.cwd(), "temp-test-lcov.info");
@@ -33,8 +33,7 @@ end_of_record
   writeFileSync(tempFile, content, "utf8");
   
   try {
-    // Run the merge-lcov.mjs script using node
-    execFileSync("node", ["./scripts/merge-lcov.mjs", tempFile]);
+    mergeLcovFile(tempFile);
     
     // Read and verify the merged content
     const merged = readFileSync(tempFile, "utf8");
@@ -62,8 +61,6 @@ end_of_record
   }
 });
 
-test("merge-lcov.mjs fails when run without file argument", () => {
-  assert.throws(() => {
-    execFileSync("node", ["./scripts/merge-lcov.mjs"]);
-  }, /Command failed/);
+test("merge-lcov.mjs ignores records without a source file", () => {
+  assert.equal(mergeLcovText("some junk text without SF line\nend_of_record"), "\n");
 });

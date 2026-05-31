@@ -1,4 +1,13 @@
 {{- if .Values.ingress.enabled }}
+{{- $routeMode := default "directApi" .Values.ingress.routeMode }}
+{{- if ne $routeMode "directApi" }}
+{{- fail (printf "unsupported ingress.routeMode %q; use directApi so /api is routed directly to the API service" $routeMode) }}
+{{- end }}
+{{- $ingressAnnotations := dict "nginx.ingress.kubernetes.io/force-ssl-redirect" "true" "nginx.ingress.kubernetes.io/proxy-body-size" "1m" }}
+{{- with .Values.ingress.annotations }}
+{{- $ingressAnnotations = . }}
+{{- end }}
+{{- $apiAnnotations := omit $ingressAnnotations "cert-manager.io/cluster-issuer" "acme.cert-manager.io/http01-ingress-class" }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -6,8 +15,7 @@ metadata:
   labels:
     {{- include "woms.labels" . | nindent 4 }}
   annotations:
-    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
-    nginx.ingress.kubernetes.io/proxy-body-size: "1m"
+    {{- tpl (toYaml $ingressAnnotations) $ | nindent 4 }}
 spec:
   ingressClassName: {{ .Values.ingress.className | quote }}
   {{- if .Values.ingress.tls.enabled }}
@@ -38,16 +46,24 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
+  {{- if .Values.ingress.auth.enabled }}
   name: {{ include "woms.fullname" . }}-api-secure
+  {{- else }}
+  name: {{ include "woms.fullname" . }}-api-open
+  {{- end }}
   labels:
     {{- include "woms.labels" . | nindent 4 }}
+  {{- if or $apiAnnotations .Values.ingress.auth.enabled }}
   annotations:
-    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
-    nginx.ingress.kubernetes.io/proxy-body-size: "1m"
-    {{- if .Values.ingress.auth.enabled }}
-    nginx.ingress.kubernetes.io/auth-url: "http://{{ include "woms.fullname" . }}-api.{{ .Release.Namespace }}.svc.cluster.local:8080/internal/auth/verify"
-    nginx.ingress.kubernetes.io/auth-response-headers: "X-User-ID,X-User-Role,X-User-Line"
+    {{- with $apiAnnotations }}
+    {{- tpl (toYaml .) $ | nindent 4 }}
     {{- end }}
+    {{- if .Values.ingress.auth.enabled }}
+    nginx.ingress.kubernetes.io/auth-url: {{ printf "http://%s-api.%s.svc.cluster.local:8080/internal/auth/verify" (include "woms.fullname" .) .Release.Namespace | quote }}
+    nginx.ingress.kubernetes.io/auth-method: "GET"
+    nginx.ingress.kubernetes.io/auth-response-headers: "X-User-ID, X-User-Role, X-User-Line"
+    {{- end }}
+  {{- end }}
 spec:
   ingressClassName: {{ .Values.ingress.className | quote }}
   {{- if .Values.ingress.tls.enabled }}

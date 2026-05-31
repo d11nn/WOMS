@@ -242,7 +242,7 @@ Make sure the cluster has KEDA installed first. NGINX Ingress is required only w
 A clean VM deployment should have two layers:
 
 1. Platform setup: Kubernetes, KEDA, and Ingress NGINX or LoadBalancer support for the web traffic demo.
-2. WOMS deployment: Helm installs the API, web, scheduler worker, Services, optional Ingress, KEDA ScaledObject, and the PostgreSQL, Redis, and Kafka chart dependencies.
+2. WOMS deployment: Helm installs the API, web, scheduler worker, Services, optional Ingress, web KEDA ScaledObject, and the PostgreSQL, Redis, and Kafka chart dependencies.
 
 Users should not manually patch the web deployment, create Kafka topics, or tune topic partitions. Those operational details must be handled by the image, Helm chart, or platform bootstrap.
 
@@ -351,11 +351,24 @@ http(s)://<ingress.host>/grafana
 
 No Grafana port-forward is required for the ingress path. The public ingress sends `/grafana` to the web service, and the web NGINX container proxies it to the internal Grafana ClusterIP service. The chart derives `GF_SERVER_ROOT_URL` from `ingress.host`, `ingress.tls.enabled`, and `monitoring.grafana.externalPath`; production deployments can override it with `monitoring.grafana.env.rootUrl`.
 
-In Helm/Kubernetes, the web container proxies `/api/` to `API_UPSTREAM`, which the chart sets to `woms-woms-api:8080`, and proxies `/grafana/` to `GRAFANA_UPSTREAM`, which the chart sets to `woms-woms-grafana:3000`. The Kubernetes NGINX template renders those upstreams directly and relies on the Pod resolver from Kubernetes; it must not use Docker-only DNS such as `127.0.0.11` in Kubernetes. Docker Compose mounts `web/nginx.compose.conf.template` instead, so local Compose runs can use Docker's embedded resolver and re-resolve the `api` and `grafana` services after containers are recreated.
+In Helm/Kubernetes, the Ingress uses `directApi` routing: `/api/auth/login` goes directly to the API service without edge auth, protected `/api` traffic goes directly to the API service through NGINX Ingress `auth-url`, and `/` plus `/grafana/` go to the web service. The web container still keeps its `/api/` proxy for Docker Compose, direct web Service access, and non-Ingress environments. It also proxies `/grafana/` to `GRAFANA_UPSTREAM`, which the chart sets to `woms-woms-grafana:3000`. The Kubernetes NGINX template renders those upstreams directly and relies on the Pod resolver from Kubernetes; it must not use Docker-only DNS such as `127.0.0.11` in Kubernetes. Docker Compose mounts `web/nginx.compose.conf.template` instead, so local Compose runs can use Docker's embedded resolver and re-resolve the `api` and `grafana` services after containers are recreated.
 
 Grafana anonymous access is disabled in Helm. The chart creates a `woms-woms-grafana-admin` Secret with a generated password when `monitoring.grafana.admin.existingSecret` is empty. Production deployments should create their own Secret and set `monitoring.grafana.admin.existingSecret`, `monitoring.grafana.admin.userKey`, and `monitoring.grafana.admin.passwordKey`. Users must sign in to Grafana before they can observe monitoring dashboards. For the generated default Secret, retrieve the password with `kubectl get secret woms-woms-grafana-admin -n woms -o jsonpath='{.data.admin-password}' | base64 -d`.
 
 Grafana provisions two WOMS dashboards in the `WOMS` folder: `WOMS Monitoring` keeps the API request, latency, status, and Go runtime panels, while `WOMS web autoscaling` shows the web NGINX request-rate signal used by the active HPA.
+
+### GKE Deployment
+
+GKE-specific Helm values are isolated in `deploy/helm/woms/values-gke.yaml`, so the default local/VM Kubernetes deployment keeps using `values.yaml`. Full GKE operating steps live in [docs/gke-deployment.en.md](docs/gke-deployment.en.md).
+
+Minimal GKE chart shape:
+
+```bash
+helm upgrade --install woms ./deploy/helm/woms \
+  --namespace woms --create-namespace \
+  --dependency-update \
+  -f ./deploy/helm/woms/values-gke.yaml
+```
 
 If the browser runs on a Windows host and WOMS runs on VM `192.168.56.101`, create an SSH tunnel from Windows first:
 
@@ -365,7 +378,7 @@ ssh -L 8081:127.0.0.1:8081 ubuntu@192.168.56.101
 
 ### Web Traffic HPA Demo
 
-The active HPA scenario for WOMS is NGINX Ingress or LoadBalancer traffic to the web pods. The web NGINX container exposes `stub_status` on `127.0.0.1`, a sidecar `nginx-prometheus-exporter` publishes `/metrics`, Prometheus scrapes the web Service `metrics` port, and KEDA scales `Deployment/woms-woms-web` with the same per-pod NGINX request-rate query shown in Grafana.
+The active HPA scenario for WOMS is NGINX Ingress or LoadBalancer traffic to the web pods. The web NGINX container exposes `stub_status` on `127.0.0.1`, a sidecar `nginx-prometheus-exporter` publishes `/metrics`, Prometheus scrapes the web Service `metrics` port, and KEDA scales `Deployment/woms-woms-web` with the same per-pod NGINX request-rate query shown in Grafana. With direct API Ingress routing enabled, this web HPA signal reflects `/`, static assets, and `/grafana/` traffic; direct `/api` traffic is served by API pods and is not counted in the web NGINX request metric.
 
 Default active target:
 

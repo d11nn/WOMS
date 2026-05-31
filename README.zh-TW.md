@@ -242,7 +242,7 @@ docker build -f Dockerfile.web -t woms-web:local .
 乾淨 VM 的使用者流程應該分成兩層：
 
 1. 平台準備：Kubernetes、KEDA，以及 web traffic demo 所需的 NGINX Ingress 或 LoadBalancer 支援。
-2. WOMS 部署：使用 Helm 部署 API、web、scheduler-worker、Service、可選的 Ingress、KEDA ScaledObject，以及 PostgreSQL、Redis、Kafka chart dependencies。
+2. WOMS 部署：使用 Helm 部署 API、web、scheduler-worker、Service、可選的 Ingress、web KEDA ScaledObject，以及 PostgreSQL、Redis、Kafka chart dependencies。
 
 使用者不應手動 patch web deployment、手動建立 Kafka topic，或手動調整 topic partitions。這些都必須由 image、Helm chart 或平台 bootstrap 自動處理。
 
@@ -353,11 +353,24 @@ http(s)://<ingress.host>/grafana
 
 使用 ingress path 時不需要額外對 Grafana port-forward。public ingress 會把 `/grafana` 送到 web service，再由 web NGINX container proxy 到內部 Grafana ClusterIP service。Chart 會依 `ingress.host`、`ingress.tls.enabled` 與 `monitoring.grafana.externalPath` 產生 `GF_SERVER_ROOT_URL`；正式環境若有外部 DNS、TLS terminator 或非預設路徑，可用 `monitoring.grafana.env.rootUrl` 覆寫。
 
-在 Helm/Kubernetes 中，web container 會把 `/api/` 代理到 `API_UPSTREAM`，chart 會設定為 `woms-woms-api:8080`，並把 `/grafana/` 代理到 `GRAFANA_UPSTREAM`，chart 會設定為 `woms-woms-grafana:3000`。Kubernetes NGINX template 會直接 render 這些 upstream，並使用 Kubernetes 寫入 Pod 的 resolver；Kubernetes 部署中不應使用 `127.0.0.11` 這類 Docker-only DNS。Docker Compose 會改掛載 `web/nginx.compose.conf.template`，讓本機 Compose 環境使用 Docker embedded resolver，並在 API 或 Grafana container 重建後重新解析 service。
+在 Helm/Kubernetes 中，Ingress 使用 `directApi` 路由：`/api/auth/login` 不經 edge auth、直接進 API service；受保護的 `/api` 會先經 NGINX Ingress `auth-url` 驗證 bearer token，再直接進 API service；`/` 與 `/grafana/` 則進 web service。web container 仍保留 `/api/` proxy，供 Docker Compose、直接存取 web Service、以及非 Ingress 環境使用；它也會把 `/grafana/` 代理到 `GRAFANA_UPSTREAM`，chart 會設定為 `woms-woms-grafana:3000`。Kubernetes NGINX template 會直接 render 這些 upstream，並使用 Kubernetes 寫入 Pod 的 resolver；Kubernetes 部署中不應使用 `127.0.0.11` 這類 Docker-only DNS。Docker Compose 會改掛載 `web/nginx.compose.conf.template`，讓本機 Compose 環境使用 Docker embedded resolver，並在 API 或 Grafana container 重建後重新解析 service。
 
 Helm 中的 Grafana anonymous access 已停用。當 `monitoring.grafana.admin.existingSecret` 為空時，chart 會建立 `woms-woms-grafana-admin` Secret 並產生密碼。正式環境應自行建立 Secret，並設定 `monitoring.grafana.admin.existingSecret`、`monitoring.grafana.admin.userKey` 與 `monitoring.grafana.admin.passwordKey`。使用者必須登入 Grafana 後才能觀察監控儀錶板。若使用預設產生的 Secret，可用 `kubectl get secret woms-woms-grafana-admin -n woms -o jsonpath='{.data.admin-password}' | base64 -d` 取出密碼。
 
 Grafana 會在 `WOMS` folder provision 兩張 dashboard：`WOMS Monitoring` 保留 API request、latency、status 與 Go runtime panels；`WOMS web autoscaling` 顯示 active HPA 使用的 web NGINX request-rate 訊號。
+
+### GKE 部署
+
+GKE 專用 Helm values 已隔離在 `deploy/helm/woms/values-gke.yaml`，因此預設本地/VM Kubernetes 部署仍使用 `values.yaml`。完整 GKE 操作步驟請見 [docs/gke-deployment.zh-TW.md](docs/gke-deployment.zh-TW.md)。
+
+最小 GKE chart 部署形狀：
+
+```bash
+helm upgrade --install woms ./deploy/helm/woms \
+  --namespace woms --create-namespace \
+  --dependency-update \
+  -f ./deploy/helm/woms/values-gke.yaml
+```
 
 如果瀏覽器在另一台 Windows 主機，而 WOMS 跑在 VM `192.168.56.101`，先從 Windows 建立 SSH tunnel：
 
@@ -367,7 +380,7 @@ ssh -L 8081:127.0.0.1:8081 ubuntu@192.168.56.101
 
 ### Web Traffic HPA Demo
 
-WOMS 目前 active HPA 情境是 NGINX Ingress 或 LoadBalancer 導入 web pods 的流量。web NGINX container 在 `127.0.0.1` 暴露 `stub_status`，sidecar `nginx-prometheus-exporter` 提供 `/metrics`，Prometheus scrape web Service 的 `metrics` port，KEDA 再用同一條 Grafana 顯示的 per-pod NGINX request-rate query 擴縮 `Deployment/woms-woms-web`。
+WOMS 目前 active HPA 情境是 NGINX Ingress 或 LoadBalancer 導入 web pods 的流量。web NGINX container 在 `127.0.0.1` 暴露 `stub_status`，sidecar `nginx-prometheus-exporter` 提供 `/metrics`，Prometheus scrape web Service 的 `metrics` port，KEDA 再用同一條 Grafana 顯示的 per-pod NGINX request-rate query 擴縮 `Deployment/woms-woms-web`。啟用 direct API Ingress routing 後，這個 web HPA 訊號只反映 `/`、static assets 與 `/grafana/` 流量；直接進 API pods 的 `/api` 流量不會計入 web NGINX request metric。
 
 預設 active target：
 

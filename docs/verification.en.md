@@ -99,7 +99,8 @@ kubectl get scaledobject woms-woms-web -n woms -o yaml
 Expected:
 
 - `woms-woms-web` Service is `ClusterIP` when using NGINX Ingress, or explicitly configured as `LoadBalancer` in non-Ingress environments.
-- `woms-woms-public` Ingress routes the configured host to `woms-woms-web` when `ingress.enabled=true`.
+- `woms-woms-public` Ingress routes `/` and `/grafana/` traffic to `woms-woms-web`, and keeps exact `/api/auth/login` public to `woms-woms-api`.
+- `woms-woms-api-secure` Ingress routes protected `/api` traffic directly to `woms-woms-api` with NGINX Ingress `auth-url`.
 - `woms-woms-web` ScaledObject targets `Deployment/woms-woms-web`.
 - HPA name is `woms-woms-web-hpa`.
 - Trigger metric is `woms_web_nginx_requests_per_second_per_pod`.
@@ -123,6 +124,7 @@ Grafana:
 - Open dashboard `WOMS web autoscaling`.
 - Confirm `Per-pod NGINX req/s` rises during load.
 - Confirm `NGINX req/s by web pod` shows traffic distributed across pods after scale-out.
+- Direct `/api` traffic is served by API pods and is not expected to raise the web NGINX request-rate metric.
 
 Expected:
 

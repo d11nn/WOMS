@@ -24,8 +24,7 @@ api:
     kafkaPublishEnabled: "true"
     corsAllowedOrigin: "*"
     authMode: local
-    redisAddr: redis-master:6379
-    authSessionStore: "redis"
+    authSessionStore: ""
     dependencyRetryTimeoutMs: "120000"
     dependencyRetryIntervalMs: "2000"
   resources:
@@ -100,9 +99,6 @@ ingress:
   tls:
     enabled: false
     secretName: woms-tls
-  routeMode: directApi
-  annotations:
-    nginx.ingress.kubernetes.io/proxy-body-size: "1m"
   auth:
     enabled: true
 

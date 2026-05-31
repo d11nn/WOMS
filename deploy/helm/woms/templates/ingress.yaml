@@ -3,20 +3,19 @@
 {{- if ne $routeMode "directApi" }}
 {{- fail (printf "unsupported ingress.routeMode %q; use directApi so /api is routed directly to the API service" $routeMode) }}
 {{- end }}
-{{- $apiAnnotations := dict }}
+{{- $ingressAnnotations := dict "nginx.ingress.kubernetes.io/force-ssl-redirect" "true" "nginx.ingress.kubernetes.io/proxy-body-size" "1m" }}
 {{- with .Values.ingress.annotations }}
-{{- $apiAnnotations = omit . "cert-manager.io/cluster-issuer" "acme.cert-manager.io/http01-ingress-class" }}
+{{- $ingressAnnotations = . }}
 {{- end }}
+{{- $apiAnnotations := omit $ingressAnnotations "cert-manager.io/cluster-issuer" "acme.cert-manager.io/http01-ingress-class" }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: {{ include "woms.fullname" . }}-public
   labels:
     {{- include "woms.labels" . | nindent 4 }}
-  {{- with .Values.ingress.annotations }}
   annotations:
-    {{- tpl (toYaml .) $ | nindent 4 }}
-  {{- end }}
+    {{- tpl (toYaml $ingressAnnotations) $ | nindent 4 }}
 spec:
   ingressClassName: {{ .Values.ingress.className | quote }}
   {{- if .Values.ingress.tls.enabled }}
@@ -67,6 +66,12 @@ metadata:
   {{- end }}
 spec:
   ingressClassName: {{ .Values.ingress.className | quote }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ .Values.ingress.tls.secretName | quote }}
+  {{- end }}
   rules:
     - host: {{ .Values.ingress.host | quote }}
       http:

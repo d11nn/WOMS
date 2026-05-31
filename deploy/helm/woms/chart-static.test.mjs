@@ -17,7 +17,7 @@ const grafanaConfig = readFileSync(new URL("./templates/grafana-configmap.yaml",
 const grafanaDeployment = readFileSync(new URL("./templates/grafana-deployment.yaml", import.meta.url), "utf8");
 const grafanaSecret = readFileSync(new URL("./templates/grafana-secret.yaml", import.meta.url), "utf8");
 const webDashboard = readFileSync(new URL("./dashboards/woms-monitoring.json", import.meta.url), "utf8");
-const gkeFullOverlay = readFileSync(new URL("./values-gke-full.yaml", import.meta.url), "utf8");
+const gkeOverlay = readFileSync(new URL("./values-gke.yaml", import.meta.url), "utf8");
 const runtimeDashboard = readFileSync(new URL("./dashboards/woms-runtime-monitoring.json", import.meta.url), "utf8");
 const composePrometheus = readFileSync(new URL("../../../monitoring/prometheus.yml", import.meta.url), "utf8");
 const hpaBehaviorScript = readFileSync(new URL("../../../scripts/verify-hpa-behavior.sh", import.meta.url), "utf8");
@@ -184,9 +184,19 @@ test("API JWT secret and admin autoscaling status RBAC are wired", () => {
   assert.match(apiRBAC, /apiGroups:\s+\["autoscaling"\][\s\S]*resources:\s+\["horizontalpodautoscalers"\][\s\S]*verbs:\s+\["get"\]/);
 });
 
+test("Distroless API and worker containers use numeric non-root IDs", () => {
+  assert.match(apiDeployment, /securityContext:[\s\S]*runAsNonRoot:\s+true[\s\S]*runAsUser:\s+65532[\s\S]*runAsGroup:\s+65532/);
+  assert.match(workerDeployment, /securityContext:[\s\S]*runAsNonRoot:\s+true[\s\S]*runAsUser:\s+65532[\s\S]*runAsGroup:\s+65532/);
+  assert.match(webDeployment, /name:\s+nginx-exporter[\s\S]*securityContext:[\s\S]*runAsNonRoot:\s+true[\s\S]*runAsUser:\s+65534[\s\S]*runAsGroup:\s+65534/);
+});
+
 test("Ingress keeps login public while protecting API prefix", () => {
-  assert.match(values, /routeMode:\s+directApi/);
+  assert.match(ingress, /default "directApi" \.Values\.ingress\.routeMode/);
   assert.match(values, /auth:[\s\S]*enabled:\s+true/);
+  assert.match(values, /authSessionStore:\s+""/);
+  assert.match(gkeOverlay, /routeMode:\s+directApi/);
+  assert.match(gkeOverlay, /authSessionStore:\s+"redis"/);
+  assert.doesNotMatch(gkeOverlay, /nginx\.ingress\.kubernetes\.io\/whitelist-source-range/);
   assert.match(ingress, /name:\s+\{\{ include "woms\.fullname" \. \}\}-public/);
   assert.match(ingress, /path:\s+\/api\/auth\/login[\s\S]*pathType:\s+Exact[\s\S]*name:\s+\{\{ include "woms\.fullname" \. \}\}-api/);
   assert.match(ingress, /name:\s+\{\{ include "woms\.fullname" \. \}\}-api-secure/);

@@ -6,7 +6,7 @@
     "test:coverage": "npm run test:go:coverage && npm run test:web:coverage",
     "test:go:coverage": "./scripts/go-coverage.sh",
     "test:integration": "./scripts/test-integration.sh",
-    "test:web": "node --test web/*.test.mjs deploy/helm/woms/*.test.mjs",
+    "test:web": "node --test web/*.test.mjs deploy/helm/woms/*.test.mjs deploy/argocd/*.test.mjs scripts/*.test.mjs",
     "test:web:coverage": "sh ./scripts/web-coverage.sh",
     "sonar": "sh ./scripts/sonar-scan.sh"
   },

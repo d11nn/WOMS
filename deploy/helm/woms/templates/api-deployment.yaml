@@ -31,8 +31,8 @@ spec:
             - name: JWT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "woms.fullname" . }}-api
-                  key: JWT_SECRET
+                  name: {{ default (printf "%s-api" (include "woms.fullname" .)) .Values.api.jwtSecretExistingSecret | quote }}
+                  key: {{ .Values.api.jwtSecretExistingSecretKey | quote }}
             - name: API_STORE
               value: {{ .Values.api.env.store | quote }}
             - name: DEMO_SEED_DATA

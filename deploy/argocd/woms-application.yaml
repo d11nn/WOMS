@@ -1,0 +1,28 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: woms
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: woms
+    app.kubernetes.io/part-of: woms
+spec:
+  project: default
+  revisionHistoryLimit: 5
+  source:
+    repoURL: https://github.com/d11nn/WOMS.git
+    targetRevision: main
+    path: deploy/helm/woms
+    helm:
+      releaseName: woms
+      valueFiles:
+        - values.yaml
+        - values-gke.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: woms
+  syncPolicy:
+    syncOptions:
+      - ApplyOutOfSyncOnly=true
+      - PruneLast=true
+      - RespectIgnoreDifferences=true

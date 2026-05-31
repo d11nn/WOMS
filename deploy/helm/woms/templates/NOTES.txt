@@ -1,14 +1,17 @@
 {{- $secretName := printf "%s-api" (include "woms.fullname" .) -}}
+{{- $secretKey := default "JWT_SECRET" .Values.api.jwtSecretExistingSecretKey -}}
 WOMS has been deployed.
 
 JWT signing secret:
-{{- if .Values.api.jwtSecret }}
+{{- if .Values.api.jwtSecretExistingSecret }}
+- The chart uses the existing Kubernetes Secret {{ .Values.api.jwtSecretExistingSecret }}.
+{{- else if .Values.api.jwtSecret }}
 - The chart used the explicit value from api.jwtSecret.
 {{- else }}
 - The chart generated or reused a JWT secret in Kubernetes Secret {{ $secretName }}.
 {{- end }}
 - Retrieve it with:
-  kubectl get secret {{ $secretName }} -n {{ .Release.Namespace }} -o jsonpath='{.data.JWT_SECRET}' | base64 -d
+  kubectl get secret {{ default $secretName .Values.api.jwtSecretExistingSecret }} -n {{ .Release.Namespace }} -o jsonpath='{.data.{{ $secretKey }}}' | base64 -d
 
 The bundled PostgreSQL, Redis, and Kafka dependency defaults are intended for local or VM demos.
 For production, provide explicit external service endpoints and credentials through a custom values file.

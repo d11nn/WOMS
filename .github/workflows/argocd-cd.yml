@@ -1,0 +1,129 @@
+name: argocd-cd
+
+on:
+  workflow_run:
+    workflows:
+      - docker-publish
+    types:
+      - completed
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: argocd-cd-main
+  cancel-in-progress: false
+
+env:
+  GKE_CLUSTER: woms-gke-cluster
+  GKE_LOCATION: asia-northeast1-a
+  GKE_PROJECT_ID: project-f3371832-9c1b-464b-a50
+  ARGOCD_NAMESPACE: argocd
+  WOMS_NAMESPACE: woms
+  ARGOCD_APP: woms
+
+jobs:
+  deploy:
+    name: Deploy latest released tag through ArgoCD
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    steps:
+      - name: Checkout main after Docker tag update
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Resolve release tag from docker-publish run
+        id: release
+        shell: bash
+        run: |
+          release_tag="v0.1.${{ github.event.workflow_run.run_number }}"
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+          echo "main_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Verify Helm values use the latest released tag
+        run: node scripts/verify-release-tag.mjs deploy/helm/woms/values.yaml "${{ steps.release.outputs.release_tag }}"
+
+      - name: Select GCP auth mode
+        id: gcp-auth
+        shell: bash
+        env:
+          GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        run: |
+          if [ -n "$GCP_WORKLOAD_IDENTITY_PROVIDER" ] && [ -n "$GCP_SERVICE_ACCOUNT" ]; then
+            echo "mode=wif" >> "$GITHUB_OUTPUT"
+          elif [ -n "$GCP_SA_KEY" ]; then
+            echo "mode=json" >> "$GITHUB_OUTPUT"
+          else
+            echo "Configure either vars.GCP_WORKLOAD_IDENTITY_PROVIDER + vars.GCP_SERVICE_ACCOUNT, or secret GCP_SA_KEY." >&2
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud with Workload Identity Federation
+        if: steps.gcp-auth.outputs.mode == 'wif'
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - name: Authenticate to Google Cloud with service account JSON
+        if: steps.gcp-auth.outputs.mode == 'json'
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ env.GKE_CLUSTER }}
+          location: ${{ env.GKE_LOCATION }}
+          project_id: ${{ env.GKE_PROJECT_ID }}
+
+      - name: Preflight ArgoCD and WOMS namespaces
+        shell: bash
+        run: |
+          kubectl get namespace "$ARGOCD_NAMESPACE"
+          kubectl get namespace "$WOMS_NAMESPACE"
+          kubectl get crd applications.argoproj.io
+          kubectl -n "$ARGOCD_NAMESPACE" get deploy argocd-application-controller
+
+      - name: Apply ArgoCD Application in argocd namespace
+        shell: bash
+        env:
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
+        run: |
+          sed "s#repoURL: .*#repoURL: ${REPO_URL}#" \
+            deploy/argocd/woms-application.yaml > /tmp/woms-application.yaml
+          kubectl -n "$ARGOCD_NAMESPACE" apply -f /tmp/woms-application.yaml
+
+      - name: Sync WOMS to the tag-update commit
+        shell: bash
+        run: |
+          cat >/tmp/woms-sync-operation.json <<EOF
+          {
+            "operation": {
+              "sync": {
+                "revision": "${{ steps.release.outputs.main_sha }}",
+                "prune": true,
+                "syncOptions": [
+                  "ApplyOutOfSyncOnly=true",
+                  "PruneLast=true",
+                  "RespectIgnoreDifferences=true"
+                ]
+              }
+            }
+          }
+          EOF
+          kubectl -n "$ARGOCD_NAMESPACE" patch application "$ARGOCD_APP" --type merge --patch-file /tmp/woms-sync-operation.json
+
+      - name: Verify ArgoCD sync result
+        env:
+          EXPECTED_ARGOCD_REVISION: ${{ steps.release.outputs.main_sha }}
+        run: ./scripts/verify-argocd-application.sh

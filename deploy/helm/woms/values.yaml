@@ -16,6 +16,8 @@ api:
     repository: woms-api
     tag: v0.1.76
   jwtSecret: ""
+  jwtSecretExistingSecret: ""
+  jwtSecretExistingSecretKey: JWT_SECRET
   env:
     store: postgres
     demoSeedData: "true"

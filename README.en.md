@@ -304,6 +304,44 @@ kubectl get pod,deploy,statefulset,job,pvc,scaledobject,hpa,pdb -n woms
 KUBECTL=microk8s.kubectl HELM=microk8s.helm3 NAMESPACE=woms ./scripts/verify-k8s.sh
 ```
 
+### ArgoCD GitOps Deployment
+
+For GKE, ArgoCD is installed only into the `argocd` namespace. Create the namespace before installing ArgoCD:
+
+```bash
+kubectl create namespace argocd
+kubectl apply --server-side -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+kubectl -n argocd rollout status deploy/argocd-server --timeout=180s
+kubectl -n argocd rollout status statefulset/argocd-application-controller --timeout=300s
+```
+
+The WOMS Application manifest lives at `deploy/argocd/woms-application.yaml`. It is intentionally not configured with automated sync. The `argocd-cd` workflow applies the Application in the `argocd` namespace and requests a sync only after `docker-publish` has pushed images and committed the new release tag back into `deploy/helm/woms/values.yaml`. This keeps the CD order as `main merge -> Docker image push -> Helm values tag update -> ArgoCD sync latest tag`.
+
+GKE-specific overrides belong in `deploy/helm/woms/values-gke.yaml`. Keep secrets out of that file; reference existing Kubernetes Secrets such as `woms-woms-api` so ArgoCD does not rotate runtime credentials during rendering.
+
+Verify ArgoCD after installation or CD:
+
+```bash
+kubectl -n argocd get deploy,statefulset,pod,svc
+kubectl -n argocd get application woms
+ARGOCD_NAMESPACE=argocd ARGOCD_APP=woms ./scripts/verify-argocd-application.sh
+```
+
+Manual validation flow for the next application PR after this ArgoCD PR is merged:
+
+```bash
+git fetch origin
+git log --oneline --decorate -5 origin/main
+git show origin/main:deploy/helm/woms/values.yaml > /tmp/woms-values.yaml
+node scripts/verify-release-tag.mjs /tmp/woms-values.yaml "$(git describe --tags --abbrev=0 origin/main)"
+kubectl -n argocd get application woms -o jsonpath='{.status.sync.status}{" "}{.status.health.status}{" "}{.status.sync.revision}{"\n"}'
+ARGOCD_NAMESPACE=argocd ARGOCD_APP=woms EXPECTED_ARGOCD_REVISION="$(git rev-parse origin/main)" ./scripts/verify-argocd-application.sh
+kubectl -n woms get deploy woms-woms-api woms-woms-scheduler-worker woms-woms-web \
+  -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .spec.template.spec.containers[*]}{.image}{" "}{end}{"\n"}{end}'
+```
+
+For the expected `main` flow, merge this ArgoCD PR first. When a later application PR such as `d11nn/WOMS#72` merges to `main`, `docker-publish` must publish `v0.1.<run-number>`, commit that tag into `deploy/helm/woms/values.yaml`, create the matching Git tag, and only then should `argocd-cd` sync the ArgoCD Application to that tag-update commit.
+
 The chart generates or reuses a JWT signing secret when `api.jwtSecret` is unset. Retrieve it with:
 
 ```bash
@@ -446,14 +484,16 @@ GitHub Actions runs:
 - Docker Hub push and tagging on `main`, `release/**`, or manual dispatch
 - Automatic Helm image tag update on `main`
 - Automatic Git tag creation on every successful `main` publish, using `v0.1.<run-number>` by default
+- ArgoCD sync to GKE after the Helm image tag update commit is visible on `main`
 
 Required GitHub repository settings:
 
 - Secret: `DOCKERHUB_TOKEN`
 - Variable: `DOCKERHUB_USERNAME`
 - Variable: `DOCKERHUB_NAMESPACE`
+- GKE auth: either variables `GCP_WORKLOAD_IDENTITY_PROVIDER` and `GCP_SERVICE_ACCOUNT`, or secret `GCP_SA_KEY`
 
-Image tags include the release tag and `latest` for the protected main/release publish flow. The `docker-publish` workflow commits the release tag back into `deploy/helm/woms/values.yaml` with `[skip ci]`, then creates the matching Git tag.
+Image tags include the release tag and `latest` for the protected main/release publish flow. The `docker-publish` workflow commits the release tag back into `deploy/helm/woms/values.yaml` with `[skip ci]`, then creates the matching Git tag. The `argocd-cd` workflow is triggered by the completed `docker-publish` run and fails closed if `api`, `worker`, or `web` still point at an older tag.
 
 Branch workflow:
 

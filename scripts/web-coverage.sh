@@ -16,7 +16,7 @@ esac
 
 mkdir -p coverage
 set +e
-coverage_output="$(node --test --experimental-test-coverage --test-reporter=tap --test-reporter-destination=stdout --test-reporter=lcov --test-reporter-destination=coverage/lcov.info web/*.test.mjs deploy/helm/woms/*.test.mjs 2>&1)"
+coverage_output="$(node --test --experimental-test-coverage --test-reporter=tap --test-reporter-destination=stdout --test-reporter=lcov --test-reporter-destination=coverage/lcov.info web/*.test.mjs deploy/helm/woms/*.test.mjs deploy/argocd/*.test.mjs scripts/*.test.mjs 2>&1)"
 status="$?"
 set -e
 

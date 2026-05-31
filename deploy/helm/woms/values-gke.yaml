@@ -1,10 +1,10 @@
 ingress:
   enabled: true
   className: nginx
-  host: woms.example.edu
+  host: woms.c1ydeh.net
   tls:
     enabled: true
-    secretName: woms-tls
+    secretName: woms-c1ydeh-net-tls
   routeMode: directApi
   annotations:
     acme.cert-manager.io/http01-ingress-class: "nginx"
@@ -15,6 +15,8 @@ ingress:
     nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
 
 api:
+  jwtSecretExistingSecret: woms-woms-api
+  jwtSecretExistingSecretKey: JWT_SECRET
   env:
     authSessionStore: "redis"
 
@@ -44,3 +46,5 @@ monitoring:
     enabled: true
   grafana:
     enabled: true
+    admin:
+      existingSecret: woms-woms-grafana-admin

@@ -4,6 +4,14 @@ import { pathToFileURL } from "node:url";
 
 const imageSections = new Set(["api", "worker", "web"]);
 
+function isImageKey(line) {
+  return /^ {2}image:\s*$/.test(line);
+}
+
+function isSectionKey(line) {
+  return line.startsWith("  ") && !line.startsWith("    ") && /^[A-Za-z][A-Za-z0-9_-]*:/.test(line.slice(2));
+}
+
 export function parseImageTags(valuesText) {
   const tags = {};
   let section = "";
@@ -21,18 +29,18 @@ export function parseImageTags(valuesText) {
       continue;
     }
 
-    if (/^  image:\s*$/.test(line)) {
+    if (isImageKey(line)) {
       inImage = true;
       continue;
     }
 
-    if (/^  [A-Za-z][A-Za-z0-9_-]*:/.test(line) && !/^    /.test(line)) {
+    if (isSectionKey(line)) {
       inImage = false;
       continue;
     }
 
     if (inImage) {
-      const tag = line.match(/^    tag:\s*"?([^"\s]+)"?\s*$/);
+      const tag = line.match(/^ {4}tag:\s*"?([^"\s]+)"?\s*$/);
       if (tag) {
         tags[section] = tag[1];
       }
@@ -61,11 +69,11 @@ export function verifyReleaseTag(valuesText, expectedTag) {
 export function runCli(argv, io = {}) {
   const readFile = io.readFile ?? readFileSync;
   const log = io.log ?? console.log;
-  const error = io.error ?? console.error;
+  const logError = io.error ?? console.error;
   const [, , valuesPath, expectedTag] = argv;
 
   if (!valuesPath || !expectedTag) {
-    error("Usage: node scripts/verify-release-tag.mjs <values.yaml> <expected-tag>");
+    logError("Usage: node scripts/verify-release-tag.mjs <values.yaml> <expected-tag>");
     return 2;
   }
 
@@ -73,8 +81,8 @@ export function runCli(argv, io = {}) {
     const tags = verifyReleaseTag(readFile(valuesPath, "utf8"), expectedTag);
     log(`Helm image tags match ${expectedTag}: ${JSON.stringify(tags)}`);
     return 0;
-  } catch (caught) {
-    error(caught instanceof Error ? caught.message : String(caught));
+  } catch (error) {
+    logError(error instanceof Error ? error.message : String(error));
     return 1;
   }
 }

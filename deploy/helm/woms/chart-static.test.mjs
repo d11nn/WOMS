@@ -187,7 +187,7 @@ test("API JWT secret and admin autoscaling status RBAC are wired", () => {
   assert.match(apiDeployment, /name:\s+HPA_DEMO_DEPLOYMENT_NAME[\s\S]*-web/);
   assert.match(apiDeployment, /app\.kubernetes\.io\/component=web/);
   assert.match(apiDeployment, /default \(printf "%s-api" \(include "woms\.fullname" \.\)\) \.Values\.api\.jwtSecretExistingSecret/);
-  assert.match(apiDeployment, /\.Values\.api\.jwtSecretExistingSecretKey/);
+  assert.match(apiDeployment, /default "JWT_SECRET" \.Values\.api\.jwtSecretExistingSecretKey/);
   assert.match(apiRBAC, /resources:\s+\["pods"\][\s\S]*verbs:\s+\["get", "list"\]/);
   assert.match(apiRBAC, /apiGroups:\s+\["apps"\][\s\S]*resources:\s+\["deployments"\][\s\S]*verbs:\s+\["get"\]/);
   assert.match(apiRBAC, /apiGroups:\s+\["autoscaling"\][\s\S]*resources:\s+\["horizontalpodautoscalers"\][\s\S]*verbs:\s+\["get"\]/);

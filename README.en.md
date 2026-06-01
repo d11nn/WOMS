@@ -309,8 +309,8 @@ KUBECTL=microk8s.kubectl HELM=microk8s.helm3 NAMESPACE=woms ./scripts/verify-k8s
 For GKE, ArgoCD is installed only into the `argocd` namespace. Create the namespace before installing ArgoCD:
 
 ```bash
-kubectl create namespace argocd
-kubectl apply --server-side -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply --server-side --force-conflicts -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 kubectl -n argocd rollout status deploy/argocd-server --timeout=180s
 kubectl -n argocd rollout status statefulset/argocd-application-controller --timeout=300s
 ```
@@ -318,6 +318,25 @@ kubectl -n argocd rollout status statefulset/argocd-application-controller --tim
 The WOMS Application manifest lives at `deploy/argocd/woms-application.yaml`. It is intentionally not configured with automated sync. The `argocd-cd` workflow applies the Application in the `argocd` namespace and requests a sync only after `docker-publish` has pushed images and committed the new release tag back into `deploy/helm/woms/values.yaml`. This keeps the CD order as `main merge -> Docker image push -> Helm values tag update -> ArgoCD sync latest tag`.
 
 GKE-specific overrides belong in `deploy/helm/woms/values-gke.yaml`. Keep secrets out of that file; reference existing Kubernetes Secrets such as `woms-woms-api` so ArgoCD does not rotate runtime credentials during rendering.
+
+GitHub Actions should authenticate to GKE through Workload Identity Federation, not a long-lived service account key. Configure repository variables, not secrets:
+
+```text
+GCP_WORKLOAD_IDENTITY_PROVIDER=projects/<project-number>/locations/global/workloadIdentityPools/<pool-id>/providers/<provider-id>
+GCP_SERVICE_ACCOUNT=woms-github-cd@<project-id>.iam.gserviceaccount.com
+```
+
+The CD service account needs GKE cluster discovery through IAM, for example `roles/container.clusterViewer`, plus Kubernetes RBAC that only allows the workflow to preflight namespaces/CRDs and create or patch ArgoCD Applications in the `argocd` namespace. Validate the Kubernetes side before merging:
+
+```bash
+SA_EMAIL="woms-github-cd@<project-id>.iam.gserviceaccount.com"
+kubectl -n argocd auth can-i get applications.argoproj.io --as="${SA_EMAIL}"
+kubectl -n argocd auth can-i create applications.argoproj.io --as="${SA_EMAIL}"
+kubectl -n argocd auth can-i patch applications.argoproj.io --as="${SA_EMAIL}"
+kubectl -n argocd auth can-i get statefulsets.apps --as="${SA_EMAIL}"
+```
+
+All four checks must return `yes`. If organization policy blocks service account key creation, do not try to bypass it for this workflow; WIF is the supported path.
 
 Verify ArgoCD after installation or CD:
 
@@ -491,7 +510,8 @@ Required GitHub repository settings:
 - Secret: `DOCKERHUB_TOKEN`
 - Variable: `DOCKERHUB_USERNAME`
 - Variable: `DOCKERHUB_NAMESPACE`
-- GKE auth: either variables `GCP_WORKLOAD_IDENTITY_PROVIDER` and `GCP_SERVICE_ACCOUNT`, or secret `GCP_SA_KEY`
+- GKE auth: variables `GCP_WORKLOAD_IDENTITY_PROVIDER` and `GCP_SERVICE_ACCOUNT`
+- Legacy fallback only when organization policy allows key creation: secret `GCP_SA_KEY`
 
 Image tags include the release tag and `latest` for the protected main/release publish flow. The `docker-publish` workflow commits the release tag back into `deploy/helm/woms/values.yaml` with `[skip ci]`, then creates the matching Git tag. The `argocd-cd` workflow is triggered by the completed `docker-publish` run and fails closed if `api`, `worker`, or `web` still point at an older tag.
 

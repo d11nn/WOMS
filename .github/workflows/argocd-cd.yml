@@ -32,19 +32,23 @@ jobs:
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main'
     steps:
-      - name: Checkout main after Docker tag update
-        uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
-
       - name: Resolve release tag from docker-publish run
         id: release
         shell: bash
         run: |
           release_tag="v0.1.${{ github.event.workflow_run.run_number }}"
           echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
-          echo "main_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout released tag after Docker tag update
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release.outputs.release_tag }}
+          fetch-depth: 0
+
+      - name: Resolve released revision
+        id: revision
+        shell: bash
+        run: echo "sha=$(git rev-list -n 1 ${{ steps.release.outputs.release_tag }})" >> "$GITHUB_OUTPUT"
 
       - name: Verify Helm values use the latest released tag
         run: node scripts/verify-release-tag.mjs deploy/helm/woms/values.yaml "${{ steps.release.outputs.release_tag }}"
@@ -92,7 +96,7 @@ jobs:
           kubectl get namespace "$ARGOCD_NAMESPACE"
           kubectl get namespace "$WOMS_NAMESPACE"
           kubectl get crd applications.argoproj.io
-          kubectl -n "$ARGOCD_NAMESPACE" get deploy argocd-application-controller
+          kubectl -n "$ARGOCD_NAMESPACE" get statefulset argocd-application-controller
 
       - name: Apply ArgoCD Application in argocd namespace
         shell: bash
@@ -103,14 +107,14 @@ jobs:
             deploy/argocd/woms-application.yaml > /tmp/woms-application.yaml
           kubectl -n "$ARGOCD_NAMESPACE" apply -f /tmp/woms-application.yaml
 
-      - name: Sync WOMS to the tag-update commit
+      - name: Sync WOMS to the released tag
         shell: bash
         run: |
           cat >/tmp/woms-sync-operation.json <<EOF
           {
             "operation": {
               "sync": {
-                "revision": "${{ steps.release.outputs.main_sha }}",
+                "revision": "${{ steps.release.outputs.release_tag }}",
                 "prune": true,
                 "syncOptions": [
                   "ApplyOutOfSyncOnly=true",
@@ -125,5 +129,5 @@ jobs:
 
       - name: Verify ArgoCD sync result
         env:
-          EXPECTED_ARGOCD_REVISION: ${{ steps.release.outputs.main_sha }}
+          EXPECTED_ARGOCD_REVISION: ${{ steps.revision.outputs.sha }}
         run: ./scripts/verify-argocd-application.sh

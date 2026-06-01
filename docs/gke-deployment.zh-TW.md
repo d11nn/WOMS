@@ -163,6 +163,53 @@ API 與 scheduler-worker containers 使用 distroless `nonroot` image，chart �
 
 `values-gke.yaml` 預設不設定 `nginx.ingress.kubernetes.io/whitelist-source-range`，因此一般公開 client network 可以連到 `https://${WOMS_HOST}/`。若之後要限制來源，請在私有 override values file 加上該 annotation，或在 Helm upgrade 時用明確的 `--set-string` range 設定。
 
+#### ArgoCD Bootstrap 與 GitHub Actions CD
+
+ArgoCD 只安裝在 `argocd` namespace。因為 upstream CRD 可能超過 client-side apply annotation 大小限制，請使用 server-side apply；若曾經部分套用失敗，補跑時用 `--force-conflicts` 接管 ArgoCD manifest 欄位：
+
+```bash
+kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply --server-side --force-conflicts -n argocd \
+  -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+kubectl -n argocd rollout status deploy/argocd-server --timeout=180s
+kubectl -n argocd rollout status statefulset/argocd-application-controller --timeout=300s
+kubectl -n argocd get deploy,statefulset,pod,svc
+```
+
+若 server、repo-server 或 application-controller pod 因為缺少 Secret `argocd-redis` 而失敗，只建立這個缺少的 runtime Secret，然後重啟 ArgoCD workloads：
+
+```bash
+kubectl -n argocd create secret generic argocd-redis \
+  --from-literal=auth="$(openssl rand -base64 32)" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl -n argocd rollout restart deployment argocd-redis
+kubectl -n argocd rollout restart deployment argocd-server argocd-repo-server argocd-dex-server
+kubectl -n argocd rollout restart statefulset argocd-application-controller
+```
+
+GitHub Actions CD 透過 Workload Identity Federation 認證。若 organization policy 禁止 service account key creation，不要建立或儲存長期 JSON key。請設定 repository variables：
+
+```text
+GCP_WORKLOAD_IDENTITY_PROVIDER=projects/<project-number>/locations/global/workloadIdentityPools/<pool-id>/providers/<provider-id>
+GCP_SERVICE_ACCOUNT=woms-github-cd@<project-id>.iam.gserviceaccount.com
+```
+
+Service account 應透過 IAM 取得 GKE cluster discovery 權限，例如 `roles/container.clusterViewer`，並在 Kubernetes RBAC 只保留 `.github/workflows/argocd-cd.yml` 需要的 preflight reads 與 ArgoCD Application writes。用下列方式驗證實際 Kubernetes 權限，不輸出任何 secret：
+
+```bash
+SA_EMAIL="woms-github-cd@<project-id>.iam.gserviceaccount.com"
+kubectl get namespace argocd
+kubectl get namespace woms
+kubectl get crd applications.argoproj.io
+kubectl -n argocd auth can-i get applications.argoproj.io --as="${SA_EMAIL}"
+kubectl -n argocd auth can-i create applications.argoproj.io --as="${SA_EMAIL}"
+kubectl -n argocd auth can-i patch applications.argoproj.io --as="${SA_EMAIL}"
+kubectl -n argocd auth can-i get statefulsets.apps --as="${SA_EMAIL}"
+```
+
+四個 `auth can-i` 檢查都必須回 `yes`。這個 service account 不需要直接寫入 `woms` namespace；GitHub Actions 只會在 `argocd` 寫入 ArgoCD `Application`，再由 ArgoCD controller 執行 WOMS sync。
+
 驗證外部入口、DNS、TLS、Kafka topic hook、KEDA、Prometheus 與 Grafana：
 
 ```bash

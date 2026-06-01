@@ -133,7 +133,36 @@ Grafana：
 - 流量分散到多個 web pods。
 - 停止流量並等待 cooldown 後 replicas scale down。
 
-## 5. API、RBAC 與 Calendar API 檢查
+## 5. ArgoCD CD 驗證
+
+ArgoCD bootstrap 完成、GitHub Actions WIF variables 設定完成後，用下列方式驗證 CD 路徑，不輸出任何 credentials：
+
+```bash
+kubectl -n argocd get deploy,statefulset,pod,svc
+kubectl -n argocd get application woms
+kubectl -n argocd get application woms \
+  -o jsonpath='{.status.sync.status}{" "}{.status.health.status}{" "}{.status.sync.revision}{"\n"}'
+```
+
+Merge 到 `main` 後，確認 CD 發生在 Docker publish tag update 之後：
+
+```bash
+git fetch origin
+git show origin/main:deploy/helm/woms/values.yaml > /tmp/woms-values.yaml
+node scripts/verify-release-tag.mjs /tmp/woms-values.yaml "$(git describe --tags --abbrev=0 origin/main)"
+ARGOCD_NAMESPACE=argocd ARGOCD_APP=woms EXPECTED_ARGOCD_REVISION="$(git rev-parse origin/main)" ./scripts/verify-argocd-application.sh
+kubectl -n woms get deploy woms-woms-api woms-woms-scheduler-worker woms-woms-web \
+  -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .spec.template.spec.containers[*]}{.image}{" "}{end}{"\n"}{end}'
+```
+
+期望：
+
+- GitHub Actions `docker-publish` 成功後，`argocd-cd` 才執行。
+- `origin/main` 上的 `deploy/helm/woms/values.yaml` 對 `api`、`worker`、`web` 都使用最新 `v0.1.<run-number>` tag。
+- ArgoCD Application `woms` 是 `Synced Healthy`。
+- GKE deployments 參照最新 `docker.io/d11nn/*:<tag>` images。
+
+## 6. API、RBAC 與 Calendar API 檢查
 
 ```bash
 JWT_SECRET=local-dev-secret go run ./cmd/api
@@ -148,7 +177,7 @@ curl -i http://localhost:8080/internal/auth/verify
 - Scheduler A 不能讀取或修改 Scheduler B 產線資料。
 - `GET /api/schedules/calendar?lineId=A&month=2026-05` 會回授權產線的 persisted allocations。
 
-## 6. Docker 與 Web Proxy 檢查
+## 7. Docker 與 Web Proxy 檢查
 
 ```bash
 docker build -f Dockerfile.api -t woms-api:local .
@@ -164,11 +193,12 @@ docker compose up --build
 - 透過 web proxy 開啟 Grafana：`http://localhost:8081/grafana`
 - 未登入 Grafana 的使用者會看到 Grafana login page。
 
-## 7. 完成檢查清單
+## 8. 完成檢查清單
 
 - 本機非 UI 測試通過。
 - Release validation 需要時，已在 CI 或連到開發者自行提供的服務完成 manual integration coverage。
 - 已在瀏覽器環境完成上述 UI 檢查。
 - 已在 cluster 環境完成上述 GKE LoadBalancer/HPA 檢查。
+- GitHub Actions run 完成後，已完成上述 ArgoCD CD 檢查。
 - README 與兩份 verification docs 都已同步更新英文與 zh-TW。
 - 未提交 generated files、secrets、本機 volumes 或 build output。

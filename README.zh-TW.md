@@ -309,8 +309,8 @@ NAMESPACE=woms ./scripts/verify-k8s.sh
 GKE 環境只允許把 ArgoCD 安裝在 `argocd` namespace。安裝 ArgoCD 前先建立 namespace：
 
 ```bash
-kubectl create namespace argocd
-kubectl apply --server-side -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply --server-side --force-conflicts -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 kubectl -n argocd rollout status deploy/argocd-server --timeout=180s
 kubectl -n argocd rollout status statefulset/argocd-application-controller --timeout=300s
 ```
@@ -318,6 +318,25 @@ kubectl -n argocd rollout status statefulset/argocd-application-controller --tim
 WOMS 的 Application manifest 位於 `deploy/argocd/woms-application.yaml`，刻意不啟用 automated sync。`argocd-cd` workflow 會在 `argocd` namespace 套用 Application，且只會在 `docker-publish` 已推送 image、並把新 release tag 寫回 `deploy/helm/woms/values.yaml` 後才要求 ArgoCD sync。CD 順序必須維持為 `main merge -> Docker image push -> Helm values tag update -> ArgoCD sync latest tag`。
 
 GKE 現場專用 overrides 放在 `deploy/helm/woms/values-gke.yaml`。不要把 secrets 寫進這個檔案；請引用既有 Kubernetes Secret，例如 `woms-woms-api`，避免 ArgoCD render 時輪替 runtime credentials。
+
+GitHub Actions 應透過 Workload Identity Federation 認證 GKE，不使用長期 service account key。請設定 repository variables，不要設定成 secrets：
+
+```text
+GCP_WORKLOAD_IDENTITY_PROVIDER=projects/<project-number>/locations/global/workloadIdentityPools/<pool-id>/providers/<provider-id>
+GCP_SERVICE_ACCOUNT=woms-github-cd@<project-id>.iam.gserviceaccount.com
+```
+
+CD service account 需要透過 IAM 取得 GKE cluster discovery 權限，例如 `roles/container.clusterViewer`，並在 Kubernetes RBAC 只授權 workflow 做 namespace/CRD preflight，以及在 `argocd` namespace 建立或 patch ArgoCD Applications。Merge 前先驗證 Kubernetes 權限：
+
+```bash
+SA_EMAIL="woms-github-cd@<project-id>.iam.gserviceaccount.com"
+kubectl -n argocd auth can-i get applications.argoproj.io --as="${SA_EMAIL}"
+kubectl -n argocd auth can-i create applications.argoproj.io --as="${SA_EMAIL}"
+kubectl -n argocd auth can-i patch applications.argoproj.io --as="${SA_EMAIL}"
+kubectl -n argocd auth can-i get statefulsets.apps --as="${SA_EMAIL}"
+```
+
+四個檢查都必須回 `yes`。如果 organization policy 禁止 service account key creation，不要為了這個 workflow 繞過限制；WIF 是支援路徑。
 
 安裝或 CD 後可用下列方式驗證 ArgoCD：
 
@@ -493,7 +512,8 @@ GitHub Actions 會執行：
 - Secret：`DOCKERHUB_TOKEN`
 - Variable：`DOCKERHUB_USERNAME`
 - Variable：`DOCKERHUB_NAMESPACE`
-- GKE auth：設定 variables `GCP_WORKLOAD_IDENTITY_PROVIDER` 與 `GCP_SERVICE_ACCOUNT`，或 secret `GCP_SA_KEY`
+- GKE auth：設定 variables `GCP_WORKLOAD_IDENTITY_PROVIDER` 與 `GCP_SERVICE_ACCOUNT`
+- Legacy fallback：只有 organization policy 允許 key creation 時，才使用 secret `GCP_SA_KEY`
 
 Image tags 會包含 release tag 與 `latest`，用於受保護的 main/release publish flow。`docker-publish` workflow 會把 release tag 寫回 `deploy/helm/woms/values.yaml` 並使用 `[skip ci]` commit，然後建立對應 Git tag。`argocd-cd` workflow 由完成的 `docker-publish` run 觸發；如果 `api`、`worker` 或 `web` 仍指向舊 tag，workflow 會直接失敗，不會 sync 到 GKE。
 

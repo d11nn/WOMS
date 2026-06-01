@@ -45,9 +45,14 @@ test("CD workflow waits for docker-publish and verifies the tag update before sy
   assert.match(workflow, /github\.event\.workflow_run\.head_branch == 'main'/);
   assert.match(workflow, /github\.event\.workflow_run\.event == 'push'/);
   assert.match(workflow, /release_tag="v0\.1\.\$\{\{ github\.event\.workflow_run\.run_number \}\}"/);
+  assert.match(workflow, /Checkout released tag after Docker tag update/);
+  assert.match(workflow, /ref:\s+\$\{\{ steps\.release\.outputs\.release_tag \}\}/);
+  assert.match(workflow, /git rev-list -n 1 \$\{\{ steps\.release\.outputs\.release_tag \}\}/);
   assert.match(workflow, /node scripts\/verify-release-tag\.mjs deploy\/helm\/woms\/values\.yaml/);
   assert.ok(workflow.indexOf("Verify Helm values use the latest released tag") < workflow.indexOf("Get GKE credentials"));
+  assert.match(workflow, /get statefulset argocd-application-controller/);
   assert.match(workflow, /patch application "\$ARGOCD_APP"/);
+  assert.match(workflow, /"revision": "\$\{\{ steps\.release\.outputs\.release_tag \}\}"/);
   assert.match(workflow, /EXPECTED_ARGOCD_REVISION/);
 });
 

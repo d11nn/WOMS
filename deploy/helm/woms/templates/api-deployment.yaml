@@ -32,7 +32,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: {{ default (printf "%s-api" (include "woms.fullname" .)) .Values.api.jwtSecretExistingSecret | quote }}
-                  key: {{ .Values.api.jwtSecretExistingSecretKey | quote }}
+                  key: {{ default "JWT_SECRET" .Values.api.jwtSecretExistingSecretKey | quote }}
             - name: API_STORE
               value: {{ .Values.api.env.store | quote }}
             - name: DEMO_SEED_DATA

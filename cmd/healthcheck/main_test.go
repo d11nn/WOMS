@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -83,7 +84,7 @@ func TestRunHealthcheckReportsNon2xxStatus(t *testing.T) {
 
 func TestCheckHealthAcceptsBoundary2xxAndClosesBody(t *testing.T) {
 	body := &trackingReadCloser{}
-	err := checkHealth(t.Context(), responseClient{response: &http.Response{
+	err := checkHealth(context.Background(), responseClient{response: &http.Response{
 		StatusCode: http.StatusMultipleChoices - 1,
 		Body:       body,
 	}}, "http://example.test/readyz", time.Second)

@@ -163,6 +163,53 @@ The API and scheduler-worker containers run the distroless `nonroot` image with 
 
 By default, `values-gke.yaml` does not set `nginx.ingress.kubernetes.io/whitelist-source-range`, so `https://${WOMS_HOST}/` is reachable from normal public client networks. To restrict access later, add that annotation in a private override values file or pass an explicit `--set-string` range during Helm upgrade.
 
+#### ArgoCD Bootstrap And GitHub Actions CD
+
+Install ArgoCD only in the `argocd` namespace. Use server-side apply because the upstream CRDs can exceed the client-side annotation size limit, and use `--force-conflicts` when recovering from a partial first apply:
+
+```bash
+kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply --server-side --force-conflicts -n argocd \
+  -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+kubectl -n argocd rollout status deploy/argocd-server --timeout=180s
+kubectl -n argocd rollout status statefulset/argocd-application-controller --timeout=300s
+kubectl -n argocd get deploy,statefulset,pod,svc
+```
+
+If the server, repo-server, or application-controller pods fail because Secret `argocd-redis` is missing, create only that missing runtime Secret and restart the ArgoCD workloads:
+
+```bash
+kubectl -n argocd create secret generic argocd-redis \
+  --from-literal=auth="$(openssl rand -base64 32)" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl -n argocd rollout restart deployment argocd-redis
+kubectl -n argocd rollout restart deployment argocd-server argocd-repo-server argocd-dex-server
+kubectl -n argocd rollout restart statefulset argocd-application-controller
+```
+
+GitHub Actions CD authenticates through Workload Identity Federation. Do not create or store a long-lived JSON key when organization policy disables service account key creation. Configure repository variables:
+
+```text
+GCP_WORKLOAD_IDENTITY_PROVIDER=projects/<project-number>/locations/global/workloadIdentityPools/<pool-id>/providers/<provider-id>
+GCP_SERVICE_ACCOUNT=woms-github-cd@<project-id>.iam.gserviceaccount.com
+```
+
+The service account should have GKE cluster discovery through IAM, for example `roles/container.clusterViewer`, and Kubernetes RBAC limited to the preflight reads and ArgoCD Application writes required by `.github/workflows/argocd-cd.yml`. Validate the effective Kubernetes permissions without printing any secrets:
+
+```bash
+SA_EMAIL="woms-github-cd@<project-id>.iam.gserviceaccount.com"
+kubectl get namespace argocd
+kubectl get namespace woms
+kubectl get crd applications.argoproj.io
+kubectl -n argocd auth can-i get applications.argoproj.io --as="${SA_EMAIL}"
+kubectl -n argocd auth can-i create applications.argoproj.io --as="${SA_EMAIL}"
+kubectl -n argocd auth can-i patch applications.argoproj.io --as="${SA_EMAIL}"
+kubectl -n argocd auth can-i get statefulsets.apps --as="${SA_EMAIL}"
+```
+
+The four `auth can-i` checks must return `yes`. The service account does not need direct write access to the `woms` namespace; GitHub Actions writes the ArgoCD `Application` in `argocd`, then the ArgoCD controller performs the WOMS sync.
+
 Validate the external endpoint, DNS, TLS, Kafka topic hook, KEDA, Prometheus, and Grafana:
 
 ```bash

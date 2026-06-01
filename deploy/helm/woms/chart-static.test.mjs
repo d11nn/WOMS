@@ -22,6 +22,7 @@ const runtimeDashboard = readFileSync(new URL("./dashboards/woms-runtime-monitor
 const composePrometheus = readFileSync(new URL("../../../monitoring/prometheus.yml", import.meta.url), "utf8");
 const hpaBehaviorScript = readFileSync(new URL("../../../scripts/verify-hpa-behavior.sh", import.meta.url), "utf8");
 const hpaRenderScript = readFileSync(new URL("../../../scripts/verify-hpa-render.sh", import.meta.url), "utf8");
+const k8sVerifyScript = readFileSync(new URL("../../../scripts/verify-k8s.sh", import.meta.url), "utf8");
 const kafkaTopicJob = readFileSync(new URL("./templates/kafka-topic-job.yaml", import.meta.url), "utf8");
 const secret = readFileSync(new URL("./templates/secret.yaml", import.meta.url), "utf8");
 const notes = readFileSync(new URL("./templates/NOTES.txt", import.meta.url), "utf8");
@@ -136,6 +137,8 @@ test("Verification scripts cover the web HPA render and ingress or LoadBalancer 
   assert.match(hpaBehaviorScript, /wait_replicas "\$target_replicas" ge/);
   assert.doesNotMatch(hpaBehaviorScript, /HPA_SCENARIO/);
   assert.doesNotMatch(hpaBehaviorScript, /WORKER_DEPLOY/);
+  assert.match(k8sVerifyScript, /describe scaledobject "\$RELEASE-woms-web"/);
+  assert.doesNotMatch(k8sVerifyScript, /describe scaledobject "\$RELEASE-woms-worker"/);
 });
 
 test("Default Docker image tags use v-prefixed release tags", () => {
@@ -173,12 +176,18 @@ test("Bitnami dependency image overrides use the legacy repository for retained 
 
 test("API JWT secret and admin autoscaling status RBAC are wired", () => {
   assert.match(values, /jwtSecret:\s+""/);
+  assert.match(values, /jwtSecretExistingSecret:\s+""/);
+  assert.match(values, /jwtSecretExistingSecretKey:\s+JWT_SECRET/);
   assert.match(secret, /lookup "v1" "Secret"/);
+  assert.match(secret, /if not \.Values\.api\.jwtSecretExistingSecret/);
   assert.match(secret, /randAlphaNum 64/);
   assert.match(notes, /generated or reused a JWT secret/);
+  assert.match(notes, /uses the existing Kubernetes Secret/);
   assert.match(apiDeployment, /name:\s+HPA_DEMO_HPA_NAME[\s\S]*-web-hpa/);
   assert.match(apiDeployment, /name:\s+HPA_DEMO_DEPLOYMENT_NAME[\s\S]*-web/);
   assert.match(apiDeployment, /app\.kubernetes\.io\/component=web/);
+  assert.match(apiDeployment, /default \(printf "%s-api" \(include "woms\.fullname" \.\)\) \.Values\.api\.jwtSecretExistingSecret/);
+  assert.match(apiDeployment, /default "JWT_SECRET" \.Values\.api\.jwtSecretExistingSecretKey/);
   assert.match(apiRBAC, /resources:\s+\["pods"\][\s\S]*verbs:\s+\["get", "list"\]/);
   assert.match(apiRBAC, /apiGroups:\s+\["apps"\][\s\S]*resources:\s+\["deployments"\][\s\S]*verbs:\s+\["get"\]/);
   assert.match(apiRBAC, /apiGroups:\s+\["autoscaling"\][\s\S]*resources:\s+\["horizontalpodautoscalers"\][\s\S]*verbs:\s+\["get"\]/);
@@ -195,9 +204,17 @@ test("Ingress keeps login public while protecting API prefix", () => {
   assert.match(values, /auth:[\s\S]*enabled:\s+true/);
   assert.match(values, /authSessionStore:\s+""/);
   assert.match(gkeOverlay, /routeMode:\s+directApi/);
+  assert.match(gkeOverlay, /host:\s+woms\.c1ydeh\.net/);
+  assert.match(gkeOverlay, /secretName:\s+woms-c1ydeh-net-tls/);
+  assert.match(gkeOverlay, /jwtSecretExistingSecret:\s+woms-woms-api/);
+  assert.match(gkeOverlay, /existingSecret:\s+woms-woms-grafana-admin/);
   assert.match(gkeOverlay, /authSessionStore:\s+"redis"/);
   assert.doesNotMatch(gkeOverlay, /nginx\.ingress\.kubernetes\.io\/whitelist-source-range/);
   assert.match(ingress, /name:\s+\{\{ include "woms\.fullname" \. \}\}-public/);
+  assert.doesNotMatch(values, /public:[\s\S]*tls:[\s\S]*enabled:\s+false/);
+  assert.doesNotMatch(values, /apiSecure:[\s\S]*tls:[\s\S]*enabled:\s+false/);
+  assert.match(ingress, /omit \$ingressAnnotations "cert-manager\.io\/cluster-issuer" "acme\.cert-manager\.io\/http01-ingress-class"/);
+  assert.match(ingress, /if \.Values\.ingress\.tls\.enabled/);
   assert.match(ingress, /path:\s+\/api\/auth\/login[\s\S]*pathType:\s+Exact[\s\S]*name:\s+\{\{ include "woms\.fullname" \. \}\}-api/);
   assert.match(ingress, /name:\s+\{\{ include "woms\.fullname" \. \}\}-api-secure/);
   assert.match(ingress, /nginx\.ingress\.kubernetes\.io\/auth-url/);

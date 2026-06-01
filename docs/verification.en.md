@@ -133,7 +133,36 @@ Expected:
 - Traffic spreads across multiple web pods.
 - After traffic stops and cooldown passes, replicas scale down.
 
-## 5. API, RBAC, And Calendar API Checks
+## 5. ArgoCD CD Verification
+
+After ArgoCD is bootstrapped and GitHub Actions WIF variables are configured, verify the CD path without printing any credentials:
+
+```bash
+kubectl -n argocd get deploy,statefulset,pod,svc
+kubectl -n argocd get application woms
+kubectl -n argocd get application woms \
+  -o jsonpath='{.status.sync.status}{" "}{.status.health.status}{" "}{.status.sync.revision}{"\n"}'
+```
+
+After a merge to `main`, confirm that CD happened only after the Docker publish tag update:
+
+```bash
+git fetch origin
+git show origin/main:deploy/helm/woms/values.yaml > /tmp/woms-values.yaml
+node scripts/verify-release-tag.mjs /tmp/woms-values.yaml "$(git describe --tags --abbrev=0 origin/main)"
+ARGOCD_NAMESPACE=argocd ARGOCD_APP=woms EXPECTED_ARGOCD_REVISION="$(git rev-parse origin/main)" ./scripts/verify-argocd-application.sh
+kubectl -n woms get deploy woms-woms-api woms-woms-scheduler-worker woms-woms-web \
+  -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .spec.template.spec.containers[*]}{.image}{" "}{end}{"\n"}{end}'
+```
+
+Expected:
+
+- GitHub Actions `docker-publish` succeeds before `argocd-cd`.
+- `deploy/helm/woms/values.yaml` on `origin/main` uses the latest `v0.1.<run-number>` tag for `api`, `worker`, and `web`.
+- ArgoCD Application `woms` is `Synced Healthy`.
+- The GKE deployments reference the latest `docker.io/d11nn/*:<tag>` images.
+
+## 6. API, RBAC, And Calendar API Checks
 
 ```bash
 JWT_SECRET=local-dev-secret go run ./cmd/api
@@ -148,7 +177,7 @@ Check role boundaries:
 - Scheduler A cannot read or mutate Scheduler B line data.
 - `GET /api/schedules/calendar?lineId=A&month=2026-05` returns persisted allocations for the authorized line.
 
-## 6. Docker And Web Proxy Checks
+## 7. Docker And Web Proxy Checks
 
 ```bash
 docker build -f Dockerfile.api -t woms-api:local .
@@ -164,11 +193,12 @@ Expected:
 - Grafana through web proxy: `http://localhost:8081/grafana`
 - Unauthenticated Grafana users see the Grafana login page.
 
-## 7. Completion Checklist
+## 8. Completion Checklist
 
 - Local non-UI tests pass.
 - Manual integration coverage is run in CI or against developer-provided services when release validation requires it.
 - Browser UI checks above are completed in a browser environment.
 - GKE LoadBalancer/HPA checks above are completed in a cluster environment.
+- ArgoCD CD checks above are completed after the GitHub Actions run.
 - README and both verification docs are updated in English and zh-TW.
 - Generated files, secrets, local volumes, and build output remain uncommitted.

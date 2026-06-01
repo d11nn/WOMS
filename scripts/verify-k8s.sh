@@ -128,7 +128,7 @@ require_deployment_rollout "$RELEASE-woms-worker"
 require_worker_broker_env
 retry "Kafka topic $KAFKA_TOPIC" 12 5 require_kafka_topic
 retry "Kafka consumer group $KAFKA_CONSUMER_GROUP" 12 5 require_kafka_consumer_group
-"$KUBECTL" describe scaledobject "$RELEASE-woms-worker" -n "$NAMESPACE"
+"$KUBECTL" describe scaledobject "$RELEASE-woms-web" -n "$NAMESPACE"
 retry "KEDA ScaledObject Ready" 12 10 require_scaledobject_ready
 retry "KEDA external metric" 12 10 require_keda_external_metric
 

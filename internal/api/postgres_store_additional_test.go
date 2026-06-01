@@ -335,10 +335,10 @@ func TestPostgresStore_ConfirmPreviewOrder(t *testing.T) {
 	}
 	draftJSON, _ := json.Marshal(draft)
 
-	mock.ExpectQuery("SELECT actor_id, actor_role, draft_order FROM schedule_previews").
+	mock.ExpectQuery("SELECT actor_id, actor_role, line_id, allocations, conflicts, draft_order FROM schedule_previews").
 		WithArgs("preview-1").
-		WillReturnRows(sqlmock.NewRows([]string{"actor_id", "actor_role", "draft_order"}).
-			AddRow("sales-1", string(domain.RoleSales), sql.NullString{String: string(draftJSON), Valid: true}))
+		WillReturnRows(sqlmock.NewRows([]string{"actor_id", "actor_role", "line_id", "allocations", "conflicts", "draft_order"}).
+			AddRow("sales-1", string(domain.RoleSales), "A", []byte("[]"), []byte("[]"), sql.NullString{String: string(draftJSON), Valid: true}))
 
 	// CreateOrder calls
 	mock.ExpectQuery("SELECT id, name, capacity_per_day").
@@ -348,15 +348,14 @@ func TestPostgresStore_ConfirmPreviewOrder(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectExec("INSERT INTO orders").WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectExec("UPDATE production_lines").WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("INSERT INTO audit_logs").WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectCommit()
-
 	mock.ExpectExec("DELETE FROM schedule_previews").
 		WithArgs("preview-1").
 		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("UPDATE production_lines").WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
 
-	order, err := store.ConfirmPreviewOrder("preview-1", claims)
+	order, err := store.ConfirmPreviewOrder(confirmPreviewRequest{PreviewID: "preview-1"}, claims)
 	if err != nil {
 		t.Fatalf("ConfirmPreviewOrder failed: %v", err)
 	}

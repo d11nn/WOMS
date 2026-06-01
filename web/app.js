@@ -364,14 +364,15 @@ document.getElementById("confirm-preview-order").addEventListener("click", async
     return;
   }
   try {
+    const deferredOrderIds = checkedValues("[data-sales-defer-order]");
     const order = await request("/api/orders/preview-confirm", {
       method: "POST",
-      body: JSON.stringify({ previewId: state.preview.previewId }),
+      body: JSON.stringify({ previewId: state.preview.previewId, deferredOrderIds }),
     });
     focusCreatedOrder(order);
     closePreviewPage();
     document.getElementById("order-form").reset();
-    showMessage("已加入待排程", "新訂單已正式放入待排程訂單。");
+    showMessage("已加入待排程", "新訂單已正式放入待排程；已取消選取的衝突訂單會移到需業務處理。");
     await refreshWorkspace();
   } catch (error) {
     showMessage("無法加入待排程", error.message, "warn");
@@ -501,6 +502,7 @@ function renderWorkspace() {
   renderSchedulerPanelState();
   renderFilters();
   renderStatusSidebar();
+  renderOrdersHeading();
   renderOrders();
   renderSalesRejectedOrders();
   renderCalendar();
@@ -834,6 +836,7 @@ function renderLineOptions() {
 }
 
 function renderOrders() {
+  renderOrdersHeading();
   const visibleOrders = state.user?.role === "sales"
     ? visibleLineOrders().filter((order) => order.status !== "需業務處理")
     : visibleLineOrders();
@@ -850,6 +853,28 @@ function renderOrders() {
     });
   });
   updateSelectedCount();
+}
+
+function renderOrdersHeading() {
+  const heading = document.getElementById("orders-heading");
+  const eyebrow = document.getElementById("orders-heading-eyebrow");
+  const title = document.getElementById("orders-heading-title");
+  if (!heading || !eyebrow || !title) {
+    return;
+  }
+  if (state.user?.role === "sales" && state.filters.status === "待排程") {
+    heading.hidden = false;
+    eyebrow.textContent = "業務接單";
+    title.textContent = "待排程訂單";
+    return;
+  }
+  if (state.user?.role === "sales" && state.filters.status === "需業務處理") {
+    heading.hidden = true;
+    return;
+  }
+  heading.hidden = false;
+  eyebrow.textContent = "訂單任務";
+  title.textContent = "訂單";
 }
 
 function renderOrderCard(order) {
@@ -1345,6 +1370,7 @@ function renderPreviewPage() {
   document.getElementById("close-preview-page").hidden = false;
   pageList.innerHTML = [
     ...conflicts.map((conflict, index) => renderConflictItem(conflict, index, manualForce)),
+    renderSalesDraftConflictActions(conflicts, allocations),
     renderConflictActions(conflicts, manualForce),
     renderSolutionNotice(allocations),
     ...allocations.map((allocation) => `
@@ -1516,6 +1542,50 @@ function previewCalendarAllocationsForMode(mode, pendingAllocations) {
     return [...state.calendarAllocations, ...pendingAllocations];
   }
   return pendingAllocations;
+}
+
+function renderSalesDraftConflictActions(conflicts, allocations) {
+  if (state.preview?.kind !== "sales-draft" || conflicts.length === 0) {
+    return "";
+  }
+  const candidates = salesDraftDeferredCandidates(conflicts, allocations);
+  if (candidates.length === 0) {
+    return "";
+  }
+  return `
+    <div class="conflict-actions">
+      <h3>衝突處理</h3>
+      <p class="conflict-note">確認接單時，勾選的待排程訂單會移到需業務處理，Sales 可再與客戶確認交期或數量。</p>
+      <div class="solution-choice-list">
+        ${candidates.map((order) => `
+          <label class="check-option">
+            <input type="checkbox" data-sales-defer-order value="${escapeHtml(order.id)}" checked>
+            <span>改送需業務處理 ${escapeHtml(order.id)} · ${escapeHtml(order.customer)} · 交期 ${dateOnly(order.dueDate)}</span>
+          </label>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function salesDraftDeferredCandidates(conflicts, allocations) {
+  const successfulOrderIds = new Set(allocations.map((allocation) => allocation.orderId).filter(Boolean));
+  const conflictedIds = new Set();
+  for (const conflict of conflicts) {
+    if (conflict.orderId && conflict.orderId !== "PREVIEW-DRAFT") {
+      conflictedIds.add(conflict.orderId);
+    }
+    for (const orderId of conflict.affectedOrderIds ?? []) {
+      if (orderId !== "PREVIEW-DRAFT") {
+        conflictedIds.add(orderId);
+      }
+    }
+  }
+  return Array.from(conflictedIds)
+    .filter((orderId) => !successfulOrderIds.has(orderId))
+    .map((orderId) => state.orders.find((order) => order.id === orderId))
+    .filter((order) => order?.status === "待排程" && order.createdBy === state.user?.id)
+    .sort((a, b) => compareOrderIds(a.id, b.id));
 }
 
 function renderConflictItem(conflict, index = 0, withAcknowledgement = false) {

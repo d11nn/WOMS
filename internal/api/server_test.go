@@ -1740,6 +1740,89 @@ func TestSalesCanConfirmDraftPreviewWhenExistingOrdersFillStartDate(t *testing.T
 	}
 }
 
+func TestSalesConfirmDraftPreviewDefersConflictedPendingOrder(t *testing.T) {
+	server := NewServer("secret", NewMemoryStore())
+	salesToken := login(t, server, "sales", "demo")
+	conflictedOrderIDs := []string{}
+	for range 4 {
+		conflictedOrderIDs = append(conflictedOrderIDs, createOrderWithPriorityAndDue(t, server, salesToken, "A", "low", "2026-05-02"))
+	}
+
+	body := bytes.NewBufferString(`{"lineId":"A","startDate":"2026-05-02","currentDate":"2026-05-01","draftOrder":{"customer":"Priority Draft","lineId":"A","quantity":2500,"priority":"high","dueDate":"2026-05-02"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/schedules/preview", body)
+	req.Header.Set("Authorization", "Bearer "+salesToken)
+	res := httptest.NewRecorder()
+	server.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("preview failed: %d %s", res.Code, res.Body.String())
+	}
+	var preview struct {
+		PreviewID string `json:"previewId"`
+		Conflicts []struct {
+			OrderID string `json:"orderId"`
+		} `json:"conflicts"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &preview); err != nil {
+		t.Fatalf("decode preview response: %v", err)
+	}
+	if len(preview.Conflicts) == 0 {
+		t.Fatalf("expected draft preview conflict, got %s", res.Body.String())
+	}
+	deferredID := preview.Conflicts[0].OrderID
+	if deferredID == previewDraftOrderID || !slicesContains(conflictedOrderIDs, deferredID) {
+		t.Fatalf("expected one existing pending order conflict, got %q", deferredID)
+	}
+
+	body = bytes.NewBufferString(`{"previewId":"` + preview.PreviewID + `","deferredOrderIds":["` + deferredID + `"]}`)
+	req = httptest.NewRequest(http.MethodPost, "/api/orders/preview-confirm", body)
+	req.Header.Set("Authorization", "Bearer "+salesToken)
+	res = httptest.NewRecorder()
+	server.ServeHTTP(res, req)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("confirm preview failed: %d %s", res.Code, res.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/orders", nil)
+	req.Header.Set("Authorization", "Bearer "+salesToken)
+	res = httptest.NewRecorder()
+	server.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("list orders failed: %d %s", res.Code, res.Body.String())
+	}
+	var ordersResponse struct {
+		Orders []domain.Order `json:"orders"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &ordersResponse); err != nil {
+		t.Fatalf("decode orders response: %v", err)
+	}
+	var deferred domain.Order
+	for _, order := range ordersResponse.Orders {
+		if order.ID == deferredID {
+			deferred = order
+		}
+	}
+	if deferred.Status != domain.StatusRejected || deferred.RejectionReason != salesConflictDeferredReason {
+		t.Fatalf("expected deferred order moved to sales follow-up, got %+v", deferred)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/schedules/calendar?lineId=A&month=2026-05", nil)
+	req.Header.Set("Authorization", "Bearer "+salesToken)
+	res = httptest.NewRecorder()
+	server.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("calendar failed: %d %s", res.Code, res.Body.String())
+	}
+	var calendar calendarResponse
+	if err := json.Unmarshal(res.Body.Bytes(), &calendar); err != nil {
+		t.Fatalf("decode calendar response: %v", err)
+	}
+	for _, allocation := range calendar.PendingAllocations {
+		if allocation.OrderID == deferredID {
+			t.Fatalf("deferred order should not remain in pending calendar: %+v", allocation)
+		}
+	}
+}
+
 func TestSalesDraftPreviewRejectsTodayDueDate(t *testing.T) {
 	server := NewServer("secret", NewMemoryStore())
 	salesToken := login(t, server, "sales", "demo")

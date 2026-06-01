@@ -704,7 +704,7 @@ test.skip("login saves session and logout clears storage and app state", async (
 
     await document.getElementById("confirm-preview-order").dispatchEvent({ type: "click" });
     await settleApp();
-    assert.equal(document.getElementById("message-title").textContent, "已加入待排程");
+    assert.equal(document.getElementById("message-title").textContent, "已加入待排程", document.getElementById("message-body").textContent);
 
     await document.getElementById("logout-button").dispatchEvent({ type: "click" });
     await settleApp();
@@ -872,7 +872,7 @@ test.skip("sales order form previews valid drafts and rejects non-future due dat
     }
     if (path === "/api/orders/preview-confirm") {
       assert.equal(options.method, "POST");
-      assert.deepEqual(JSON.parse(options.body), { previewId: "PREVIEW-DRAFT" });
+      assert.deepEqual(JSON.parse(options.body), { previewId: "PREVIEW-DRAFT", deferredOrderIds: [] });
       return jsonResponse({ id: "ORD-DRAFT", customer: "ACME", lineId: "A", quantity: 2500, priority: "low", status: "待排程", dueDate: dateKeyAfter(5), createdBy: "user-sales" });
     }
     throw new Error(`unexpected fetch ${path}`);
@@ -903,7 +903,7 @@ test.skip("sales order form previews valid drafts and rejects non-future due dat
 
     assert.equal(calls.filter((call) => call.path === "/api/orders/preview-confirm").length, 1);
     assert.equal(document.getElementById("schedule-preview-dialog").open, false);
-    assert.equal(document.getElementById("message-title").textContent, "已加入待排程");
+    assert.equal(document.getElementById("message-title").textContent, "已加入待排程", document.getElementById("message-body").textContent);
 
     document.querySelector('#order-form input[name="dueDate"]').value = "2000-01-01";
     await document.getElementById("order-form").dispatchEvent({ type: "submit" });
@@ -1472,6 +1472,11 @@ test("sales draft conflict preview shows successful draft schedule and excludes 
         ],
       });
     }
+    if (path === "/api/orders/preview-confirm") {
+      assert.equal(options.method, "POST");
+      assert.deepEqual(JSON.parse(options.body), { previewId: "PREVIEW-DRAFT", deferredOrderIds: ["ORD-D"] });
+      return jsonResponse({ id: "ORD-DRAFT", customer: "E", lineId: "A", quantity: 2500, priority: "high", status: "待排程", dueDate: previewDate, createdBy: "user-sales" });
+    }
     throw new Error(`unexpected fetch ${path}`);
   };
   const restoreGlobals = installBrowserGlobalsWithFetch(document, fetchImpl);
@@ -1498,6 +1503,17 @@ test("sales draft conflict preview shows successful draft schedule and excludes 
     assert.match(allMarkup, /ORD-SCHEDULED/);
     assert.match(allMarkup, /ORD-A[\s\S]*ORD-B[\s\S]*PREVIEW-DRAFT[\s\S]*ORD-C/);
     assert.doesNotMatch(allMarkup, /ORD-D/);
+    assert.match(document.getElementById("preview-page-list").innerHTML, /衝突處理[\s\S]*改送需業務處理 ORD-D/);
+    const deferInput = document.createElement("input");
+    deferInput.type = "checkbox";
+    deferInput.setAttribute("data-sales-defer-order", "");
+    deferInput.value = "ORD-D";
+    deferInput.checked = true;
+    document.getElementById("preview-page-list").appendChild(deferInput);
+
+    await document.getElementById("confirm-preview-order").dispatchEvent({ type: "click" });
+    await settleApp();
+    assert.equal(document.getElementById("message-title").textContent, "已加入待排程", document.getElementById("message-body").textContent);
   } finally {
     restoreGlobals();
   }

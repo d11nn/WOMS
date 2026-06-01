@@ -947,6 +947,12 @@ button.calendar-item:focus-visible {
   border: 1px dashed #f79009;
 }
 
+.calendar-item.preview-draft,
+.preview-item.preview-draft {
+  border: 2px solid #f79009;
+  box-shadow: 0 0 0 3px rgb(247 144 9 / 24%);
+}
+
 .calendar-item.moved-preview {
   border: 1px solid #2e90fa;
   box-shadow: 0 0 0 2px rgb(46 144 250 / 20%);

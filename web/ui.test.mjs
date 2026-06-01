@@ -96,6 +96,7 @@ test("sales status filters map to one matching heading", () => {
   assert.match(app, /state\.filters\.status === "需業務處理"[\s\S]*eyebrow\.textContent = "業務處理";[\s\S]*title\.textContent = "需處理訂單";/);
   assert.match(app, /state\.filters\.status === "需業務處理"[\s\S]*return visibleLineOrders\(\)\.filter\(\(order\) => order\.status === "需業務處理"\);/);
   assert.match(app, /document\.getElementById\("sales-rejected-panel"\)\.hidden = state\.user\?\.role !== "sales" \|\| state\.filters\.status \|\| rejected\.length === 0;/);
+  assert.match(app, /renderStatusSidebar\(\);\n\s+renderFilters\(\);\n\s+renderOrdersHeading\(\);\n\s+renderOrders\(\);\n\s+renderSalesRejectedOrders\(\);/);
 });
 
 test("conflict cancel actions route to sales follow-up instead of silent unselect", () => {
@@ -106,8 +107,20 @@ test("conflict cancel actions route to sales follow-up instead of silent unselec
   assert.match(unselectAction, /openRejectDialog\(\[orderId\]\)/);
   assert.doesNotMatch(unselectAction, /retryPreview/);
   assert.match(app, /"defer-sales-draft": handleDeferSalesDraftPreviewAction/);
-  assert.match(app, /JSON\.stringify\(\{ previewId: state\.preview\.previewId, deferDraft: true \}\)/);
+  assert.match(app, /openRejectDialog\(\[\], \{[\s\S]*mode: "defer-sales-draft"[\s\S]*defaultReason: "發生衝突，請修改！"/);
+  assert.doesNotMatch(app, /globalThis\.prompt/);
+  assert.match(app, /JSON\.stringify\(\{ previewId: state\.preview\.previewId, deferDraft: true, note: reason \}\)/);
   assert.match(app, /取消選取目前訂單/);
+});
+
+test("calendar order cards show due date and highlight sales draft preview", () => {
+  const app = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+  const styles = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
+  assert.match(app, /function formatCalendarDueDate\(value\)/);
+  assert.match(app, /<span>交期 \$\{formatCalendarDueDate\(allocation\.dueDate \?\? allocation\.date\)\}<\/span>/);
+  assert.match(app, /previewDraftClass = conflict\.orderId === "PREVIEW-DRAFT" \? "preview-draft" : ""/);
+  assert.match(app, /allocation\.orderId === "PREVIEW-DRAFT" \? "preview-draft" : ""/);
+  assert.match(styles, /\.calendar-item\.preview-draft,\s*\.preview-item\.preview-draft\s*\{[\s\S]*border:\s+2px solid #f79009;[\s\S]*box-shadow:/);
 });
 
 test("order status badges stay on one line in scheduler and sales cards", () => {
@@ -144,6 +157,7 @@ test("sales draft preview calendar can switch pending draft and scheduled alloca
   assert.match(app, /const conflictedOrderIds = new Set\(conflicts\.map\(\(conflict\) => conflict\.orderId\)\.filter\(Boolean\)\)/);
   assert.match(app, /state\.pendingCalendarAllocations\.map\(\(allocation\) => \(\{ \.\.\.allocation, preview: true \}\)\)/);
   assert.match(app, /markedPreviewAllocations\.map\(\(allocation\) => \(\{ \.\.\.allocation, preview: true \}\)\)/);
+  assert.match(app, /draftOrder:\s+payloadData\.draftOrder \?\? null/);
 });
 
 test("sales main calendar can switch pending scheduled and all allocations", () => {
@@ -266,6 +280,17 @@ test("sales draft conflict copy is separate from scheduler conflict actions", ()
   assert.doesNotMatch(salesBranch, /data-preview-action="unselect-conflict-order"/);
   assert.match(app, /可在下方選取衝突訂單與可移動訂單，產生最早完成解法/);
   assert.match(app, /data-preview-action="unselect-conflict-order"/);
+});
+
+test("sales draft conflicts expose the same earliest completion picker as scheduler conflicts", () => {
+  const app = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+  const start = app.indexOf("function renderSalesDraftConflictActions");
+  const end = app.indexOf("function salesDraftDeferredCandidates", start);
+  const salesActions = app.slice(start, end);
+  assert.match(salesActions, /先預覽最早完成解法/);
+  assert.match(salesActions, /renderConflictSolutionPicker\(conflicts, \["PREVIEW-DRAFT"\]\)/);
+  assert.match(app, /if \(state\.preview\?\.kind === "sales-draft"\) \{[\s\S]*orderIds: \[\],[\s\S]*resolutionOrderIds: \[\],[\s\S]*allowLateCompletion: true/);
+  assert.match(app, /<button data-preview-action="preview-conflict-solution" type="button">預覽最早完成解法<\/button>/);
 });
 
 const order = {

@@ -910,6 +910,7 @@ type confirmPreviewRequest struct {
 	PreviewID        string   `json:"previewId"`
 	DeferredOrderIDs []string `json:"deferredOrderIds,omitempty"`
 	DeferDraft       bool     `json:"deferDraft,omitempty"`
+	Note             string   `json:"note,omitempty"`
 }
 
 type demoConflictRequest struct {
@@ -2470,6 +2471,9 @@ func (s *MemoryStore) ConfirmPreviewOrder(req confirmPreviewRequest, claims auth
 		return domain.Order{}, err
 	}
 	draft := *preview.DraftOrder
+	if req.DeferDraft && strings.TrimSpace(req.Note) != "" {
+		draft.Note = strings.TrimSpace(req.Note)
+	}
 	order, err := s.createOrderLocked(draft, claims.Subject)
 	if err != nil {
 		return domain.Order{}, err

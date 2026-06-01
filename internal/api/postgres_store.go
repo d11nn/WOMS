@@ -859,6 +859,9 @@ func (s *PostgresStore) ConfirmPreviewOrder(req confirmPreviewRequest, claims au
 	if err := json.Unmarshal([]byte(draftRaw.String), &draft); err != nil {
 		return domain.Order{}, err
 	}
+	if req.DeferDraft && strings.TrimSpace(req.Note) != "" {
+		draft.Note = strings.TrimSpace(req.Note)
+	}
 	var allocations []scheduler.Allocation
 	if err := json.Unmarshal(allocationsRaw, &allocations); err != nil {
 		return domain.Order{}, err

@@ -365,6 +365,7 @@ function installBrowserGlobalsWithFetch(document, fetchImpl, initialStorage = {}
     document,
     localStorage,
     confirm: () => true,
+    prompt: (_message, defaultValue = "") => defaultValue,
     setInterval: (callback) => {
       callback();
       return 1;
@@ -386,6 +387,7 @@ function installBrowserGlobalsWithFetch(document, fetchImpl, initialStorage = {}
     HTMLDialogElement: MiniElement,
     CSS: { escape: (value) => String(value).replaceAll('"', '\\"') },
     confirm: window.confirm,
+    prompt: window.prompt,
     setInterval: window.setInterval,
     clearInterval: window.clearInterval,
     setTimeout: window.setTimeout,
@@ -1388,7 +1390,7 @@ test("sales draft conflict preview keeps baseline pending and scheduled calendar
     const pendingMarkup = renderedMarkup(document.getElementById("preview-calendar-grid"));
     assert.match(pendingMarkup, /ORD-PENDING/);
     assert.doesNotMatch(pendingMarkup, /PREVIEW-DRAFT/);
-    assert.match(document.getElementById("preview-page-list").innerHTML, /conflict-preview[\s\S]*PREVIEW-DRAFT/);
+    assert.match(document.getElementById("preview-page-list").innerHTML, /conflict-preview preview-draft[\s\S]*PREVIEW-DRAFT/);
 
     const previewCalendarModes = document.getElementById("preview-calendar-mode").children;
     await document.getElementById("preview-calendar-mode").dispatchEvent({
@@ -1567,7 +1569,7 @@ test("sales can move the current conflicted draft to follow-up without a rejecti
     }
     if (path === "/api/orders/preview-confirm") {
       assert.equal(options.method, "POST");
-      assert.deepEqual(JSON.parse(options.body), { previewId: "PREVIEW-DRAFT", deferDraft: true });
+      assert.deepEqual(JSON.parse(options.body), { previewId: "PREVIEW-DRAFT", deferDraft: true, note: "發生衝突，請修改！" });
       return jsonResponse({ id: "ORD-DRAFT", customer: "Blocked", lineId: "A", quantity: 2500, priority: "high", status: "需業務處理", dueDate: previewDate, createdBy: "user-sales" });
     }
     throw new Error(`unexpected fetch ${path}`);
@@ -1596,10 +1598,17 @@ test("sales can move the current conflicted draft to follow-up without a rejecti
       target: deferButton,
     });
     await settleApp();
+    assert.equal(document.getElementById("reject-title").textContent, "取消選取目前訂單");
+    assert.equal(document.getElementById("reject-reason").value, "發生衝突，請修改！");
+    assert.equal(document.getElementById("confirm-reject-orders").textContent, "移到需業務處理");
+
+    await document.getElementById("confirm-reject-orders").dispatchEvent({ type: "click" });
+    await settleApp();
 
     assert.equal(calls.filter((call) => call.path === "/api/orders/preview-confirm").length, 1);
     assert.equal(document.getElementById("message-title").textContent, "已移到需業務處理");
     assert.doesNotMatch(calls.find((call) => call.path === "/api/orders/preview-confirm").options.body, /reason/);
+    assert.match(calls.find((call) => call.path === "/api/orders/preview-confirm").options.body, /發生衝突，請修改！/);
   } finally {
     restoreGlobals();
   }

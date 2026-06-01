@@ -2295,7 +2295,7 @@ func TestSalesConfirmDraftPreviewCanDeferCurrentDraftOrder(t *testing.T) {
 		t.Fatalf("expected draft preview conflict, got 0 conflicts")
 	}
 
-	confirmBody := bytes.NewBufferString(`{"previewId":"` + previewID + `","deferDraft":true}`)
+	confirmBody := bytes.NewBufferString(`{"previewId":"` + previewID + `","deferDraft":true,"note":"發生衝突，請修改！"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/orders/preview-confirm", confirmBody)
 	req.Header.Set("Authorization", "Bearer "+salesToken)
 	res := httptest.NewRecorder()
@@ -2307,7 +2307,7 @@ func TestSalesConfirmDraftPreviewCanDeferCurrentDraftOrder(t *testing.T) {
 	if err := json.Unmarshal(res.Body.Bytes(), &deferredDraft); err != nil {
 		t.Fatalf("decode deferred draft: %v", err)
 	}
-	if deferredDraft.Status != domain.StatusRejected || deferredDraft.RejectionReason != "" || deferredDraft.RejectedBy != "user-sales" {
+	if deferredDraft.Status != domain.StatusRejected || deferredDraft.RejectionReason != "" || deferredDraft.RejectedBy != "user-sales" || deferredDraft.Note != "發生衝突，請修改！" {
 		t.Fatalf("expected draft moved to sales follow-up without reason, got %+v", deferredDraft)
 	}
 	for _, existingOrderID := range existingOrderIDs {

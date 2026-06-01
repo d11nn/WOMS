@@ -135,6 +135,8 @@ Demo accounts:
 - Line C scheduler: `scheduler-c` / `demo`
 - Line D scheduler: `scheduler-d` / `demo`
 
+ORD-DEMO seed walkthrough: [English](docs/demo-flow.en.md) / [繁體中文](docs/demo-flow.zh-TW.md)
+
 ## Local Development
 
 Run tests:

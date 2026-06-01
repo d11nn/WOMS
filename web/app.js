@@ -40,6 +40,14 @@ const hpaJobStatusLabels = {
   cancelled: "已取消",
 };
 
+class RequestError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.name = "RequestError";
+    this.status = status;
+  }
+}
+
 const state = {
   token: localStorage.getItem("woms.token") ?? "",
   user: JSON.parse(localStorage.getItem("woms.user") ?? "null"),
@@ -56,6 +64,7 @@ const state = {
   productionOrderId: "",
   scheduleHistory: [],
   rejectOrderIds: [],
+  rejectDialogMode: "orders",
   schedulerPanelOpen: false,
   selectedOrderIds: new Set(),
   expandedSalesPendingOrderIds: new Set(),
@@ -545,15 +554,14 @@ async function handleUnselectConflictOrderPreviewAction(event) {
 }
 
 async function handleDeferSalesDraftPreviewAction() {
-  const order = await request("/api/orders/preview-confirm", {
-    method: "POST",
-    body: JSON.stringify({ previewId: state.preview.previewId, deferDraft: true }),
+  openRejectDialog([], {
+    mode: "defer-sales-draft",
+    title: "取消選取目前訂單",
+    description: "請填寫移到需業務處理的備註，Sales 會在需處理訂單中看到此內容。",
+    defaultReason: "發生衝突，請修改！",
+    placeholder: "例如發生衝突，請修改交期、數量或拆單。",
+    confirmLabel: "移到需業務處理",
   });
-  focusCreatedOrder(order);
-  closePreviewPage();
-  document.getElementById("order-form").reset();
-  showMessage("已移到需業務處理", "目前訂單已取消選取，Sales 可在需處理訂單中重新確認交期或數量。");
-  await refreshWorkspace();
 }
 
 async function handleRejectPreviewOrdersPreviewAction() {
@@ -565,6 +573,16 @@ async function handlePreviewConflictSolutionPreviewAction() {
   const resolutionOrderIds = checkedValues("[data-conflict-resolution-order]");
   if (orderIds.length === 0) {
     showMessage("請選取訂單", "至少選取一張訂單才能產生最早完成解法。", "warn");
+    return;
+  }
+  if (state.preview?.kind === "sales-draft") {
+    await retryPreview({
+      orderIds: [],
+      resolutionOrderIds: [],
+      allowLateCompletion: true,
+      manualForce: false,
+      reason: "",
+    });
     return;
   }
   await retryPreview({
@@ -718,6 +736,7 @@ async function createPreview(requestData, kind) {
       currentDate: result.currentDate ?? payloadData.currentDate ?? todayDateInputValue(),
       orderIds: payloadData.orderIds ?? [],
       resolutionOrderIds: payloadData.resolutionOrderIds ?? [],
+      draftOrder: payloadData.draftOrder ?? null,
       manualForce: payloadData.manualForce === "on" || payloadData.manualForce === true,
       allowLateCompletion: payloadData.allowLateCompletion === "on" || payloadData.allowLateCompletion === true,
       reason: payloadData.reason ?? "",
@@ -1204,7 +1223,9 @@ function renderStatusSidebar() {
       state.filters.status = state.filters.status === status ? "" : status;
       renderStatusSidebar();
       renderFilters();
+      renderOrdersHeading();
       renderOrders();
+      renderSalesRejectedOrders();
     });
     container.appendChild(button);
   }
@@ -1579,7 +1600,8 @@ function renderSalesDraftConflictActions(conflicts, allocations) {
   return `
     <div class="conflict-actions">
       <h3>衝突處理</h3>
-      <p class="conflict-note">可以接受目前最早解法，或取消選取目前訂單並改送需業務處理。</p>
+      <p class="conflict-note">可以選取衝突訂單與可移動的待排程訂單，先預覽最早完成解法；也可以取消選取目前訂單並改送需業務處理。</p>
+      ${renderConflictSolutionPicker(conflicts, ["PREVIEW-DRAFT"])}
       ${deferExistingOptions}
       <button class="danger-button" data-preview-action="defer-sales-draft" type="button">取消選取目前訂單</button>
     </div>
@@ -1619,8 +1641,9 @@ function renderConflictItem(conflict, index = 0, withAcknowledgement = false) {
     const explanation = conflict.orderId === "PREVIEW-DRAFT"
       ? conflictExplanation(conflict)
       : "這張待排程訂單由於新訂單的影響，在目前開始日期與交期之間沒有足夠產能。需要提前開始、延後交期、拆單，或調整訂單數量。";
+    const previewDraftClass = conflict.orderId === "PREVIEW-DRAFT" ? "preview-draft" : "";
     return `
-      <div class="preview-item high conflict-preview">
+      <div class="preview-item high conflict-preview ${previewDraftClass}">
         <strong>${escapeHtml(conflict.orderId)}</strong>
         <span>${escapeHtml(explanation)}</span>
         <span>最早完成：${finishDate}。</span>
@@ -1751,6 +1774,7 @@ function renderCalendarItem(allocation) {
   const quantityChangedClass = allocation.quantityChangedPreview ? "quantity-changed-preview" : "";
   const childOrderClass = isNewChildScheduledAllocation(allocation) ? "child-order-preview" : "";
   const conflictClass = allocation.conflictPreview ? "conflict-preview" : "";
+  const previewDraftClass = allocation.orderId === "PREVIEW-DRAFT" ? "preview-draft" : "";
   const attrs = actionable
     ? `type="button" data-calendar-order-id="${escapeHtml(allocation.orderId)}" data-calendar-date="${dateOnly(allocation.date)}"`
     : "";
@@ -1758,9 +1782,10 @@ function renderCalendarItem(allocation) {
   const quantityNote = allocation.quantityChangedPreview ? "<span class=\"calendar-item-note\">數量調整</span>" : "";
   const childNote = isNewChildScheduledAllocation(allocation) ? "<span class=\"calendar-item-note\">子訂單</span>" : "";
   return `
-    <${tag} class="calendar-item ${priorityClass(allocation.priority)} ${allocation.preview ? "preview-item-inline" : ""} ${movedClass} ${movedFromClass} ${quantityChangedClass} ${childOrderClass} ${conflictClass}" ${attrs}>
+    <${tag} class="calendar-item ${priorityClass(allocation.priority)} ${allocation.preview ? "preview-item-inline" : ""} ${movedClass} ${movedFromClass} ${quantityChangedClass} ${childOrderClass} ${conflictClass} ${previewDraftClass}" ${attrs}>
       <strong>${escapeHtml(allocation.orderId)}</strong>
       <span>${escapeHtml(allocation.customer ?? "Preview")} · ${calendarDisplayQuantity(allocation).toLocaleString()} 片</span>
+      <span>交期 ${formatCalendarDueDate(allocation.dueDate ?? allocation.date)}</span>
       <span>${priorityLabel(allocation.priority)} · ${escapeHtml(allocation.status ?? "試排")}</span>
       ${movedNote}
       ${quantityNote}
@@ -1785,6 +1810,12 @@ function calendarDisplayQuantity(allocation) {
     return Number(allocation.completedQuantity);
   }
   return Number(allocation.quantity ?? 0);
+}
+
+function formatCalendarDueDate(value) {
+  const dueDate = dateOnly(value);
+  const [, month, day] = dueDate.split("-");
+  return `${Number(month)}/${Number(day)}`;
 }
 
 function handleCalendarOrderClick(orderId, productionDate = "") {
@@ -2158,11 +2189,15 @@ function scheduleHistoryBody(item) {
   return `${item.resource}${reason}`;
 }
 
-function openRejectDialog(orderIds) {
+function openRejectDialog(orderIds, options = {}) {
   state.rejectOrderIds = orderIds;
+  state.rejectDialogMode = options.mode ?? "orders";
   const textarea = document.getElementById("reject-reason");
-  textarea.value = "";
-  document.getElementById("reject-title").textContent = `駁回 ${orderIds.length} 張訂單`;
+  textarea.value = options.defaultReason ?? "";
+  textarea.placeholder = options.placeholder ?? "例如交期前產能不足，請與客戶協調交期或訂單內容。";
+  document.getElementById("reject-title").textContent = options.title ?? `駁回 ${orderIds.length} 張訂單`;
+  document.getElementById("reject-description").textContent = options.description ?? "請填寫駁回理由，Sales 會在需處理區看到此訂單。";
+  document.getElementById("confirm-reject-orders").textContent = options.confirmLabel ?? "送出駁回";
   const dialog = document.getElementById("reject-dialog");
   if (typeof dialog.showModal === "function") {
     dialog.showModal();
@@ -2174,10 +2209,28 @@ function openRejectDialog(orderIds) {
 async function submitRejectOrders() {
   const reason = document.getElementById("reject-reason").value.trim();
   if (!reason) {
-    showMessage("請填寫駁回理由", "駁回訂單前必須讓 Sales 知道需要處理什麼。", "warn");
+    const context = state.rejectDialogMode === "defer-sales-draft" ? "備註" : "駁回理由";
+    showMessage(`請填寫${context}`, "移交 Sales 處理前必須留下可追蹤的說明。", "warn");
     return;
   }
   try {
+    if (state.rejectDialogMode === "defer-sales-draft") {
+      const order = await request("/api/orders/preview-confirm", {
+        method: "POST",
+        body: JSON.stringify({ previewId: state.preview.previewId, deferDraft: true, note: reason }),
+      });
+      const dialog = document.getElementById("reject-dialog");
+      if (dialog.open && typeof dialog.close === "function") {
+        dialog.close();
+      }
+      state.rejectDialogMode = "orders";
+      focusCreatedOrder(order);
+      closePreviewPage();
+      document.getElementById("order-form").reset();
+      showMessage("已移到需業務處理", "目前訂單已取消選取，Sales 可在需處理訂單中重新確認交期或數量。");
+      await refreshWorkspace();
+      return;
+    }
     const payload = await request("/api/orders/reject", {
       method: "POST",
       body: JSON.stringify({ orderIds: state.rejectOrderIds, reason }),
@@ -2186,6 +2239,7 @@ async function submitRejectOrders() {
     if (dialog.open && typeof dialog.close === "function") {
       dialog.close();
     }
+    state.rejectDialogMode = "orders";
     const rejectedCount = payload.orders?.length ?? 0;
     state.rejectOrderIds.forEach((orderId) => state.selectedOrderIds.delete(orderId));
     closePreviewPage();
@@ -2285,14 +2339,6 @@ async function request(path, options = {}, needsAuth = true) {
     throw new RequestError(payload.error ?? "請求失敗，請稍後再試。", response.status);
   }
   return payload;
-}
-
-class RequestError extends Error {
-  constructor(message, status) {
-    super(message);
-    this.name = "RequestError";
-    this.status = status;
-  }
 }
 
 function saveSession(token, user) {

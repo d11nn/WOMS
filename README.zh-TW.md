@@ -135,6 +135,8 @@ Demo 帳號：
 - C 線 scheduler：`scheduler-c` / `demo`
 - D 線 scheduler：`scheduler-d` / `demo`
 
+ORD-DEMO seed 展示流程：[繁體中文](docs/demo-flow.zh-TW.md) / [English](docs/demo-flow.en.md)
+
 ## 本機開發
 
 執行測試：

@@ -915,7 +915,7 @@ func (s *PostgresStore) validateSalesDeferredOrders(orderIDs []string, preview p
 	return orders, nil
 }
 
-func (s *PostgresStore) confirmPreviewOrderTx(previewID string, draft createOrderRequest, deferredOrders []domain.Order, claims auth.Claims) (domain.Order, error) {
+func (s *PostgresStore) prepareConfirmedOrder(draft createOrderRequest, claims auth.Claims) (domain.Order, error) {
 	if err := validateOrderFields(draft.Customer, draft.Quantity, draft.Note); err != nil {
 		return domain.Order{}, err
 	}
@@ -951,6 +951,34 @@ func (s *PostgresStore) confirmPreviewOrderTx(previewID string, draft createOrde
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
+	return order, nil
+}
+
+func deferConflictOrdersTx(tx *sql.Tx, deferredOrders []domain.Order, claims auth.Claims, now time.Time) error {
+	for _, deferred := range deferredOrders {
+		result, err := tx.Exec(`
+			UPDATE orders
+			SET status = $2, rejection_reason = $3, rejected_by = $4, rejected_at = $5, updated_at = $5
+			WHERE id = $1 AND status = $6 AND created_by = $7 AND line_id = $8
+		`, deferred.ID, domain.StatusRejected, salesConflictDeferredReason, claims.Subject, now, domain.StatusPending, claims.Subject, deferred.LineID)
+		if err != nil {
+			return err
+		}
+		if err := requireOneRowAffected(result, "deferred order changed before confirmation"); err != nil {
+			return err
+		}
+		if _, err := insertAuditTx(tx, claims.Subject, "order.sales_conflict_defer", deferred.ID, salesConflictDeferredReason); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *PostgresStore) confirmPreviewOrderTx(previewID string, draft createOrderRequest, deferredOrders []domain.Order, claims auth.Claims) (domain.Order, error) {
+	order, err := s.prepareConfirmedOrder(draft, claims)
+	if err != nil {
+		return domain.Order{}, err
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return domain.Order{}, err
@@ -959,27 +987,14 @@ func (s *PostgresStore) confirmPreviewOrderTx(previewID string, draft createOrde
 	if _, err := tx.Exec(`
 		INSERT INTO orders (id, customer, line_id, quantity, priority, status, due_date, note, created_by, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
-	`, order.ID, order.Customer, order.LineID, order.Quantity, order.Priority, order.Status, order.DueDate, order.Note, order.CreatedBy, now); err != nil {
+	`, order.ID, order.Customer, order.LineID, order.Quantity, order.Priority, order.Status, order.DueDate, order.Note, order.CreatedBy, order.CreatedAt); err != nil {
 		return domain.Order{}, err
 	}
 	if _, err := insertAuditTx(tx, claims.Subject, "order.create", order.ID, ""); err != nil {
 		return domain.Order{}, err
 	}
-	for _, deferred := range deferredOrders {
-		result, err := tx.Exec(`
-			UPDATE orders
-			SET status = $2, rejection_reason = $3, rejected_by = $4, rejected_at = $5, updated_at = $5
-			WHERE id = $1 AND status = $6 AND created_by = $7 AND line_id = $8
-		`, deferred.ID, domain.StatusRejected, salesConflictDeferredReason, claims.Subject, now, domain.StatusPending, claims.Subject, deferred.LineID)
-		if err != nil {
-			return domain.Order{}, err
-		}
-		if err := requireOneRowAffected(result, "deferred order changed before confirmation"); err != nil {
-			return domain.Order{}, err
-		}
-		if _, err := insertAuditTx(tx, claims.Subject, "order.sales_conflict_defer", deferred.ID, salesConflictDeferredReason); err != nil {
-			return domain.Order{}, err
-		}
+	if err := deferConflictOrdersTx(tx, deferredOrders, claims, order.CreatedAt); err != nil {
+		return domain.Order{}, err
 	}
 	if _, err := tx.Exec(bumpProductionLineRevisionSQL, order.LineID); err != nil {
 		return domain.Order{}, err

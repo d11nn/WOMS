@@ -1569,7 +1569,6 @@ function renderSalesDraftConflictActions(conflicts, allocations) {
 }
 
 function salesDraftDeferredCandidates(conflicts, allocations) {
-  const successfulOrderIds = new Set(allocations.map((allocation) => allocation.orderId).filter(Boolean));
   const conflictedIds = new Set();
   for (const conflict of conflicts) {
     if (conflict.orderId && conflict.orderId !== "PREVIEW-DRAFT") {
@@ -1582,7 +1581,6 @@ function salesDraftDeferredCandidates(conflicts, allocations) {
     }
   }
   return Array.from(conflictedIds)
-    .filter((orderId) => !successfulOrderIds.has(orderId))
     .map((orderId) => state.orders.find((order) => order.id === orderId))
     .filter((order) => order?.status === "待排程" && order.createdBy === state.user?.id)
     .sort((a, b) => compareOrderIds(a.id, b.id));

@@ -2511,17 +2511,13 @@ func (s *MemoryStore) validateSalesDeferredOrdersLocked(orderIDs []string, previ
 }
 
 func previewDeferredOrderIDs(preview previewRecord) map[string]bool {
-	allocated := map[string]bool{}
-	for _, allocation := range preview.Allocations {
-		allocated[allocation.OrderID] = true
-	}
 	allowed := map[string]bool{}
 	for _, conflict := range preview.Conflicts {
-		if conflict.OrderID != "" && conflict.OrderID != previewDraftOrderID && !allocated[conflict.OrderID] {
+		if conflict.OrderID != "" && conflict.OrderID != previewDraftOrderID {
 			allowed[conflict.OrderID] = true
 		}
 		for _, orderID := range conflict.AffectedOrderIDs {
-			if orderID != "" && orderID != previewDraftOrderID && !allocated[orderID] {
+			if orderID != "" && orderID != previewDraftOrderID {
 				allowed[orderID] = true
 			}
 		}

@@ -15,6 +15,36 @@ import (
 	"time"
 )
 
+type scriptedRedisConn struct {
+	*strings.Reader
+	writes strings.Builder
+	closed bool
+}
+
+func newScriptedRedisConn(responses string) *scriptedRedisConn {
+	return &scriptedRedisConn{Reader: strings.NewReader(responses)}
+}
+
+func (c *scriptedRedisConn) Write(p []byte) (int, error) {
+	return c.writes.Write(p)
+}
+
+func (c *scriptedRedisConn) Close() error {
+	c.closed = true
+	return nil
+}
+
+func (c *scriptedRedisConn) LocalAddr() net.Addr              { return dummyAddr("local") }
+func (c *scriptedRedisConn) RemoteAddr() net.Addr             { return dummyAddr("remote") }
+func (c *scriptedRedisConn) SetDeadline(time.Time) error      { return nil }
+func (c *scriptedRedisConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *scriptedRedisConn) SetWriteDeadline(time.Time) error { return nil }
+
+type dummyAddr string
+
+func (a dummyAddr) Network() string { return string(a) }
+func (a dummyAddr) String() string  { return string(a) }
+
 func TestCommandEncodesRESPArrays(t *testing.T) {
 	got := string(command("SET", "woms:locks:schedule-line:A", "value", "NX", "PX", "15000"))
 	want := "*6\r\n$3\r\nSET\r\n$26\r\nwoms:locks:schedule-line:A\r\n$5\r\nvalue\r\n$2\r\nNX\r\n$2\r\nPX\r\n$5\r\n15000\r\n"
@@ -411,5 +441,64 @@ func TestRandomValueHelper(t *testing.T) {
 	}
 	if len(val) == 0 {
 		t.Error("expected non-empty random value string")
+	}
+}
+
+func TestRedisProviderWithScriptedConnectionCoversLifecycle(t *testing.T) {
+	conn := newScriptedRedisConn("+PONG\r\n+OK\r\n:1\r\n:1\r\n")
+	provider := NewRedisProvider("scripted")
+	provider.conn = conn
+	provider.reader = bufio.NewReader(conn)
+	ctx := context.Background()
+
+	if err := provider.Ping(ctx); err != nil {
+		t.Fatalf("Ping failed: %v", err)
+	}
+	lock, err := provider.Acquire(ctx, "schedule:A", time.Second)
+	if err != nil {
+		t.Fatalf("Acquire failed: %v", err)
+	}
+	if err := lock.Refresh(ctx, 2*time.Second); err != nil {
+		t.Fatalf("Refresh failed: %v", err)
+	}
+	if err := lock.Release(ctx); err != nil {
+		t.Fatalf("Release failed: %v", err)
+	}
+	writes := conn.writes.String()
+	for _, want := range []string{"PING", "SET", "EVAL"} {
+		if !strings.Contains(writes, want) {
+			t.Fatalf("expected command %s in writes %q", want, writes)
+		}
+	}
+}
+
+func TestRedisProviderScriptedConnectionErrorsCloseConnection(t *testing.T) {
+	conn := newScriptedRedisConn("-ERR boom\r\n")
+	provider := NewRedisProvider("scripted")
+	provider.conn = conn
+	provider.reader = bufio.NewReader(conn)
+
+	if err := provider.Ping(context.Background()); err == nil || err.Error() != "ERR boom" {
+		t.Fatalf("expected redis error response, got %v", err)
+	}
+	if !conn.closed || provider.conn != nil || provider.reader != nil {
+		t.Fatalf("expected command error to close connection, closed=%v conn=%v reader=%v", conn.closed, provider.conn, provider.reader)
+	}
+}
+
+func TestRedisProviderScriptedAcquireAndRefreshFailures(t *testing.T) {
+	provider := NewRedisProvider("scripted")
+	provider.conn = newScriptedRedisConn("+NOPE\r\n")
+	provider.reader = bufio.NewReader(provider.conn)
+	if _, err := provider.Acquire(context.Background(), "schedule:A", time.Second); !errors.Is(err, ErrNotAcquired) {
+		t.Fatalf("expected non-OK SET to map to ErrNotAcquired, got %v", err)
+	}
+
+	provider = NewRedisProvider("scripted")
+	provider.conn = newScriptedRedisConn(":0\r\n")
+	provider.reader = bufio.NewReader(provider.conn)
+	lock := &redisLock{provider: provider, key: "schedule:A", value: "owner"}
+	if err := lock.Refresh(context.Background(), time.Second); !errors.Is(err, ErrNotAcquired) {
+		t.Fatalf("expected refresh result 0 to map to ErrNotAcquired, got %v", err)
 	}
 }

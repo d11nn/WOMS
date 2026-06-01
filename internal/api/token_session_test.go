@@ -18,6 +18,36 @@ import (
 	"github.com/d11nn/woms/internal/domain"
 )
 
+type scriptedTokenRedisConn struct {
+	*strings.Reader
+	writes strings.Builder
+	closed bool
+}
+
+func newScriptedTokenRedisConn(responses string) *scriptedTokenRedisConn {
+	return &scriptedTokenRedisConn{Reader: strings.NewReader(responses)}
+}
+
+func (c *scriptedTokenRedisConn) Write(p []byte) (int, error) {
+	return c.writes.Write(p)
+}
+
+func (c *scriptedTokenRedisConn) Close() error {
+	c.closed = true
+	return nil
+}
+
+func (c *scriptedTokenRedisConn) LocalAddr() net.Addr              { return tokenDummyAddr("local") }
+func (c *scriptedTokenRedisConn) RemoteAddr() net.Addr             { return tokenDummyAddr("remote") }
+func (c *scriptedTokenRedisConn) SetDeadline(time.Time) error      { return nil }
+func (c *scriptedTokenRedisConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *scriptedTokenRedisConn) SetWriteDeadline(time.Time) error { return nil }
+
+type tokenDummyAddr string
+
+func (a tokenDummyAddr) Network() string { return string(a) }
+func (a tokenDummyAddr) String() string  { return string(a) }
+
 func TestRedisCommandEncodesRESPArrays(t *testing.T) {
 	got := string(redisCommand("SET", "woms:auth:token:test", "1", "EX", "60"))
 	want := "*5\r\n$3\r\nSET\r\n$20\r\nwoms:auth:token:test\r\n$1\r\n1\r\n$2\r\nEX\r\n$2\r\n60\r\n"
@@ -589,5 +619,66 @@ func TestRedisTokenSessionStoreErrors(t *testing.T) {
 	storeBadConn.timeout = 50 * time.Millisecond
 	if err := storeBadConn.Ping(context.Background()); err == nil {
 		t.Error("expected connection error, got nil")
+	}
+}
+
+func TestRedisTokenSessionStoreScriptedConnectionLifecycle(t *testing.T) {
+	conn := newScriptedTokenRedisConn("+PONG\r\n+OK\r\n$1\r\n1\r\n:1\r\n")
+	store := NewRedisTokenSessionStore("scripted")
+	store.conn = conn
+	store.reader = bufio.NewReader(conn)
+	ctx := context.Background()
+	claims := auth.Claims{Subject: "user", Role: domain.RoleSales, Expires: time.Now().Add(time.Minute).Unix()}
+
+	if err := store.Ping(ctx); err != nil {
+		t.Fatalf("Ping failed: %v", err)
+	}
+	if err := store.Save(ctx, "token", claims); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+	if err := store.Verify(ctx, "token", claims); err != nil {
+		t.Fatalf("Verify failed: %v", err)
+	}
+	revoked, err := store.Revoke(ctx, "token")
+	if err != nil || !revoked {
+		t.Fatalf("Revoke failed: revoked=%v err=%v", revoked, err)
+	}
+	if !store.TracksSessions() {
+		t.Fatal("RedisTokenSessionStore should track sessions")
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	if !conn.closed || store.conn != nil || store.reader != nil {
+		t.Fatalf("Close should clear connection, closed=%v conn=%v reader=%v", conn.closed, store.conn, store.reader)
+	}
+	writes := conn.writes.String()
+	for _, want := range []string{"PING", "SET", "GET", "DEL"} {
+		if !strings.Contains(writes, want) {
+			t.Fatalf("expected command %s in writes %q", want, writes)
+		}
+	}
+}
+
+func TestRedisTokenSessionStoreScriptedConnectionErrorPaths(t *testing.T) {
+	ctx := context.Background()
+	claims := auth.Claims{Subject: "user", Role: domain.RoleSales, Expires: time.Now().Add(time.Minute).Unix()}
+
+	store := NewRedisTokenSessionStore("scripted")
+	store.conn = newScriptedTokenRedisConn("$3\r\nBAD\r\n")
+	store.reader = bufio.NewReader(store.conn)
+	if err := store.Verify(ctx, "token", claims); !errors.Is(err, ErrTokenSessionNotFound) {
+		t.Fatalf("expected non-1 GET to be missing session, got %v", err)
+	}
+
+	conn := newScriptedTokenRedisConn("-ERR boom\r\n")
+	store = NewRedisTokenSessionStore("scripted")
+	store.conn = conn
+	store.reader = bufio.NewReader(conn)
+	if err := store.Ping(ctx); err == nil || err.Error() != "ERR boom" {
+		t.Fatalf("expected redis error response, got %v", err)
+	}
+	if !conn.closed || store.conn != nil || store.reader != nil {
+		t.Fatalf("expected command error to close connection, closed=%v conn=%v reader=%v", conn.closed, store.conn, store.reader)
 	}
 }

@@ -2809,11 +2809,11 @@ func loadHPAAutoscalingState(namespace, hpaName, deploymentName string) *hpaAuto
 	hpaAutoscalingCache.Unlock()
 
 	port := envDefault("KUBERNETES_SERVICE_PORT", "443")
-	token, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
+	token, err := os.ReadFile(kubernetesServiceAccountTokenPath)
 	if err != nil {
 		return &hpaAutoscalingState{Error: "無法讀取 Kubernetes service account token：" + err.Error()}
 	}
-	ca, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
+	ca, err := os.ReadFile(kubernetesServiceAccountCAPath)
 	if err != nil {
 		return &hpaAutoscalingState{Error: "無法讀取 Kubernetes CA：" + err.Error()}
 	}
@@ -2821,14 +2821,7 @@ func loadHPAAutoscalingState(namespace, hpaName, deploymentName string) *hpaAuto
 	if !roots.AppendCertsFromPEM(ca) {
 		return &hpaAutoscalingState{Error: "無法載入 Kubernetes CA。"}
 	}
-	client := &http.Client{
-		Timeout: 900 * time.Millisecond,
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{
-			RootCAs:    roots,
-			ServerName: host,
-			MinVersion: tls.VersionTLS12,
-		}},
-	}
+	client := newKubernetesHTTPClient(host, roots)
 	baseURL := "https://" + host + ":" + port
 	ctx, cancel := context.WithTimeout(context.Background(), 900*time.Millisecond)
 	defer cancel()
@@ -2911,6 +2904,21 @@ func loadHPAAutoscalingState(namespace, hpaName, deploymentName string) *hpaAuto
 	hpaAutoscalingCache.Unlock()
 	return state
 }
+
+var (
+	kubernetesServiceAccountTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	kubernetesServiceAccountCAPath    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+	newKubernetesHTTPClient           = func(host string, roots *x509.CertPool) *http.Client {
+		return &http.Client{
+			Timeout: 900 * time.Millisecond,
+			Transport: &http.Transport{TLSClientConfig: &tls.Config{
+				RootCAs:    roots,
+				ServerName: host,
+				MinVersion: tls.VersionTLS12,
+			}},
+		}
+	}
+)
 
 func kubernetesGetJSON(ctx context.Context, client *http.Client, baseURL, token, apiPath string, target any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+apiPath, nil)

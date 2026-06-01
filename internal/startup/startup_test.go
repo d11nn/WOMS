@@ -27,6 +27,20 @@ func TestRetryDependencyEventuallySucceeds(t *testing.T) {
 	}
 }
 
+func TestRetryDependencyDefaultsNonPositiveInterval(t *testing.T) {
+	attempts := 0
+	err := RetryDependency(context.Background(), "test", 0, nil, func(context.Context) error {
+		attempts++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("RetryDependency returned error: %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+}
+
 func TestRetryDependencyLogsReadinessAfterRetry(t *testing.T) {
 	attempts := 0
 	logs := []string{}
@@ -81,6 +95,12 @@ func TestPingAnyTCPRejectsEmptyAddressList(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no addresses configured") {
 		t.Fatalf("PingAnyTCP error = %q, want no addresses configured", err)
+	}
+}
+
+func TestPingTCPReturnsDialErrorForInvalidAddress(t *testing.T) {
+	if err := pingTCP(context.Background(), "bad-address"); err == nil {
+		t.Fatal("expected invalid address dial error")
 	}
 }
 

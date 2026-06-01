@@ -1414,7 +1414,7 @@ test("sales draft conflict preview keeps baseline pending and scheduled calendar
 
 test("sales draft conflict preview shows successful draft schedule and excludes conflicted pending order", async () => {
   const document = buildDomFromIndex();
-  const previewDate = dateKeyAfter(1);
+  const previewDate = dateKeyAfter(2);
   const fetchImpl = async (path, options = {}) => {
     if (path === "/api/auth/login") {
       return jsonResponse({
@@ -1523,7 +1523,7 @@ test("sales draft conflict preview shows successful draft schedule and excludes 
 
 test("sales can move the current conflicted draft to follow-up without a rejection reason", async () => {
   const document = buildDomFromIndex();
-  const previewDate = dateKeyAfter(1);
+  const previewDate = dateKeyAfter(2);
   const calls = [];
   const fetchImpl = async (path, options = {}) => {
     calls.push({ path, options });
@@ -1552,6 +1552,7 @@ test("sales can move the current conflicted draft to follow-up without a rejecti
       assert.equal(options.method, "POST");
       return jsonResponse({
         previewId: "PREVIEW-DRAFT",
+        draftOrder: { customer: "Blocked", lineId: "A", quantity: 2500, priority: "high", dueDate: previewDate },
         currentDate: dateKeyAfter(0),
         allocations: [],
         conflicts: [
@@ -1583,7 +1584,10 @@ test("sales can move the current conflicted draft to follow-up without a rejecti
     await document.getElementById("order-form").dispatchEvent({ type: "submit" });
     await settleApp();
 
-    assert.match(document.getElementById("preview-page-list").innerHTML, /取消選取目前訂單/);
+    assert.match(document.getElementById("preview-page-list").innerHTML, /取消選取目前訂單/, JSON.stringify({
+      calls: calls.map((call) => call.path),
+      message: document.getElementById("message-body").textContent,
+    }));
     const deferButton = document.createElement("button");
     deferButton.setAttribute("data-preview-action", "defer-sales-draft");
     document.getElementById("preview-page-list").appendChild(deferButton);

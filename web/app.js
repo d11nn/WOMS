@@ -579,7 +579,7 @@ async function handlePreviewConflictSolutionPreviewAction() {
   if (state.preview?.kind === "sales-draft") {
     await retryPreview({
       orderIds,
-      resolutionOrderIds,
+      resolutionOrderIds: [],
       allowLateCompletion: true,
       manualForce: false,
       reason: "",
@@ -1729,13 +1729,14 @@ function renderConflictActions(conflicts, manualForce) {
 }
 
 function renderConflictSolutionPicker(conflicts, selectedOrderIds) {
+  const isSalesDraft = state.preview?.kind === "sales-draft";
   const conflictOrderIds = Array.from(new Set(conflicts.map((conflict) => conflict.orderId)));
   const solutionOrderIds = Array.from(new Set([...(selectedOrderIds ?? []), ...conflictOrderIds])).sort(compareOrderIds);
   const selectedSet = new Set(selectedOrderIds ?? []);
   const hasSelection = selectedSet.size > 0;
   const affectedOrderIds = Array.from(new Set(conflicts.flatMap((conflict) => conflict.affectedOrderIds ?? []))).sort(compareOrderIds);
-  const movableAffected = affectedOrderIds.filter(canMoveOrder);
-  const blockedAffected = affectedOrderIds.filter((orderId) => !canMoveOrder(orderId));
+  const movableAffected = isSalesDraft ? [] : affectedOrderIds.filter(canMoveOrder);
+  const blockedAffected = isSalesDraft ? affectedOrderIds : affectedOrderIds.filter((orderId) => !canMoveOrder(orderId));
   return `
     <div class="solution-picker">
       <h4>最早完成解法</h4>

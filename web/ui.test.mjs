@@ -96,6 +96,7 @@ test("sales status filters map to one matching heading", () => {
   assert.match(app, /state\.filters\.status === "需業務處理"[\s\S]*eyebrow\.textContent = "業務處理";[\s\S]*title\.textContent = "需處理訂單";/);
   assert.match(app, /state\.filters\.status === "需業務處理"[\s\S]*return visibleLineOrders\(\)\.filter\(\(order\) => order\.status === "需業務處理"\);/);
   assert.match(app, /document\.getElementById\("sales-rejected-panel"\)\.hidden = state\.user\?\.role !== "sales" \|\| state\.filters\.status \|\| rejected\.length === 0;/);
+  assert.match(app, /if \(state\.user\?\.role !== "sales"\) \{\s*document\.getElementById\("sales-rejected-panel"\)\.hidden = true;\s*\} else \{\s*renderSalesRejectedOrders\(\);\s*\}/);
   assert.match(app, /renderStatusSidebar\(\);\n\s+renderFilters\(\);\n\s+renderOrdersHeading\(\);\n\s+renderOrders\(\);\n\s+renderSalesRejectedOrders\(\);/);
 });
 

@@ -759,7 +759,11 @@ function renderAuthState() {
   document.getElementById("monitor-link").hidden = state.user?.role !== "admin";
   document.getElementById("admin-panel").hidden = state.user?.role !== "admin";
   document.getElementById("order-form").hidden = state.user?.role !== "sales";
-  document.getElementById("sales-rejected-panel").hidden = state.user?.role !== "sales";
+  if (state.user?.role !== "sales") {
+    document.getElementById("sales-rejected-panel").hidden = true;
+  } else {
+    renderSalesRejectedOrders();
+  }
   document.getElementById("batch-bar").hidden = state.user?.role !== "scheduler";
   document.querySelectorAll(".scheduler-only").forEach((node) => {
     node.hidden = state.user?.role !== "scheduler";

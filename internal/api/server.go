@@ -909,6 +909,7 @@ type resetUserPasswordRequest struct {
 type confirmPreviewRequest struct {
 	PreviewID        string   `json:"previewId"`
 	DeferredOrderIDs []string `json:"deferredOrderIds,omitempty"`
+	DeferDraft       bool     `json:"deferDraft,omitempty"`
 }
 
 type demoConflictRequest struct {
@@ -2458,6 +2459,12 @@ func (s *MemoryStore) ConfirmPreviewOrder(req confirmPreviewRequest, claims auth
 	if preview.DraftOrder == nil {
 		return domain.Order{}, errors.New("preview does not contain a draft order")
 	}
+	if req.DeferDraft && len(req.DeferredOrderIDs) > 0 {
+		return domain.Order{}, errors.New("draft defer cannot include deferred pending orders")
+	}
+	if req.DeferDraft && len(preview.Conflicts) == 0 {
+		return domain.Order{}, errors.New("draft can be deferred only when preview has conflicts")
+	}
 	deferredOrderIDs, err := s.validateSalesDeferredOrdersLocked(req.DeferredOrderIDs, preview, claims)
 	if err != nil {
 		return domain.Order{}, err
@@ -2468,6 +2475,14 @@ func (s *MemoryStore) ConfirmPreviewOrder(req confirmPreviewRequest, claims auth
 		return domain.Order{}, err
 	}
 	now := nowUTC()
+	if req.DeferDraft {
+		order.Status = domain.StatusRejected
+		order.RejectedBy = claims.Subject
+		order.RejectedAt = now
+		order.UpdatedAt = now
+		s.orders[order.ID] = order
+		s.auditLocked(claims.Subject, "order.sales_conflict_defer_draft", order.ID, "")
+	}
 	for _, orderID := range deferredOrderIDs {
 		deferred := s.orders[orderID]
 		deferred.Status = domain.StatusRejected
@@ -2794,11 +2809,11 @@ func loadHPAAutoscalingState(namespace, hpaName, deploymentName string) *hpaAuto
 	hpaAutoscalingCache.Unlock()
 
 	port := envDefault("KUBERNETES_SERVICE_PORT", "443")
-	token, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
+	token, err := os.ReadFile(kubernetesServiceAccountTokenPath)
 	if err != nil {
 		return &hpaAutoscalingState{Error: "無法讀取 Kubernetes service account token：" + err.Error()}
 	}
-	ca, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
+	ca, err := os.ReadFile(kubernetesServiceAccountCAPath)
 	if err != nil {
 		return &hpaAutoscalingState{Error: "無法讀取 Kubernetes CA：" + err.Error()}
 	}
@@ -2806,14 +2821,7 @@ func loadHPAAutoscalingState(namespace, hpaName, deploymentName string) *hpaAuto
 	if !roots.AppendCertsFromPEM(ca) {
 		return &hpaAutoscalingState{Error: "無法載入 Kubernetes CA。"}
 	}
-	client := &http.Client{
-		Timeout: 900 * time.Millisecond,
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{
-			RootCAs:    roots,
-			ServerName: host,
-			MinVersion: tls.VersionTLS12,
-		}},
-	}
+	client := newKubernetesHTTPClient(host, roots)
 	baseURL := "https://" + host + ":" + port
 	ctx, cancel := context.WithTimeout(context.Background(), 900*time.Millisecond)
 	defer cancel()
@@ -2896,6 +2904,21 @@ func loadHPAAutoscalingState(namespace, hpaName, deploymentName string) *hpaAuto
 	hpaAutoscalingCache.Unlock()
 	return state
 }
+
+var (
+	kubernetesServiceAccountTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	kubernetesServiceAccountCAPath    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+	newKubernetesHTTPClient           = func(host string, roots *x509.CertPool) *http.Client {
+		return &http.Client{
+			Timeout: 900 * time.Millisecond,
+			Transport: &http.Transport{TLSClientConfig: &tls.Config{
+				RootCAs:    roots,
+				ServerName: host,
+				MinVersion: tls.VersionTLS12,
+			}},
+		}
+	}
+)
 
 func kubernetesGetJSON(ctx context.Context, client *http.Client, baseURL, token, apiPath string, target any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+apiPath, nil)
@@ -3398,6 +3421,8 @@ func zhUserMessage(message string) string {
 		"resolution order line must match preview line":                "解法訂單產線必須符合試排產線。",
 		"resolution orders must be low-priority scheduled orders without locked or completed allocations": "解法訂單必須是低優先級、已排程、且沒有鎖定或已完成分配的訂單。",
 		"preview does not contain a draft order":                                                          "試排結果不包含草稿訂單。",
+		"draft defer cannot include deferred pending orders":                                              "取消目前草稿訂單時不能同時改送其他待排程訂單。",
+		"draft can be deferred only when preview has conflicts":                                           "只有發生衝突的草稿訂單可以改送需業務處理。",
 		"cannot create demo orders for another production line":                                           "不能為其他產線建立展示訂單。",
 		"count must be between 5 and 20":                                                                  "數量必須介於 5 到 20。",
 		"customer is required and quantity must be between 25 and 2500":                                   "請填寫客戶，且數量必須介於 25 到 2500。",

@@ -1,7 +1,10 @@
 package auth
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -60,6 +63,33 @@ func TestVerifyTokenRejectsInvalidRole(t *testing.T) {
 	_, err = VerifyToken("secret", token)
 	if !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken, got %v", err)
+	}
+}
+
+func TestCreateAndVerifyTokenRejectMalformedInputs(t *testing.T) {
+	if _, err := CreateToken("", Claims{Subject: "user-1", Role: domain.RoleSales}, time.Hour); err == nil {
+		t.Fatal("expected empty secret error")
+	}
+	for _, token := range []string{"", "one.two", "one.two.three.four"} {
+		if _, err := VerifyToken("secret", token); !errors.Is(err, ErrInvalidToken) {
+			t.Fatalf("expected invalid token for %q, got %v", token, err)
+		}
+	}
+	unsigned := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`)) + "." + base64.RawURLEncoding.EncodeToString([]byte(`{`))
+	if _, err := VerifyToken("secret", unsigned+"."+sign("secret", unsigned)); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("expected invalid JSON token error, got %v", err)
+	}
+	claimsJSON, _ := json.Marshal(Claims{Role: domain.RoleSales, Expires: time.Now().Add(time.Hour).Unix()})
+	missingSubject := strings.Join([]string{
+		base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`)),
+		base64.RawURLEncoding.EncodeToString(claimsJSON),
+	}, ".")
+	if _, err := VerifyToken("secret", missingSubject+"."+sign("secret", missingSubject)); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("expected missing subject error, got %v", err)
+	}
+	badBody := "header.%%%." + sign("secret", "header.%%%")
+	if _, err := VerifyToken("secret", badBody); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("expected invalid base64 body error, got %v", err)
 	}
 }
 

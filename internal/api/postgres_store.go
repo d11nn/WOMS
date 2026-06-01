@@ -875,11 +875,17 @@ func (s *PostgresStore) ConfirmPreviewOrder(req confirmPreviewRequest, claims au
 		Allocations: allocations,
 		Conflicts:   conflicts,
 	}
+	if req.DeferDraft && len(req.DeferredOrderIDs) > 0 {
+		return domain.Order{}, errors.New("draft defer cannot include deferred pending orders")
+	}
+	if req.DeferDraft && len(preview.Conflicts) == 0 {
+		return domain.Order{}, errors.New("draft can be deferred only when preview has conflicts")
+	}
 	deferredOrders, err := s.validateSalesDeferredOrders(req.DeferredOrderIDs, preview, claims)
 	if err != nil {
 		return domain.Order{}, err
 	}
-	order, err := s.confirmPreviewOrderTx(req.PreviewID, draft, deferredOrders, claims)
+	order, err := s.confirmPreviewOrderTx(req.PreviewID, draft, deferredOrders, req.DeferDraft, claims)
 	if err != nil {
 		return domain.Order{}, err
 	}
@@ -974,10 +980,15 @@ func deferConflictOrdersTx(tx *sql.Tx, deferredOrders []domain.Order, claims aut
 	return nil
 }
 
-func (s *PostgresStore) confirmPreviewOrderTx(previewID string, draft createOrderRequest, deferredOrders []domain.Order, claims auth.Claims) (domain.Order, error) {
+func (s *PostgresStore) confirmPreviewOrderTx(previewID string, draft createOrderRequest, deferredOrders []domain.Order, deferDraft bool, claims auth.Claims) (domain.Order, error) {
 	order, err := s.prepareConfirmedOrder(draft, claims)
 	if err != nil {
 		return domain.Order{}, err
+	}
+	if deferDraft {
+		order.Status = domain.StatusRejected
+		order.RejectedBy = claims.Subject
+		order.RejectedAt = order.CreatedAt
 	}
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -985,13 +996,18 @@ func (s *PostgresStore) confirmPreviewOrderTx(previewID string, draft createOrde
 	}
 	defer tx.Rollback()
 	if _, err := tx.Exec(`
-		INSERT INTO orders (id, customer, line_id, quantity, priority, status, due_date, note, created_by, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
-	`, order.ID, order.Customer, order.LineID, order.Quantity, order.Priority, order.Status, order.DueDate, order.Note, order.CreatedBy, order.CreatedAt); err != nil {
+		INSERT INTO orders (id, customer, line_id, quantity, priority, status, due_date, note, created_by, rejection_reason, rejected_by, rejected_at, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10, ''), NULLIF($11, ''), $12, $13, $13)
+	`, order.ID, order.Customer, order.LineID, order.Quantity, order.Priority, order.Status, order.DueDate, order.Note, order.CreatedBy, order.RejectionReason, order.RejectedBy, nullableTime(order.RejectedAt), order.CreatedAt); err != nil {
 		return domain.Order{}, err
 	}
 	if _, err := insertAuditTx(tx, claims.Subject, "order.create", order.ID, ""); err != nil {
 		return domain.Order{}, err
+	}
+	if deferDraft {
+		if _, err := insertAuditTx(tx, claims.Subject, "order.sales_conflict_defer_draft", order.ID, ""); err != nil {
+			return domain.Order{}, err
+		}
 	}
 	if err := deferConflictOrdersTx(tx, deferredOrders, claims, order.CreatedAt); err != nil {
 		return domain.Order{}, err

@@ -66,10 +66,12 @@ WOMS_INTEGRATION_TESTS=1 DATABASE_URL=postgres://... REDIS_ADDR=127.0.0.1:6379 n
    - 點 `待排程`：preview calendar 顯示本次 sales draft preview allocations。
    - 點 `已排程`：preview calendar 切換為正式 persisted calendar allocations。
    - 再切回 `待排程`，確認 draft preview allocations 回來。
-   - 確認最後「放到待排程訂單」流程仍可建立待排程訂單。
+   - 在有衝突的 preview 中，確認「接受目前解法並加入待排程」仍會建立待排程訂單，且勾選的衝突待排程訂單會移到 `需業務處理`。
+   - 點「取消選取目前訂單」，確認目前草稿訂單不用填駁回理由就出現在 `需業務處理`。
 
 4. Sales 主日曆切換：
    - 以 `sales` / `demo` 登入。
+   - 點左側狀態列的 `待排程` 與 `需業務處理`，確認訂單 heading 只顯示目前篩選狀態對應的文案，不會同時出現 `業務處理 / 需處理訂單` 與 `訂單任務 / 訂單`。
    - 點 `待排程`：主日曆只顯示 pending backlog preview allocations。
    - 點 `已排程`：主日曆只顯示正式 persisted schedule allocations。
    - 點 `所有訂單`：主日曆同時顯示兩者，pending backlog allocations 保留 preview 樣式與待排程狀態。

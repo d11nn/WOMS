@@ -3,11 +3,19 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strconv"
 	"strings"
@@ -57,6 +65,128 @@ func TestAPIErrorMessagesAreZhTW(t *testing.T) {
 	}
 }
 
+func mockKubernetesClient(t *testing.T) func(string, *x509.CertPool) *http.Client {
+	return func(string, *x509.CertPool) *http.Client {
+		return &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+				t.Fatalf("unexpected authorization header %q", got)
+			}
+			body := "{}"
+			switch r.URL.Path {
+			case "/apis/autoscaling/v2/namespaces/woms/horizontalpodautoscalers/woms-web-hpa":
+				body = `{"spec":{"minReplicas":2,"maxReplicas":8},"status":{"currentReplicas":3,"desiredReplicas":5}}`
+			case "/apis/apps/v1/namespaces/woms/deployments/woms-web":
+				body = `{"status":{"replicas":5,"readyReplicas":4,"availableReplicas":3}}`
+			case "/api/v1/namespaces/woms/pods":
+				if got := r.URL.Query().Get("labelSelector"); got != "app=test" {
+					t.Fatalf("unexpected pod label selector %q", got)
+				}
+				body = `{"items":[{"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}},{"status":{"phase":"Running","conditions":[{"type":"Ready","status":"False"}]}},{"status":{"phase":"Pending","conditions":[{"type":"Ready","status":"True"}]}}]}`
+			default:
+				return &http.Response{StatusCode: http.StatusNotFound, Status: "404 Not Found", Body: io.NopCloser(strings.NewReader("missing"))}, nil
+			}
+			return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Body: io.NopCloser(strings.NewReader(body))}, nil
+		})}
+	}
+}
+
+func TestLoadHPAAutoscalingStateReadsKubernetesAPIs(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "kubernetes.test")
+	t.Setenv("KUBERNETES_SERVICE_PORT", "443")
+	t.Setenv("HPA_DEMO_POD_LABEL_SELECTOR", "app=test")
+	hpaAutoscalingCache.Lock()
+	hpaAutoscalingCache.key = ""
+	hpaAutoscalingCache.expires = time.Time{}
+	hpaAutoscalingCache.state = nil
+	hpaAutoscalingCache.Unlock()
+
+	dir := t.TempDir()
+	oldTokenPath := kubernetesServiceAccountTokenPath
+	oldCAPath := kubernetesServiceAccountCAPath
+	kubernetesServiceAccountTokenPath = dir + "/token"
+	kubernetesServiceAccountCAPath = dir + "/ca.crt"
+	oldClientFactory := newKubernetesHTTPClient
+	newKubernetesHTTPClient = mockKubernetesClient(t)
+	t.Cleanup(func() {
+		kubernetesServiceAccountTokenPath = oldTokenPath
+		kubernetesServiceAccountCAPath = oldCAPath
+		newKubernetesHTTPClient = oldClientFactory
+	})
+	if err := os.WriteFile(kubernetesServiceAccountTokenPath, []byte("test-token"), 0o600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	caPEM := testCertificatePEM(t)
+	if err := os.WriteFile(kubernetesServiceAccountCAPath, caPEM, 0o600); err != nil {
+		t.Fatalf("write ca: %v", err)
+	}
+
+	state := loadHPAAutoscalingState("woms", "woms-web-hpa", "woms-web")
+	if state == nil || state.Error != "" {
+		t.Fatalf("expected autoscaling state without error, got %+v", state)
+	}
+	if state.MinReplicas != 2 || state.MaxReplicas != 8 || state.CurrentReplicas != 3 || state.DesiredReplicas != 5 {
+		t.Fatalf("unexpected hpa state: %+v", state)
+	}
+	if state.DeploymentReplicas != 5 || state.ReadyReplicas != 4 || state.AvailableReplicas != 3 {
+		t.Fatalf("unexpected deployment state: %+v", state)
+	}
+	if state.PodCount != 3 || state.ReadyPods != 1 {
+		t.Fatalf("unexpected pod state: %+v", state)
+	}
+	if cached := loadHPAAutoscalingState("woms", "woms-web-hpa", "woms-web"); cached != state {
+		t.Fatalf("expected cached autoscaling state")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func testCertificatePEM(t *testing.T) []byte {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatalf("generate test key: %v", err)
+	}
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		IsCA:         true,
+		KeyUsage:     x509.KeyUsageCertSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create test cert: %v", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+func TestKubernetesAutoscalingStateErrorPaths(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "127.0.0.1")
+	hpaAutoscalingCache.Lock()
+	hpaAutoscalingCache.key = ""
+	hpaAutoscalingCache.expires = time.Time{}
+	hpaAutoscalingCache.state = nil
+	hpaAutoscalingCache.Unlock()
+
+	oldTokenPath := kubernetesServiceAccountTokenPath
+	oldCAPath := kubernetesServiceAccountCAPath
+	kubernetesServiceAccountTokenPath = t.TempDir() + "/missing-token"
+	kubernetesServiceAccountCAPath = t.TempDir() + "/missing-ca"
+	t.Cleanup(func() {
+		kubernetesServiceAccountTokenPath = oldTokenPath
+		kubernetesServiceAccountCAPath = oldCAPath
+	})
+	state := loadHPAAutoscalingState("woms", "hpa", "deploy")
+	if state == nil || !strings.Contains(state.Error, "無法讀取 Kubernetes service account token") {
+		t.Fatalf("expected token read error, got %+v", state)
+	}
+}
+
 func TestSecurityHeadersUseConfiguredCORSOrigin(t *testing.T) {
 	server := NewServerWithPublisherAndConfig("secret", NewMemoryStore(), NoopScheduleJobPublisher{}, ServerConfig{
 		CORSAllowedOrigin: "https://woms.example.com",
@@ -97,6 +227,200 @@ func TestBusinessAPIsRequireBearerToken(t *testing.T) {
 		if res.Code != http.StatusUnauthorized {
 			t.Fatalf("%s %s expected 401, got %d body=%s", tt.method, tt.path, res.Code, res.Body.String())
 		}
+	}
+}
+
+type failingHandlerStore struct {
+	*MemoryStore
+}
+
+func (s failingHandlerStore) CreateOrder(createOrderRequest, string) (domain.Order, error) {
+	return domain.Order{}, errors.New("store create order failed")
+}
+
+func (s failingHandlerStore) CancelOrders(cancelOrdersRequest, auth.Claims) (cancelOrdersResponse, error) {
+	return cancelOrdersResponse{}, errors.New("store cancel orders failed")
+}
+
+func (s failingHandlerStore) ConfirmPreviewOrder(confirmPreviewRequest, auth.Claims) (domain.Order, error) {
+	return domain.Order{}, errors.New("store confirm preview failed")
+}
+
+func (s failingHandlerStore) RejectOrders(rejectOrdersRequest, auth.Claims) (rejectOrdersResponse, error) {
+	return rejectOrdersResponse{}, errors.New("store reject orders failed")
+}
+
+func (s failingHandlerStore) ResubmitOrder(resubmitOrderRequest, auth.Claims) (domain.Order, error) {
+	return domain.Order{}, errors.New("store resubmit order failed")
+}
+
+func (s failingHandlerStore) CreateUser(createUserRequest, string) (domain.User, error) {
+	return domain.User{}, errors.New("store create user failed")
+}
+
+func (s failingHandlerStore) AssignUser(assignUserRequest, string) (domain.User, error) {
+	return domain.User{}, errors.New("store assign user failed")
+}
+
+func (s failingHandlerStore) ResetUserPassword(resetUserPasswordRequest, string) (domain.User, error) {
+	return domain.User{}, errors.New("store reset password failed")
+}
+
+func (s failingHandlerStore) DeleteUser(string, string) (domain.User, error) {
+	return domain.User{}, errors.New("store delete user failed")
+}
+
+func (s failingHandlerStore) CreateDemoConflictOrders(demoConflictRequest, auth.Claims) ([]domain.Order, error) {
+	return nil, errors.New("store demo conflict failed")
+}
+
+func (s failingHandlerStore) PreviewSchedule(scheduleRequest, auth.Claims) (schedulePreviewResponse, error) {
+	return schedulePreviewResponse{}, errors.New("store preview schedule failed")
+}
+
+func (s failingHandlerStore) CreateScheduleJob(scheduleRequest, auth.Claims) (domain.ScheduleJob, error) {
+	return domain.ScheduleJob{}, errors.New("store create schedule job failed")
+}
+
+func (s failingHandlerStore) GetScheduleJob(string) (domain.ScheduleJob, bool) {
+	return domain.ScheduleJob{}, false
+}
+
+func (s failingHandlerStore) ScheduleCalendar(string, string, auth.Claims) (calendarResponse, error) {
+	return calendarResponse{}, errors.New("store schedule calendar failed")
+}
+
+func (s failingHandlerStore) ScheduleHistory(string, auth.Claims) ([]domain.AuditEntry, error) {
+	return nil, errors.New("store schedule history failed")
+}
+
+func (s failingHandlerStore) StartProduction(productionStartRequest, auth.Claims) (domain.Order, error) {
+	return domain.Order{}, errors.New("store start production failed")
+}
+
+func (s failingHandlerStore) ConfirmProduction(productionConfirmRequest, auth.Claims) (productionConfirmResponse, error) {
+	return productionConfirmResponse{}, errors.New("store confirm production failed")
+}
+
+func (s failingHandlerStore) ClearHPAPeakDemo(auth.Claims) (hpaPeakSummary, error) {
+	return hpaPeakSummary{}, errors.New("store clear hpa demo failed")
+}
+
+func TestHandlersReturnStoreErrorsAndMalformedJSON(t *testing.T) {
+	server := NewServerWithPublisher("secret", failingHandlerStore{MemoryStore: NewMemoryStore()}, NoopScheduleJobPublisher{})
+	admin := auth.Claims{Subject: "admin", Role: domain.RoleAdmin}
+	sales := auth.Claims{Subject: "sales", Role: domain.RoleSales}
+	scheduler := auth.Claims{Subject: "scheduler", Role: domain.RoleScheduler, LineID: "A"}
+
+	cases := []struct {
+		name    string
+		method  string
+		path    string
+		body    string
+		claims  auth.Claims
+		handler http.HandlerFunc
+		status  int
+	}{
+		{"orders create store error", http.MethodPost, "/api/orders", `{"customer":"A","lineId":"A","quantity":100,"priority":"low","dueDate":"2026-05-06"}`, sales, server.handleOrders, http.StatusBadRequest},
+		{"orders delete bad json", http.MethodDelete, "/api/orders", `{`, sales, server.handleOrders, http.StatusBadRequest},
+		{"orders delete store error", http.MethodDelete, "/api/orders", `{"orderIds":["ORD-1"]}`, sales, server.handleOrders, http.StatusBadRequest},
+		{"orders method not allowed", http.MethodPatch, "/api/orders", `{}`, sales, server.handleOrders, http.StatusMethodNotAllowed},
+		{"confirm preview store error", http.MethodPost, "/api/orders/confirm-preview", `{"previewId":"PREVIEW-1"}`, sales, server.handleConfirmPreviewOrder, http.StatusBadRequest},
+		{"reject orders store error", http.MethodPost, "/api/orders/reject", `{"orderIds":["ORD-1"],"reason":"capacity"}`, scheduler, server.handleRejectOrders, http.StatusBadRequest},
+		{"resubmit store error", http.MethodPost, "/api/orders/resubmit", `{"orderId":"ORD-1"}`, sales, server.handleResubmitOrder, http.StatusBadRequest},
+		{"users create store error", http.MethodPost, "/api/users", `{"username":"u","password":"p","role":"sales"}`, admin, server.handleUsers, http.StatusBadRequest},
+		{"users assign bad json", http.MethodPatch, "/api/users", `{`, admin, server.handleUsers, http.StatusBadRequest},
+		{"users assign store error", http.MethodPatch, "/api/users", `{"username":"u","role":"sales"}`, admin, server.handleUsers, http.StatusBadRequest},
+		{"users method not allowed", http.MethodDelete, "/api/users", `{}`, admin, server.handleUsers, http.StatusMethodNotAllowed},
+		{"reset password store error", http.MethodPost, "/api/users/reset-password", `{"username":"u","password":"p"}`, admin, server.handleResetUserPassword, http.StatusBadRequest},
+		{"delete user store error", http.MethodDelete, "/api/users/u", `{}`, admin, server.handleUserByUsername, http.StatusBadRequest},
+		{"demo conflict store error", http.MethodPost, "/api/demo/conflict-orders", `{"lineId":"A","count":5,"dueDate":"2026-05-06"}`, scheduler, server.handleDemoConflictOrders, http.StatusBadRequest},
+		{"schedule preview store error", http.MethodPost, "/api/schedules/preview", `{"lineId":"A","startDate":"2026-05-01"}`, scheduler, server.handleSchedulePreview, http.StatusBadRequest},
+		{"hpa delete store error", http.MethodDelete, "/api/demo/hpa-peak", `{}`, admin, server.handleHPAPeakDemo, http.StatusBadRequest},
+		{"hpa method not allowed", http.MethodPatch, "/api/demo/hpa-peak", `{}`, admin, server.handleHPAPeakDemo, http.StatusMethodNotAllowed},
+		{"calendar store error", http.MethodGet, "/api/schedules/calendar?lineId=A&month=2026-05", ``, scheduler, server.handleScheduleCalendar, http.StatusBadRequest},
+		{"history store error", http.MethodGet, "/api/schedules/history?lineId=A", ``, scheduler, server.handleScheduleHistory, http.StatusForbidden},
+		{"schedule job store error", http.MethodPost, "/api/schedules/jobs", `{"lineId":"A","startDate":"2026-05-01","previewId":"PREVIEW-1"}`, scheduler, server.handleScheduleJobs, http.StatusBadRequest},
+		{"get schedule job not found", http.MethodGet, "/api/schedules/jobs/JOB-1", ``, scheduler, server.handleGetScheduleJob, http.StatusNotFound},
+		{"production start store error", http.MethodPost, "/api/production/start", `{"orderId":"ORD-1"}`, scheduler, server.handleProductionStart, http.StatusBadRequest},
+		{"production confirm store error", http.MethodPost, "/api/production/confirm", `{"orderId":"ORD-1","producedQuantity":1,"productionDate":"2026-05-01"}`, scheduler, server.handleProductionConfirm, http.StatusBadRequest},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			req = req.WithContext(context.WithValue(req.Context(), claimsContextKey{}, tt.claims))
+			res := httptest.NewRecorder()
+			tt.handler(res, req)
+			if res.Code != tt.status {
+				t.Fatalf("expected %d, got %d body=%s", tt.status, res.Code, res.Body.String())
+			}
+		})
+	}
+
+	res := httptest.NewRecorder()
+	readyzHandler(res, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if res.Code != http.StatusOK {
+		t.Fatalf("readyz expected 200, got %d", res.Code)
+	}
+}
+
+type saveFailTokenSessionStore struct {
+	NoopTokenSessionStore
+}
+
+func (saveFailTokenSessionStore) Save(context.Context, string, auth.Claims) error {
+	return errors.New("save session failed")
+}
+
+func TestAdditionalHandlerAuthAndForbiddenBranches(t *testing.T) {
+	server := NewServerWithPublisherAndConfig("secret", NewMemoryStore(), NoopScheduleJobPublisher{}, ServerConfig{
+		TokenSessions: saveFailTokenSessionStore{},
+		AuthMode:      "unsupported",
+	})
+	if _, err := server.claimsFromRequest(httptest.NewRequest(http.MethodGet, "/api/orders", nil)); !errors.Is(err, auth.ErrInvalidToken) {
+		t.Fatalf("expected invalid auth mode error, got %v", err)
+	}
+
+	localServer := NewServerWithPublisherAndConfig("secret", NewMemoryStore(), NoopScheduleJobPublisher{}, ServerConfig{
+		TokenSessions: saveFailTokenSessionStore{},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"username":"sales","password":"demo"}`))
+	res := httptest.NewRecorder()
+	localServer.handleLogin(res, req)
+	if res.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected token save failure 503, got %d %s", res.Code, res.Body.String())
+	}
+
+	sales := auth.Claims{Subject: "sales", Role: domain.RoleSales}
+	admin := auth.Claims{Subject: "admin", Role: domain.RoleAdmin}
+	for _, tt := range []struct {
+		name    string
+		handler http.HandlerFunc
+		claims  auth.Claims
+		method  string
+		path    string
+		body    string
+	}{
+		{"confirm preview forbidden", localServer.handleConfirmPreviewOrder, admin, http.MethodPost, "/api/orders/confirm-preview", `{}`},
+		{"reject forbidden", localServer.handleRejectOrders, sales, http.MethodPost, "/api/orders/reject", `{}`},
+		{"resubmit forbidden", localServer.handleResubmitOrder, admin, http.MethodPost, "/api/orders/resubmit", `{}`},
+		{"users forbidden", localServer.handleUsers, sales, http.MethodGet, "/api/users", ``},
+		{"reset password forbidden", localServer.handleResetUserPassword, sales, http.MethodPost, "/api/users/reset-password", `{}`},
+		{"hpa forbidden", localServer.handleHPAPeakDemo, sales, http.MethodGet, "/api/demo/hpa-peak", ``},
+		{"schedule job forbidden", localServer.handleScheduleJobs, sales, http.MethodPost, "/api/schedules/jobs", `{}`},
+		{"production confirm forbidden", localServer.handleProductionConfirm, sales, http.MethodPost, "/api/production/confirm", `{}`},
+		{"production start forbidden", localServer.handleProductionStart, sales, http.MethodPost, "/api/production/start", `{}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			req = req.WithContext(context.WithValue(req.Context(), claimsContextKey{}, tt.claims))
+			res := httptest.NewRecorder()
+			tt.handler(res, req)
+			if res.Code != http.StatusForbidden {
+				t.Fatalf("expected forbidden, got %d body=%s", res.Code, res.Body.String())
+			}
+		})
 	}
 }
 
@@ -1006,6 +1330,117 @@ func TestProductionHelperCompletionAndOrderIDFromTime(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreCompleteProduction(t *testing.T) {
+	store := NewMemoryStore()
+	claims := auth.Claims{Subject: "scheduler", Role: domain.RoleScheduler, LineID: "A"}
+	productionDay := mustAPIDate(t, "2026-05-02")
+	store.orders["ORD-COMPLETE"] = domain.Order{
+		ID:        "ORD-COMPLETE",
+		Customer:  "ACME",
+		LineID:    "A",
+		Quantity:  100,
+		Priority:  domain.PriorityHigh,
+		Status:    domain.StatusInProgress,
+		DueDate:   productionDay,
+		CreatedBy: "sales",
+	}
+	store.allocations = []domain.ScheduleAllocation{{
+		OrderID:  "ORD-COMPLETE",
+		LineID:   "A",
+		Date:     productionDay,
+		Quantity: 100,
+		Priority: domain.PriorityHigh,
+		Status:   domain.StatusInProgress,
+	}}
+	resp, err := store.ConfirmProduction(productionConfirmRequest{
+		OrderID:          "ORD-COMPLETE",
+		ProducedQuantity: 100,
+		ProductionDate:   "2026-05-02",
+	}, claims)
+	if err != nil {
+		t.Fatalf("complete production failed: %v", err)
+	}
+	if resp.Order.Status != domain.StatusCompleted || resp.Remainder != nil {
+		t.Fatalf("expected completed production without remainder, got %+v", resp)
+	}
+}
+
+func TestValidationHelpers(t *testing.T) {
+	store := NewMemoryStore()
+	_, err := validateOrderRequest(createOrderRequest{Customer: "A", LineID: "missing", Quantity: 25, DueDate: "2026-05-02"}, store.lines, mustAPIDate(t, "2026-05-01"))
+	if err == nil || !strings.Contains(err.Error(), errProductionLineNotFound) {
+		t.Fatalf("expected missing line validation error, got %v", err)
+	}
+	_, err = validateOrderRequest(createOrderRequest{Customer: "A", LineID: "A", Quantity: 25, Priority: "urgent", DueDate: "2026-05-02"}, store.lines, mustAPIDate(t, "2026-05-01"))
+	if err == nil || !strings.Contains(err.Error(), "priority") {
+		t.Fatalf("expected priority validation error, got %v", err)
+	}
+	if err := validateOrderFields("", 25, ""); err == nil {
+		t.Fatal("expected empty customer validation error")
+	}
+	if err := validateOrderFields("ACME", 25, strings.Repeat("x", 121)); err == nil {
+		t.Fatal("expected long note validation error")
+	}
+	if err := validateUsername(strings.Repeat("a", 41)); err == nil {
+		t.Fatal("expected long username validation error")
+	}
+	if err := validateUsername("bad/name"); err == nil {
+		t.Fatal("expected invalid username character error")
+	}
+	if err := validateUserRole(domain.Role("owner"), "", store.lines); err == nil {
+		t.Fatal("expected invalid role error")
+	}
+	if err := validateUserRole(domain.RoleScheduler, "missing", store.lines); err == nil {
+		t.Fatal("expected invalid scheduler line error")
+	}
+	if _, err := validateFutureDueDate("bad", mustAPIDate(t, "2026-05-01")); err == nil {
+		t.Fatal("expected invalid due date format")
+	}
+	if _, err := validateFutureDueDate("2026-05-01", mustAPIDate(t, "2026-05-01")); err == nil {
+		t.Fatal("expected unacceptable due date")
+	}
+	if !effectiveCurrentDate(time.Time{}).Equal(mustAPIDate(t, "2026-04-30")) {
+		t.Fatal("expected effective current date to use nowUTC")
+	}
+	if _, err := currentDateInLineTimezone(domain.ProductionLine{ID: "A", Timezone: "Mars/Base"}, time.Now()); err == nil {
+		t.Fatal("expected invalid timezone error")
+	}
+}
+
+func TestScheduleRequestAndTranslationHelpers(t *testing.T) {
+	original := scheduleRequest{LineID: "A", StartDate: "2026-05-01", CurrentDate: "2026-04-30", OrderIDs: []string{"B", "A"}, ResolutionOrderIDs: []string{"R2", "R1"}, PreviewID: "p", DraftOrder: &createOrderRequest{Customer: "draft"}}
+	normalized := normalizedPreviewRequest(original)
+	if normalized.PreviewID != "" || normalized.DraftOrder != nil || strings.Join(normalized.OrderIDs, ",") != "A,B" || strings.Join(normalized.ResolutionOrderIDs, ",") != "R1,R2" {
+		t.Fatalf("unexpected normalized request: %+v", normalized)
+	}
+	if sameScheduleRequest(original, normalized) {
+		t.Fatal("different requests should not match")
+	}
+	if sameScheduleRequest(scheduleRequest{OrderIDs: []string{"A"}}, scheduleRequest{OrderIDs: []string{"B"}}) {
+		t.Fatal("different order IDs should not match")
+	}
+	if sameScheduleRequest(scheduleRequest{ResolutionOrderIDs: []string{"A"}}, scheduleRequest{ResolutionOrderIDs: []string{"B"}}) {
+		t.Fatal("different resolution order IDs should not match")
+	}
+	if got := zhUserMessage("json: unknown field \"extra\""); got != "請求包含不支援的欄位。" {
+		t.Fatalf("unexpected unknown-field translation: %s", got)
+	}
+	if got := zhUserMessage(errOrderNotFoundPrefix + "ORD-1"); !strings.Contains(got, "ORD-1") {
+		t.Fatalf("unexpected order-not-found translation: %s", got)
+	}
+	if got := zhUserMessage(""); got == "" {
+		t.Fatal("empty error should produce fallback message")
+	}
+	if got := zhUserMessage("already translated 中文"); got != "already translated 中文" {
+		t.Fatalf("CJK message should pass through, got %s", got)
+	}
+	res := httptest.NewRecorder()
+	setSecurityHeaders(res, "")
+	if res.Header().Get("Access-Control-Allow-Origin") != "*" {
+		t.Fatal("empty CORS origin should default to wildcard")
+	}
+}
+
 func TestExecuteScheduleJobRespectsLineLockAndCancelledStatus(t *testing.T) {
 	store := NewMemoryStore()
 	server := NewServerWithPublisher("secret", store, &recordingPublisher{})
@@ -1843,6 +2278,69 @@ func TestSalesConfirmDraftPreviewDefersConflictedPendingOrder(t *testing.T) {
 
 	verifyOrderDeferredStatus(t, server, salesToken, deferredID)
 	verifyOrderNotInCalendarPending(t, server, salesToken, deferredID)
+}
+
+func TestSalesConfirmDraftPreviewCanDeferCurrentDraftOrder(t *testing.T) {
+	store := NewMemoryStore()
+	server := NewServer("secret", store)
+	salesToken := login(t, server, "sales", "demo")
+	existingOrderIDs := []string{}
+	for range 4 {
+		existingOrderIDs = append(existingOrderIDs, createOrderWithPriorityAndDue(t, server, salesToken, "A", "high", "2026-06-02"))
+	}
+
+	bodyStr := `{"lineId":"A","startDate":"2026-06-02","currentDate":"2026-06-01","draftOrder":{"customer":"Blocked Draft","lineId":"A","quantity":2500,"priority":"high","dueDate":"2026-06-02"}}`
+	previewID, conflicts := getSalesDraftPreview(t, server, salesToken, bodyStr)
+	if len(conflicts) == 0 {
+		t.Fatalf("expected draft preview conflict, got 0 conflicts")
+	}
+
+	confirmBody := bytes.NewBufferString(`{"previewId":"` + previewID + `","deferDraft":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/orders/preview-confirm", confirmBody)
+	req.Header.Set("Authorization", "Bearer "+salesToken)
+	res := httptest.NewRecorder()
+	server.ServeHTTP(res, req)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("confirm preview failed: %d %s", res.Code, res.Body.String())
+	}
+	var deferredDraft domain.Order
+	if err := json.Unmarshal(res.Body.Bytes(), &deferredDraft); err != nil {
+		t.Fatalf("decode deferred draft: %v", err)
+	}
+	if deferredDraft.Status != domain.StatusRejected || deferredDraft.RejectionReason != "" || deferredDraft.RejectedBy != "user-sales" {
+		t.Fatalf("expected draft moved to sales follow-up without reason, got %+v", deferredDraft)
+	}
+	for _, existingOrderID := range existingOrderIDs {
+		if store.orders[existingOrderID].Status != domain.StatusPending {
+			t.Fatalf("existing order %s should remain pending, got %+v", existingOrderID, store.orders[existingOrderID])
+		}
+	}
+}
+
+func TestSalesConfirmDraftPreviewRejectsMixedDraftAndPendingDefer(t *testing.T) {
+	server := NewServer("secret", NewMemoryStore())
+	salesToken := login(t, server, "sales", "demo")
+	for range 4 {
+		createOrderWithPriorityAndDue(t, server, salesToken, "A", "low", "2026-06-02")
+	}
+
+	bodyStr := `{"lineId":"A","startDate":"2026-06-02","currentDate":"2026-06-01","draftOrder":{"customer":"Blocked Draft","lineId":"A","quantity":2500,"priority":"high","dueDate":"2026-06-02"}}`
+	previewID, conflicts := getSalesDraftPreview(t, server, salesToken, bodyStr)
+	if len(conflicts) == 0 {
+		t.Fatalf("expected draft preview conflict, got 0 conflicts")
+	}
+
+	confirmBody := bytes.NewBufferString(`{"previewId":"` + previewID + `","deferDraft":true,"deferredOrderIds":["` + conflicts[0] + `"]}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/orders/preview-confirm", confirmBody)
+	req.Header.Set("Authorization", "Bearer "+salesToken)
+	res := httptest.NewRecorder()
+	server.ServeHTTP(res, req)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("expected mixed defer request to fail, got %d %s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), "取消目前草稿訂單時不能同時改送其他待排程訂單") {
+		t.Fatalf("expected clear mixed defer error, got %s", res.Body.String())
+	}
 }
 
 func TestSalesDraftPreviewRejectsTodayDueDate(t *testing.T) {

@@ -2,12 +2,15 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRunHealthcheckSucceedsOn2xx(t *testing.T) {
@@ -79,6 +82,31 @@ func TestRunHealthcheckReportsNon2xxStatus(t *testing.T) {
 	}
 }
 
+func TestCheckHealthAcceptsBoundary2xxAndClosesBody(t *testing.T) {
+	body := &trackingReadCloser{}
+	err := checkHealth(context.Background(), responseClient{response: &http.Response{
+		StatusCode: http.StatusMultipleChoices - 1,
+		Body:       body,
+	}}, "http://example.test/readyz", time.Second)
+	if err != nil {
+		t.Fatalf("checkHealth returned error: %v", err)
+	}
+	if !body.closed {
+		t.Fatal("expected response body to be closed")
+	}
+}
+
+func TestEnvUsesFallbackAndOverride(t *testing.T) {
+	t.Setenv("WOMS_HEALTHCHECK_TEST", "")
+	if got := env("WOMS_HEALTHCHECK_TEST", "fallback"); got != "fallback" {
+		t.Fatalf("expected fallback, got %q", got)
+	}
+	t.Setenv("WOMS_HEALTHCHECK_TEST", "configured")
+	if got := env("WOMS_HEALTHCHECK_TEST", "fallback"); got != "configured" {
+		t.Fatalf("expected configured env, got %q", got)
+	}
+}
+
 func lookup(values map[string]string) func(string) string {
 	return func(key string) string {
 		return values[key]
@@ -91,6 +119,27 @@ type errorClient struct {
 
 func (c errorClient) Do(*http.Request) (*http.Response, error) {
 	return nil, c.err
+}
+
+type responseClient struct {
+	response *http.Response
+}
+
+func (c responseClient) Do(*http.Request) (*http.Response, error) {
+	return c.response, nil
+}
+
+type trackingReadCloser struct {
+	closed bool
+}
+
+func (b *trackingReadCloser) Read([]byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (b *trackingReadCloser) Close() error {
+	b.closed = true
+	return nil
 }
 
 func newHealthcheckTestServer(t *testing.T, handler http.Handler) *httptest.Server {

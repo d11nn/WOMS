@@ -49,4 +49,30 @@ func TestVerifyPasswordSupportsBoundedLegacySHA256Hashes(t *testing.T) {
 	if VerifyPassword(strings.Join(parts, "$"), "temporary-secret") {
 		t.Fatal("expected excessive legacy sha256 iterations to be rejected")
 	}
+	parts[1] = "not-a-number"
+	if VerifyPassword(strings.Join(parts, "$"), "temporary-secret") {
+		t.Fatal("expected malformed legacy iterations to be rejected")
+	}
+	parts[1] = "1"
+	parts[2] = "not base64"
+	if VerifyPassword(strings.Join(parts, "$"), "temporary-secret") {
+		t.Fatal("expected malformed salt to be rejected")
+	}
+	parts[2] = "c2FsdA"
+	parts[3] = "not base64"
+	if VerifyPassword(strings.Join(parts, "$"), "temporary-secret") {
+		t.Fatal("expected malformed digest to be rejected")
+	}
+	if VerifyPassword("sha256$1$c2FsdA", "temporary-secret") {
+		t.Fatal("expected malformed legacy hash shape to be rejected")
+	}
+	if VerifyPassword(hash, "") {
+		t.Fatal("expected empty password to be rejected")
+	}
+}
+
+func TestHashPasswordRejectsBlankPassword(t *testing.T) {
+	if _, err := HashPassword("   "); err == nil {
+		t.Fatal("expected blank password error")
+	}
 }

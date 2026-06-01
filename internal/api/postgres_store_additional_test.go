@@ -349,10 +349,10 @@ func TestPostgresStore_ConfirmPreviewOrder(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectExec("INSERT INTO orders").WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("INSERT INTO audit_logs").WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectExec("DELETE FROM schedule_previews").
-		WithArgs("preview-1").
-		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("UPDATE production_lines").WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("DELETE FROM schedule_previews").
+		WithArgs("preview-1", "sales-1", domain.RoleSales).
+		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 
 	order, err := store.ConfirmPreviewOrder(confirmPreviewRequest{PreviewID: "preview-1"}, claims)
@@ -361,6 +361,89 @@ func TestPostgresStore_ConfirmPreviewOrder(t *testing.T) {
 	}
 	if order.Customer != "ACME" {
 		t.Errorf("unexpected order: %+v", order)
+	}
+}
+
+func TestPostgresStore_ConfirmPreviewOrderTxRejectsStalePreviewDelete(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+	mock.MatchExpectationsInOrder(false)
+
+	store := &PostgresStore{
+		MemoryStore: NewMemoryStore(),
+		db:          db,
+	}
+	claims := auth.Claims{Subject: "sales-1", Role: domain.RoleSales}
+	draft := createOrderRequest{
+		Customer: "ACME",
+		LineID:   "A",
+		Quantity: 500,
+		Priority: domain.PriorityLow,
+		DueDate:  "2026-06-03",
+	}
+
+	mock.ExpectQuery("SELECT id, name, capacity_per_day").
+		WithArgs("A", "Asia/Taipei").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "capacity_per_day", "timezone", "schedule_revision"}).
+			AddRow("A", "Line A", 1000, "Asia/Taipei", 1))
+	mock.ExpectBegin()
+	mock.ExpectExec("INSERT INTO orders").WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO audit_logs").WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("UPDATE production_lines").WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("DELETE FROM schedule_previews").
+		WithArgs("preview-1", "sales-1", domain.RoleSales).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectRollback()
+
+	_, err = store.confirmPreviewOrderTx("preview-1", draft, nil, claims)
+	if err == nil || !strings.Contains(err.Error(), "preview result expired or not found") {
+		t.Fatalf("expected stale preview error, got %v", err)
+	}
+}
+
+func TestPostgresStore_ConfirmPreviewOrderTxRejectsChangedDeferredOrder(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+	mock.MatchExpectationsInOrder(false)
+
+	store := &PostgresStore{
+		MemoryStore: NewMemoryStore(),
+		db:          db,
+	}
+	claims := auth.Claims{Subject: "sales-1", Role: domain.RoleSales}
+	draft := createOrderRequest{
+		Customer: "ACME",
+		LineID:   "A",
+		Quantity: 500,
+		Priority: domain.PriorityLow,
+		DueDate:  "2026-06-03",
+	}
+	deferredOrders := []domain.Order{{
+		ID:        "ORD-DEFER",
+		LineID:    "A",
+		Status:    domain.StatusPending,
+		CreatedBy: "sales-1",
+	}}
+
+	mock.ExpectQuery("SELECT id, name, capacity_per_day").
+		WithArgs("A", "Asia/Taipei").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "capacity_per_day", "timezone", "schedule_revision"}).
+			AddRow("A", "Line A", 1000, "Asia/Taipei", 1))
+	mock.ExpectBegin()
+	mock.ExpectExec("INSERT INTO orders").WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO audit_logs").WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("UPDATE orders").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectRollback()
+
+	_, err = store.confirmPreviewOrderTx("preview-1", draft, deferredOrders, claims)
+	if err == nil || !strings.Contains(err.Error(), "deferred order changed before confirmation") {
+		t.Fatalf("expected changed deferred order error, got %v", err)
 	}
 }
 

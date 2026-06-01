@@ -1514,6 +1514,8 @@ test("sales draft conflict preview shows successful draft schedule and excludes 
     await document.getElementById("confirm-preview-order").dispatchEvent({ type: "click" });
     await settleApp();
     assert.equal(document.getElementById("message-title").textContent, "已加入待排程", document.getElementById("message-body").textContent);
+    assert.match(document.getElementById("message-body").textContent, /已勾選的衝突訂單會移到需業務處理/);
+    assert.doesNotMatch(document.getElementById("message-body").textContent, /已取消選取/);
   } finally {
     restoreGlobals();
   }

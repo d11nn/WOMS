@@ -966,11 +966,15 @@ func (s *PostgresStore) confirmPreviewOrderTx(previewID string, draft createOrde
 		return domain.Order{}, err
 	}
 	for _, deferred := range deferredOrders {
-		if _, err := tx.Exec(`
+		result, err := tx.Exec(`
 			UPDATE orders
 			SET status = $2, rejection_reason = $3, rejected_by = $4, rejected_at = $5, updated_at = $5
-			WHERE id = $1
-		`, deferred.ID, domain.StatusRejected, salesConflictDeferredReason, claims.Subject, now); err != nil {
+			WHERE id = $1 AND status = $6 AND created_by = $7 AND line_id = $8
+		`, deferred.ID, domain.StatusRejected, salesConflictDeferredReason, claims.Subject, now, domain.StatusPending, claims.Subject, deferred.LineID)
+		if err != nil {
+			return domain.Order{}, err
+		}
+		if err := requireOneRowAffected(result, "deferred order changed before confirmation"); err != nil {
 			return domain.Order{}, err
 		}
 		if _, err := insertAuditTx(tx, claims.Subject, "order.sales_conflict_defer", deferred.ID, salesConflictDeferredReason); err != nil {
@@ -980,13 +984,28 @@ func (s *PostgresStore) confirmPreviewOrderTx(previewID string, draft createOrde
 	if _, err := tx.Exec(bumpProductionLineRevisionSQL, order.LineID); err != nil {
 		return domain.Order{}, err
 	}
-	if _, err := tx.Exec("DELETE FROM schedule_previews WHERE id = $1", previewID); err != nil {
+	result, err := tx.Exec("DELETE FROM schedule_previews WHERE id = $1 AND actor_id = $2 AND actor_role = $3 AND expires_at > NOW()", previewID, claims.Subject, claims.Role)
+	if err != nil {
+		return domain.Order{}, err
+	}
+	if err := requireOneRowAffected(result, "preview result expired or not found"); err != nil {
 		return domain.Order{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return domain.Order{}, err
 	}
 	return order, nil
+}
+
+func requireOneRowAffected(result sql.Result, message string) error {
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return errors.New(message)
+	}
+	return nil
 }
 
 func (s *PostgresStore) GetScheduleJob(id string) (domain.ScheduleJob, bool) {

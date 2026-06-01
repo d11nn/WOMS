@@ -372,7 +372,7 @@ document.getElementById("confirm-preview-order").addEventListener("click", async
     focusCreatedOrder(order);
     closePreviewPage();
     document.getElementById("order-form").reset();
-    showMessage("已加入待排程", "新訂單已正式放入待排程；已取消選取的衝突訂單會移到需業務處理。");
+    showMessage("已加入待排程", "新訂單已正式放入待排程；已勾選的衝突訂單會移到需業務處理。");
     await refreshWorkspace();
   } catch (error) {
     showMessage("無法加入待排程", error.message, "warn");

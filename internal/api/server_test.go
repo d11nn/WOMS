@@ -65,23 +65,8 @@ func TestAPIErrorMessagesAreZhTW(t *testing.T) {
 	}
 }
 
-func TestLoadHPAAutoscalingStateReadsKubernetesAPIs(t *testing.T) {
-	t.Setenv("KUBERNETES_SERVICE_HOST", "kubernetes.test")
-	t.Setenv("KUBERNETES_SERVICE_PORT", "443")
-	t.Setenv("HPA_DEMO_POD_LABEL_SELECTOR", "app=test")
-	hpaAutoscalingCache.Lock()
-	hpaAutoscalingCache.key = ""
-	hpaAutoscalingCache.expires = time.Time{}
-	hpaAutoscalingCache.state = nil
-	hpaAutoscalingCache.Unlock()
-
-	dir := t.TempDir()
-	oldTokenPath := kubernetesServiceAccountTokenPath
-	oldCAPath := kubernetesServiceAccountCAPath
-	kubernetesServiceAccountTokenPath = dir + "/token"
-	kubernetesServiceAccountCAPath = dir + "/ca.crt"
-	oldClientFactory := newKubernetesHTTPClient
-	newKubernetesHTTPClient = func(string, *x509.CertPool) *http.Client {
+func mockKubernetesClient(t *testing.T) func(string, *x509.CertPool) *http.Client {
+	return func(string, *x509.CertPool) *http.Client {
 		return &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
 				t.Fatalf("unexpected authorization header %q", got)
@@ -103,6 +88,25 @@ func TestLoadHPAAutoscalingStateReadsKubernetesAPIs(t *testing.T) {
 			return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Body: io.NopCloser(strings.NewReader(body))}, nil
 		})}
 	}
+}
+
+func TestLoadHPAAutoscalingStateReadsKubernetesAPIs(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "kubernetes.test")
+	t.Setenv("KUBERNETES_SERVICE_PORT", "443")
+	t.Setenv("HPA_DEMO_POD_LABEL_SELECTOR", "app=test")
+	hpaAutoscalingCache.Lock()
+	hpaAutoscalingCache.key = ""
+	hpaAutoscalingCache.expires = time.Time{}
+	hpaAutoscalingCache.state = nil
+	hpaAutoscalingCache.Unlock()
+
+	dir := t.TempDir()
+	oldTokenPath := kubernetesServiceAccountTokenPath
+	oldCAPath := kubernetesServiceAccountCAPath
+	kubernetesServiceAccountTokenPath = dir + "/token"
+	kubernetesServiceAccountCAPath = dir + "/ca.crt"
+	oldClientFactory := newKubernetesHTTPClient
+	newKubernetesHTTPClient = mockKubernetesClient(t)
 	t.Cleanup(func() {
 		kubernetesServiceAccountTokenPath = oldTokenPath
 		kubernetesServiceAccountCAPath = oldCAPath
@@ -1326,7 +1330,7 @@ func TestProductionHelperCompletionAndOrderIDFromTime(t *testing.T) {
 	}
 }
 
-func TestMemoryStoreCompleteProductionAndValidationHelpers(t *testing.T) {
+func TestMemoryStoreCompleteProduction(t *testing.T) {
 	store := NewMemoryStore()
 	claims := auth.Claims{Subject: "scheduler", Role: domain.RoleScheduler, LineID: "A"}
 	productionDay := mustAPIDate(t, "2026-05-02")
@@ -1359,8 +1363,11 @@ func TestMemoryStoreCompleteProductionAndValidationHelpers(t *testing.T) {
 	if resp.Order.Status != domain.StatusCompleted || resp.Remainder != nil {
 		t.Fatalf("expected completed production without remainder, got %+v", resp)
 	}
+}
 
-	_, err = validateOrderRequest(createOrderRequest{Customer: "A", LineID: "missing", Quantity: 25, DueDate: "2026-05-02"}, store.lines, mustAPIDate(t, "2026-05-01"))
+func TestValidationHelpers(t *testing.T) {
+	store := NewMemoryStore()
+	_, err := validateOrderRequest(createOrderRequest{Customer: "A", LineID: "missing", Quantity: 25, DueDate: "2026-05-02"}, store.lines, mustAPIDate(t, "2026-05-01"))
 	if err == nil || !strings.Contains(err.Error(), errProductionLineNotFound) {
 		t.Fatalf("expected missing line validation error, got %v", err)
 	}
@@ -1398,7 +1405,9 @@ func TestMemoryStoreCompleteProductionAndValidationHelpers(t *testing.T) {
 	if _, err := currentDateInLineTimezone(domain.ProductionLine{ID: "A", Timezone: "Mars/Base"}, time.Now()); err == nil {
 		t.Fatal("expected invalid timezone error")
 	}
+}
 
+func TestScheduleRequestAndTranslationHelpers(t *testing.T) {
 	original := scheduleRequest{LineID: "A", StartDate: "2026-05-01", CurrentDate: "2026-04-30", OrderIDs: []string{"B", "A"}, ResolutionOrderIDs: []string{"R2", "R1"}, PreviewID: "p", DraftOrder: &createOrderRequest{Customer: "draft"}}
 	normalized := normalizedPreviewRequest(original)
 	if normalized.PreviewID != "" || normalized.DraftOrder != nil || strings.Join(normalized.OrderIDs, ",") != "A,B" || strings.Join(normalized.ResolutionOrderIDs, ",") != "R1,R2" {

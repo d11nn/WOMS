@@ -376,10 +376,12 @@ func TestPostgresStore_ConfirmPreviewOrderValidationBranches(t *testing.T) {
 	validDraft := `{"customer":"ACME","lineId":"A","quantity":100,"priority":"low","dueDate":"2026-06-03"}`
 
 	for _, tt := range []struct {
-		name      string
-		row       *sqlmock.Rows
-		err       error
-		wantError string
+		name             string
+		row              *sqlmock.Rows
+		err              error
+		wantError        string
+		deferDraft       bool
+		deferredOrderIDs []string
 	}{
 		{name: "preview expired", err: sql.ErrNoRows, wantError: "preview result expired or not found"},
 		{name: "database error", err: errors.New("preview db error"), wantError: "preview db error"},
@@ -394,9 +396,9 @@ func TestPostgresStore_ConfirmPreviewOrderValidationBranches(t *testing.T) {
 		{name: "invalid conflicts json", row: sqlmock.NewRows([]string{"actor_id", "actor_role", "line_id", "allocations", "conflicts", "draft_order"}).
 			AddRow("sales-1", string(domain.RoleSales), "A", []byte("[]"), []byte("{"), sql.NullString{String: validDraft, Valid: true}), wantError: "unexpected end of JSON input"},
 		{name: "defer draft with pending ids", row: sqlmock.NewRows([]string{"actor_id", "actor_role", "line_id", "allocations", "conflicts", "draft_order"}).
-			AddRow("sales-1", string(domain.RoleSales), "A", []byte("[]"), []byte(`[{"orderId":"PREVIEW-DRAFT"}]`), sql.NullString{String: validDraft, Valid: true}), wantError: "draft defer cannot include deferred pending orders"},
+			AddRow("sales-1", string(domain.RoleSales), "A", []byte("[]"), []byte(`[{"orderId":"PREVIEW-DRAFT"}]`), sql.NullString{String: validDraft, Valid: true}), wantError: "draft defer cannot include deferred pending orders", deferDraft: true, deferredOrderIDs: []string{"ORD-1"}},
 		{name: "defer draft without conflicts", row: sqlmock.NewRows([]string{"actor_id", "actor_role", "line_id", "allocations", "conflicts", "draft_order"}).
-			AddRow("sales-1", string(domain.RoleSales), "A", []byte("[]"), []byte("[]"), sql.NullString{String: validDraft, Valid: true}), wantError: "draft can be deferred only when preview has conflicts"},
+			AddRow("sales-1", string(domain.RoleSales), "A", []byte("[]"), []byte("[]"), sql.NullString{String: validDraft, Valid: true}), wantError: "draft can be deferred only when preview has conflicts", deferDraft: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			expect := mock.ExpectQuery("SELECT actor_id, actor_role, line_id, allocations, conflicts, draft_order").
@@ -406,12 +408,10 @@ func TestPostgresStore_ConfirmPreviewOrderValidationBranches(t *testing.T) {
 			} else {
 				expect.WillReturnRows(tt.row)
 			}
-			req := confirmPreviewRequest{PreviewID: "preview-" + strings.ReplaceAll(tt.name, " ", "-")}
-			if strings.Contains(tt.wantError, "draft defer") || strings.Contains(tt.wantError, "without conflicts") || strings.Contains(tt.wantError, "deferred only") {
-				req.DeferDraft = true
-			}
-			if strings.Contains(tt.wantError, "pending ids") || strings.Contains(tt.wantError, "cannot include") {
-				req.DeferredOrderIDs = []string{"ORD-1"}
+			req := confirmPreviewRequest{
+				PreviewID:        "preview-" + strings.ReplaceAll(tt.name, " ", "-"),
+				DeferDraft:       tt.deferDraft,
+				DeferredOrderIDs: tt.deferredOrderIDs,
 			}
 			_, err := store.ConfirmPreviewOrder(req, claims)
 			if err == nil || !strings.Contains(err.Error(), tt.wantError) {

@@ -1974,3 +1974,58 @@ func TestPostgresStore_ConfirmProduction_PartialSuccessCreatesRemainder(t *testi
 		t.Fatalf("expected pending remainder, got %+v", resp.Remainder)
 	}
 }
+
+func TestPostgresStore_ConfirmPreviewOrderTxUpdatesExistingOrder(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+	mock.MatchExpectationsInOrder(false)
+
+	store := &PostgresStore{
+		MemoryStore: NewMemoryStore(),
+		db:          db,
+	}
+	claims := auth.Claims{Subject: "sales-1", Role: domain.RoleSales}
+	draft := createOrderRequest{
+		ID:       "ORD-EXIST",
+		Customer: "ACME",
+		LineID:   "A",
+		Quantity: 500,
+		Priority: domain.PriorityLow,
+		DueDate:  "2026-06-03",
+	}
+
+	createdAt := time.Now().Add(-10 * time.Minute)
+
+	// Mock SELECT created_by, status, created_at FROM orders WHERE id = $1
+	mock.ExpectQuery("SELECT created_by, status, created_at FROM orders WHERE id =").
+		WithArgs("ORD-EXIST").
+		WillReturnRows(sqlmock.NewRows([]string{"created_by", "status", "created_at"}).
+			AddRow("sales-1", "待排程", createdAt))
+
+	mock.ExpectQuery("SELECT id, name, capacity_per_day").
+		WithArgs("A", "Asia/Taipei").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "capacity_per_day", "timezone", "schedule_revision"}).
+			AddRow("A", "Line A", 1000, "Asia/Taipei", 1))
+
+	mock.ExpectBegin()
+	// Mock UPDATE orders SET quantity = $2... WHERE id = $1
+	mock.ExpectExec("UPDATE orders SET quantity =").WillReturnResult(sqlmock.NewResult(1, 1))
+	// Mock INSERT INTO audit_logs for order.resubmit
+	mock.ExpectExec("INSERT INTO audit_logs").WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("UPDATE production_lines").WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("DELETE FROM schedule_previews").
+		WithArgs("preview-1", "sales-1", domain.RoleSales).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	order, err := store.confirmPreviewOrderTx("preview-1", draft, nil, false, claims)
+	if err != nil {
+		t.Fatalf("confirmPreviewOrderTx failed: %v", err)
+	}
+	if order.ID != "ORD-EXIST" || order.Status != domain.StatusPending {
+		t.Fatalf("expected updated pending order, got %+v", order)
+	}
+}

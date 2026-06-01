@@ -50,6 +50,10 @@ WOMS_INTEGRATION_TESTS=1 DATABASE_URL=postgres://... REDIS_ADDR=127.0.0.1:6379 n
    - 以 `scheduler-a` / `demo` 登入。
    - 使用一般桌機瀏覽器寬度。
    - 確認待排程訂單卡片的 `待排程` badge 單行顯示，`程` 不可換行。
+   - 選取高優先級待排程訂單進行試排，在預覽月曆中確認：
+     - 當前選取的試排訂單被高亮為橘色粗邊框（preview-draft）。
+     - 受到排程 Conflict 影響而被移到其他日期的訂單在原日期會顯示灰色虛線框「已移出」。
+     - 受到 Conflict 影響而延後交期的訂單，其卡片顯示的交期已動態更新為延後的最新排產日期。
    - 改以 `sales` / `demo` 登入，確認待排程卡片 badge 形狀與間距一致。
 
 2. Sales 待排程訂單修改：
@@ -64,6 +68,8 @@ WOMS_INTEGRATION_TESTS=1 DATABASE_URL=postgres://... REDIS_ADDR=127.0.0.1:6379 n
    - 以 `sales` / `demo` 登入。
    - 建立未來交期的草稿訂單並開啟 schedule preview。
    - 點 `待排程`：preview calendar 顯示本次 sales draft preview allocations。
+   - 確認受到 Conflict 影響而被移到其他日期的訂單在原日期會顯示灰色虛線框並標示「已移出」。
+   - 確認受到 Conflict 影響而延後交期的訂單，其卡片顯示的交期已動態更新為延後的最新排產日期。
    - 點 `已排程`：preview calendar 切換為正式 persisted calendar allocations。
    - 再切回 `待排程`，確認 draft preview allocations 回來。
    - 在有衝突的 preview 中，確認「接受目前解法並加入待排程」仍會建立待排程訂單，且勾選的衝突待排程訂單會移到 `需業務處理`。

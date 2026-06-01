@@ -333,3 +333,26 @@ function waterlineTone(ratio) {
   }
   return "safe";
 }
+
+function dateOnly(value) {
+  if (!value) return "";
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toISOString().slice(0, 10);
+}
+
+export function computeRescheduledDueDates(allocations) {
+  const datesByOrder = {};
+  for (const allocation of allocations) {
+    if (allocation.movedFromPreview) {
+      continue;
+    }
+    const orderId = allocation.orderId;
+    if (!orderId) continue;
+    const dateStr = dateOnly(allocation.date);
+    if (!datesByOrder[orderId] || dateStr > datesByOrder[orderId]) {
+      datesByOrder[orderId] = dateStr;
+    }
+  }
+  return datesByOrder;
+}

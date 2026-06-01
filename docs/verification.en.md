@@ -50,6 +50,10 @@ Run the app in a browser-capable environment, then verify:
    - Log in as `scheduler-a` / `demo`.
    - Use a normal desktop browser width.
    - Confirm pending order cards show the `待排程` status badge on one line; `程` must not wrap.
+   - Select high-priority pending orders to run preview, and verify on the preview calendar:
+     - The currently selected preview orders are highlighted with a thick orange border (preview-draft).
+     - Orders moved to other dates due to schedule conflicts show a dashed gray box "已移出" (Moved Out) on their original date.
+     - Conflicted orders with deferred completion dates show their updated (rescheduled) due dates dynamically.
    - Log in as `sales` / `demo` and confirm pending cards use the same badge shape and spacing.
 
 2. Sales pending order editing:
@@ -64,6 +68,8 @@ Run the app in a browser-capable environment, then verify:
    - Log in as `sales` / `demo`.
    - Create a draft order with a future due date and open the schedule preview.
    - Click `待排程`: the preview calendar shows the current sales draft preview allocations.
+   - Confirm orders moved to other dates due to schedule conflicts show a dashed gray box with a "已移出" label.
+   - Confirm conflicted orders with deferred completion dates show their updated (rescheduled) due dates dynamically.
    - Click `已排程`: the preview calendar switches to formal persisted calendar allocations.
    - Switch back to `待排程` and confirm the draft preview allocations return.
    - In a conflicted preview, confirm `接受目前解法並加入待排程` still creates a pending order and moves checked conflicted pending orders to `需業務處理`.

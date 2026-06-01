@@ -22,6 +22,7 @@ import {
   tomorrowDateKey,
   waterlineMetrics,
   unacceptableDueDateMessage,
+  computeRescheduledDueDates,
 } from "./ui.js";
 
 const statuses = ["待排程", "已排程", "生產中", "已完成", "需業務處理", "已取消"];
@@ -1249,7 +1250,9 @@ function renderCalendar() {
   document.getElementById("calendar-title").textContent = `${year}-${String(monthIndex + 1).padStart(2, "0")}`;
 
   renderCalendarModeControl();
-  const groups = groupAllocationsByDate(mainCalendarAllocations());
+  const mainAllocs = mainCalendarAllocations();
+  state.rescheduledDueDates = computeRescheduledDueDates(mainAllocs);
+  const groups = groupAllocationsByDate(mainAllocs);
   const grid = document.getElementById("calendar-grid");
   grid.innerHTML = "";
   for (const day of monthGrid(year, monthIndex)) {
@@ -1486,8 +1489,9 @@ function renderPreviewCalendar(allocations) {
     ? previewCalendarAllocationsForMode(mode, pendingAllocations)
     : markedPreviewAllocations;
   const calendarAllocations = isSalesDraft
-    ? visibleAllocations
+    ? [...visibleAllocations, ...movedFromAllocations]
     : [...mergePreviewCalendarAllocations(markedPreviewAllocations, state.calendarAllocations, resolutionOrderIds), ...movedFromAllocations];
+  state.rescheduledDueDates = computeRescheduledDueDates(calendarAllocations);
   const year = state.calendarDate.getUTCFullYear();
   const monthIndex = state.calendarDate.getUTCMonth();
   const groups = groupAllocationsByDate(calendarAllocations);
@@ -1591,9 +1595,14 @@ function buildMovedFromAllocations(previewAllocations) {
     }
     previewDatesByOrder.get(allocation.orderId).add(dateOnly(allocation.date));
   }
+  const isSalesDraft = state.preview?.kind === "sales-draft";
+  const originalAllocations = isSalesDraft
+    ? state.pendingCalendarAllocations
+    : state.calendarAllocations;
+  const statusToMatch = isSalesDraft ? statuses[0] : statuses[1];
   const movedFrom = [];
-  for (const allocation of state.calendarAllocations) {
-    if (allocation.status !== statuses[1]) {
+  for (const allocation of originalAllocations) {
+    if (allocation.status !== statusToMatch) {
       continue;
     }
     const previewDates = previewDatesByOrder.get(allocation.orderId);
@@ -1815,18 +1824,24 @@ function renderCalendarItem(allocation) {
   const quantityChangedClass = allocation.quantityChangedPreview ? "quantity-changed-preview" : "";
   const childOrderClass = isNewChildScheduledAllocation(allocation) ? "child-order-preview" : "";
   const conflictClass = allocation.conflictPreview ? "conflict-preview" : "";
-  const previewDraftClass = allocation.preview && (allocation.orderId === "PREVIEW-DRAFT" || state.preview?.request?.draftOrder?.id === allocation.orderId) ? "preview-draft" : "";
+  const isCurrentPreviewOrder = allocation.orderId === "PREVIEW-DRAFT"
+    || state.preview?.request?.draftOrder?.id === allocation.orderId
+    || (state.preview?.request?.orderIds && state.preview.request.orderIds.includes(allocation.orderId));
+  const previewDraftClass = allocation.preview && isCurrentPreviewOrder ? "preview-draft" : "";
   const attrs = actionable
     ? `type="button" data-calendar-order-id="${escapeHtml(allocation.orderId)}" data-calendar-date="${dateOnly(allocation.date)}"`
     : "";
   const movedNote = allocation.movedFromPreview ? "<span class=\"calendar-item-note\">已移出</span>" : "";
   const quantityNote = allocation.quantityChangedPreview ? "<span class=\"calendar-item-note\">數量調整</span>" : "";
   const childNote = isNewChildScheduledAllocation(allocation) ? "<span class=\"calendar-item-note\">子訂單</span>" : "";
+  const reschedDate = state.rescheduledDueDates?.[allocation.orderId];
+  const origDueDate = dateOnly(allocation.dueDate ?? allocation.date);
+  const displayDueDate = (reschedDate && reschedDate > origDueDate) ? reschedDate : origDueDate;
   return `
     <${tag} class="calendar-item ${priorityClass(allocation.priority)} ${allocation.preview ? "preview-item-inline" : ""} ${movedClass} ${movedFromClass} ${quantityChangedClass} ${childOrderClass} ${conflictClass} ${previewDraftClass}" ${attrs}>
       <strong>${escapeHtml(allocation.orderId)}</strong>
       <span>${escapeHtml(allocation.customer ?? "Preview")} · ${calendarDisplayQuantity(allocation).toLocaleString()} 片</span>
-      <span>交期 ${formatCalendarDueDate(allocation.dueDate ?? allocation.date)}</span>
+      <span>交期 ${formatCalendarDueDate(displayDueDate)}</span>
       <span>${priorityLabel(allocation.priority)} · ${escapeHtml(allocation.status ?? "試排")}</span>
       ${movedNote}
       ${quantityNote}

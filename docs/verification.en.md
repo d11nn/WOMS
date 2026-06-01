@@ -66,10 +66,12 @@ Run the app in a browser-capable environment, then verify:
    - Click `待排程`: the preview calendar shows the current sales draft preview allocations.
    - Click `已排程`: the preview calendar switches to formal persisted calendar allocations.
    - Switch back to `待排程` and confirm the draft preview allocations return.
-   - Confirm the final "放到待排程訂單" flow still creates a pending order.
+   - In a conflicted preview, confirm `接受目前解法並加入待排程` still creates a pending order and moves checked conflicted pending orders to `需業務處理`.
+   - Click `取消選取目前訂單` and confirm the current draft appears under `需業務處理` without requiring a rejection reason.
 
 4. Sales main calendar switch:
    - Log in as `sales` / `demo`.
+   - Click `待排程` and `需業務處理` in the status sidebar; confirm the order heading shows only the matching context instead of both `業務處理 / 需處理訂單` and `訂單任務 / 訂單`.
    - Click `待排程`: the main calendar shows pending backlog preview allocations only.
    - Click `已排程`: the main calendar shows persisted schedule allocations only.
    - Click `所有訂單`: the main calendar shows both sets, with pending backlog allocations using preview styling and pending status.

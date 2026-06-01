@@ -90,6 +90,26 @@ test("sales pending order edits are isolated from scheduler pending cards", () =
   assert.match(styles, /\.sales-pending-toggle\s*\{/);
 });
 
+test("sales status filters map to one matching heading", () => {
+  const app = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+  assert.match(app, /state\.filters\.status === "待排程"[\s\S]*eyebrow\.textContent = "業務接單";[\s\S]*title\.textContent = "待排程訂單";/);
+  assert.match(app, /state\.filters\.status === "需業務處理"[\s\S]*eyebrow\.textContent = "業務處理";[\s\S]*title\.textContent = "需處理訂單";/);
+  assert.match(app, /state\.filters\.status === "需業務處理"[\s\S]*return visibleLineOrders\(\)\.filter\(\(order\) => order\.status === "需業務處理"\);/);
+  assert.match(app, /document\.getElementById\("sales-rejected-panel"\)\.hidden = state\.user\?\.role !== "sales" \|\| state\.filters\.status \|\| rejected\.length === 0;/);
+});
+
+test("conflict cancel actions route to sales follow-up instead of silent unselect", () => {
+  const app = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+  const unselectStart = app.indexOf("async function handleUnselectConflictOrderPreviewAction");
+  const unselectEnd = app.indexOf("async function handleRejectPreviewOrdersPreviewAction", unselectStart);
+  const unselectAction = app.slice(unselectStart, unselectEnd);
+  assert.match(unselectAction, /openRejectDialog\(\[orderId\]\)/);
+  assert.doesNotMatch(unselectAction, /retryPreview/);
+  assert.match(app, /"defer-sales-draft": handleDeferSalesDraftPreviewAction/);
+  assert.match(app, /JSON\.stringify\(\{ previewId: state\.preview\.previewId, deferDraft: true \}\)/);
+  assert.match(app, /取消選取目前訂單/);
+});
+
 test("order status badges stay on one line in scheduler and sales cards", () => {
   const styles = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
   assert.match(styles, /\.order-card-main div\s*\{[\s\S]*min-width:\s+0;/);

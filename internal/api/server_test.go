@@ -1845,6 +1845,69 @@ func TestSalesConfirmDraftPreviewDefersConflictedPendingOrder(t *testing.T) {
 	verifyOrderNotInCalendarPending(t, server, salesToken, deferredID)
 }
 
+func TestSalesConfirmDraftPreviewCanDeferCurrentDraftOrder(t *testing.T) {
+	store := NewMemoryStore()
+	server := NewServer("secret", store)
+	salesToken := login(t, server, "sales", "demo")
+	existingOrderIDs := []string{}
+	for range 4 {
+		existingOrderIDs = append(existingOrderIDs, createOrderWithPriorityAndDue(t, server, salesToken, "A", "high", "2026-06-02"))
+	}
+
+	bodyStr := `{"lineId":"A","startDate":"2026-06-02","currentDate":"2026-06-01","draftOrder":{"customer":"Blocked Draft","lineId":"A","quantity":2500,"priority":"high","dueDate":"2026-06-02"}}`
+	previewID, conflicts := getSalesDraftPreview(t, server, salesToken, bodyStr)
+	if len(conflicts) == 0 {
+		t.Fatalf("expected draft preview conflict, got 0 conflicts")
+	}
+
+	confirmBody := bytes.NewBufferString(`{"previewId":"` + previewID + `","deferDraft":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/orders/preview-confirm", confirmBody)
+	req.Header.Set("Authorization", "Bearer "+salesToken)
+	res := httptest.NewRecorder()
+	server.ServeHTTP(res, req)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("confirm preview failed: %d %s", res.Code, res.Body.String())
+	}
+	var deferredDraft domain.Order
+	if err := json.Unmarshal(res.Body.Bytes(), &deferredDraft); err != nil {
+		t.Fatalf("decode deferred draft: %v", err)
+	}
+	if deferredDraft.Status != domain.StatusRejected || deferredDraft.RejectionReason != "" || deferredDraft.RejectedBy != "user-sales" {
+		t.Fatalf("expected draft moved to sales follow-up without reason, got %+v", deferredDraft)
+	}
+	for _, existingOrderID := range existingOrderIDs {
+		if store.orders[existingOrderID].Status != domain.StatusPending {
+			t.Fatalf("existing order %s should remain pending, got %+v", existingOrderID, store.orders[existingOrderID])
+		}
+	}
+}
+
+func TestSalesConfirmDraftPreviewRejectsMixedDraftAndPendingDefer(t *testing.T) {
+	server := NewServer("secret", NewMemoryStore())
+	salesToken := login(t, server, "sales", "demo")
+	for range 4 {
+		createOrderWithPriorityAndDue(t, server, salesToken, "A", "low", "2026-06-02")
+	}
+
+	bodyStr := `{"lineId":"A","startDate":"2026-06-02","currentDate":"2026-06-01","draftOrder":{"customer":"Blocked Draft","lineId":"A","quantity":2500,"priority":"high","dueDate":"2026-06-02"}}`
+	previewID, conflicts := getSalesDraftPreview(t, server, salesToken, bodyStr)
+	if len(conflicts) == 0 {
+		t.Fatalf("expected draft preview conflict, got 0 conflicts")
+	}
+
+	confirmBody := bytes.NewBufferString(`{"previewId":"` + previewID + `","deferDraft":true,"deferredOrderIds":["` + conflicts[0] + `"]}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/orders/preview-confirm", confirmBody)
+	req.Header.Set("Authorization", "Bearer "+salesToken)
+	res := httptest.NewRecorder()
+	server.ServeHTTP(res, req)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("expected mixed defer request to fail, got %d %s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), "取消目前草稿訂單時不能同時改送其他待排程訂單") {
+		t.Fatalf("expected clear mixed defer error, got %s", res.Body.String())
+	}
+}
+
 func TestSalesDraftPreviewRejectsTodayDueDate(t *testing.T) {
 	server := NewServer("secret", NewMemoryStore())
 	salesToken := login(t, server, "sales", "demo")

@@ -1521,6 +1521,86 @@ test("sales draft conflict preview shows successful draft schedule and excludes 
   }
 });
 
+test("sales can move the current conflicted draft to follow-up without a rejection reason", async () => {
+  const document = buildDomFromIndex();
+  const previewDate = dateKeyAfter(1);
+  const calls = [];
+  const fetchImpl = async (path, options = {}) => {
+    calls.push({ path, options });
+    if (path === "/api/auth/login") {
+      return jsonResponse({
+        token: "token-sales",
+        user: { id: "user-sales", username: "sales", role: "sales" },
+      });
+    }
+    if (path === "/api/lines") {
+      return jsonResponse({
+        lines: [{ id: "A", name: "Line A", capacityPerDay: 10000, timezone: "Asia/Taipei" }],
+      });
+    }
+    if (path === "/api/orders") {
+      return jsonResponse({
+        orders: [
+          { id: "ORD-A", customer: "A", lineId: "A", quantity: 2500, priority: "high", status: "待排程", dueDate: previewDate, createdBy: "user-sales" },
+        ],
+      });
+    }
+    if (String(path).startsWith("/api/schedules/calendar?")) {
+      return jsonResponse({ allocations: [], pendingAllocations: [] });
+    }
+    if (path === "/api/schedules/preview") {
+      assert.equal(options.method, "POST");
+      return jsonResponse({
+        previewId: "PREVIEW-DRAFT",
+        currentDate: dateKeyAfter(0),
+        allocations: [],
+        conflicts: [
+          {
+            orderId: "PREVIEW-DRAFT",
+            reason: "capacity cannot satisfy order before due date",
+            earliestFinishDate: `${dateKeyAfter(2)}T00:00:00Z`,
+            affectedOrderIds: [],
+          },
+        ],
+      });
+    }
+    if (path === "/api/orders/preview-confirm") {
+      assert.equal(options.method, "POST");
+      assert.deepEqual(JSON.parse(options.body), { previewId: "PREVIEW-DRAFT", deferDraft: true });
+      return jsonResponse({ id: "ORD-DRAFT", customer: "Blocked", lineId: "A", quantity: 2500, priority: "high", status: "需業務處理", dueDate: previewDate, createdBy: "user-sales" });
+    }
+    throw new Error(`unexpected fetch ${path}`);
+  };
+  const restoreGlobals = installBrowserGlobalsWithFetch(document, fetchImpl);
+  try {
+    await import(appModuleUrl("sales-draft-defer-current"));
+
+    await document.getElementById("login-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+    document.querySelector('#order-form input[name="customer"]').value = "Blocked";
+    document.querySelector('#order-form select[name="priority"]').value = "high";
+    document.querySelector('#order-form input[name="dueDate"]').value = previewDate;
+    await document.getElementById("order-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+
+    assert.match(document.getElementById("preview-page-list").innerHTML, /取消選取目前訂單/);
+    const deferButton = document.createElement("button");
+    deferButton.setAttribute("data-preview-action", "defer-sales-draft");
+    document.getElementById("preview-page-list").appendChild(deferButton);
+    await document.getElementById("preview-page-list").dispatchEvent({
+      type: "click",
+      target: deferButton,
+    });
+    await settleApp();
+
+    assert.equal(calls.filter((call) => call.path === "/api/orders/preview-confirm").length, 1);
+    assert.equal(document.getElementById("message-title").textContent, "已移到需業務處理");
+    assert.doesNotMatch(calls.find((call) => call.path === "/api/orders/preview-confirm").options.body, /reason/);
+  } finally {
+    restoreGlobals();
+  }
+});
+
 test("preview calendars keep the same visible dates as the monthly calendar", async () => {
   const document = buildDomFromIndex();
   const distantPreviewDate = dateKeyAfter(45);

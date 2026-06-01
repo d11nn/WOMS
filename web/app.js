@@ -372,7 +372,8 @@ document.getElementById("confirm-preview-order").addEventListener("click", async
     focusCreatedOrder(order);
     closePreviewPage();
     document.getElementById("order-form").reset();
-    showMessage("已加入待排程", "新訂單已正式放入待排程；已勾選的衝突訂單會移到需業務處理。");
+    const deferMessage = deferredOrderIds.length > 0 ? "；已勾選的衝突訂單會移到需業務處理" : "";
+    showMessage("已加入待排程", `新訂單已正式放入待排程${deferMessage}。`);
     await refreshWorkspace();
   } catch (error) {
     showMessage("無法加入待排程", error.message, "warn");
@@ -428,6 +429,7 @@ const previewActionHandlers = {
   "retry-suggested-start": handleRetrySuggestedStartPreviewAction,
   "update-conflict-due-date": handleUpdateConflictDueDatePreviewAction,
   "unselect-conflict-order": handleUnselectConflictOrderPreviewAction,
+  "defer-sales-draft": handleDeferSalesDraftPreviewAction,
   "reject-preview-orders": handleRejectPreviewOrdersPreviewAction,
   "preview-conflict-solution": handlePreviewConflictSolutionPreviewAction,
   "retry-manual-force": handleRetryManualForcePreviewAction,
@@ -539,16 +541,19 @@ async function handleUpdateConflictDueDatePreviewAction(event) {
 
 async function handleUnselectConflictOrderPreviewAction(event) {
   const orderId = event.target.dataset.orderId;
-  state.selectedOrderIds.delete(orderId);
-  const orderIds = state.preview.request.orderIds.filter((id) => id !== orderId);
-  if (orderIds.length === 0) {
-    closePreviewPage();
-    renderOrders();
-    showMessage("已取消選取", "沒有剩餘訂單可試排。");
-    return;
-  }
-  await retryPreview({ orderIds });
-  renderOrders();
+  openRejectDialog([orderId]);
+}
+
+async function handleDeferSalesDraftPreviewAction() {
+  const order = await request("/api/orders/preview-confirm", {
+    method: "POST",
+    body: JSON.stringify({ previewId: state.preview.previewId, deferDraft: true }),
+  });
+  focusCreatedOrder(order);
+  closePreviewPage();
+  document.getElementById("order-form").reset();
+  showMessage("已移到需業務處理", "目前訂單已取消選取，Sales 可在需處理訂單中重新確認交期或數量。");
+  await refreshWorkspace();
 }
 
 async function handleRejectPreviewOrdersPreviewAction() {
@@ -837,9 +842,7 @@ function renderLineOptions() {
 
 function renderOrders() {
   renderOrdersHeading();
-  const visibleOrders = state.user?.role === "sales"
-    ? visibleLineOrders().filter((order) => order.status !== "需業務處理")
-    : visibleLineOrders();
+  const visibleOrders = visibleOrdersForWorkstation();
   const filtered = sortOrdersForWorkstation(exactFilterOrders(visibleOrders, state.filters));
   const body = document.getElementById("orders-body");
   body.innerHTML = "";
@@ -853,6 +856,16 @@ function renderOrders() {
     });
   });
   updateSelectedCount();
+}
+
+function visibleOrdersForWorkstation() {
+  if (state.user?.role !== "sales") {
+    return visibleLineOrders();
+  }
+  if (state.filters.status === "需業務處理") {
+    return visibleLineOrders().filter((order) => order.status === "需業務處理");
+  }
+  return visibleLineOrders().filter((order) => order.status !== "需業務處理");
 }
 
 function renderOrdersHeading() {
@@ -869,7 +882,9 @@ function renderOrdersHeading() {
     return;
   }
   if (state.user?.role === "sales" && state.filters.status === "需業務處理") {
-    heading.hidden = true;
+    heading.hidden = false;
+    eyebrow.textContent = "業務處理";
+    title.textContent = "需處理訂單";
     return;
   }
   heading.hidden = false;
@@ -946,7 +961,7 @@ function renderSalesRejectedOrders() {
       handleOrderAction(button.dataset.orderAction, button.dataset.orderId);
     });
   });
-  document.getElementById("sales-rejected-panel").hidden = state.user?.role !== "sales" || rejected.length === 0;
+  document.getElementById("sales-rejected-panel").hidden = state.user?.role !== "sales" || state.filters.status || rejected.length === 0;
 }
 
 function draggedOrderIds(orderId) {
@@ -1382,7 +1397,9 @@ function renderPreviewPage() {
     `),
   ].join("") || "沒有可顯示的結果";
 
-  document.getElementById("confirm-preview-order").hidden = state.preview?.kind !== "sales-draft";
+  const confirmPreviewOrder = document.getElementById("confirm-preview-order");
+  confirmPreviewOrder.hidden = state.preview?.kind !== "sales-draft";
+  confirmPreviewOrder.textContent = conflicts.length > 0 ? "接受目前解法並加入待排程" : "確認接單並更新待排程";
   document.getElementById("confirm-schedule-job").hidden = !canConfirmSchedule;
   renderPreviewCalendar(allocations);
 }
@@ -1549,21 +1566,22 @@ function renderSalesDraftConflictActions(conflicts, allocations) {
     return "";
   }
   const candidates = salesDraftDeferredCandidates(conflicts, allocations);
-  if (candidates.length === 0) {
-    return "";
-  }
+  const deferExistingOptions = candidates.length === 0 ? "" : `
+    <div class="solution-choice-list">
+      ${candidates.map((order) => `
+        <label class="check-option">
+          <input type="checkbox" data-sales-defer-order value="${escapeHtml(order.id)}" checked>
+          <span>改送需業務處理 ${escapeHtml(order.id)} · ${escapeHtml(order.customer)} · 交期 ${dateOnly(order.dueDate)}</span>
+        </label>
+      `).join("")}
+    </div>
+  `;
   return `
     <div class="conflict-actions">
       <h3>衝突處理</h3>
-      <p class="conflict-note">確認接單時，勾選的待排程訂單會移到需業務處理，Sales 可再與客戶確認交期或數量。</p>
-      <div class="solution-choice-list">
-        ${candidates.map((order) => `
-          <label class="check-option">
-            <input type="checkbox" data-sales-defer-order value="${escapeHtml(order.id)}" checked>
-            <span>改送需業務處理 ${escapeHtml(order.id)} · ${escapeHtml(order.customer)} · 交期 ${dateOnly(order.dueDate)}</span>
-          </label>
-        `).join("")}
-      </div>
+      <p class="conflict-note">可以接受目前最早解法，或取消選取目前訂單並改送需業務處理。</p>
+      ${deferExistingOptions}
+      <button class="danger-button" data-preview-action="defer-sales-draft" type="button">取消選取目前訂單</button>
     </div>
   `;
 }

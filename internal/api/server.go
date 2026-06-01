@@ -841,6 +841,7 @@ func (s *MemoryStore) Authenticate(username, password string) (domain.User, bool
 }
 
 type createOrderRequest struct {
+	ID       string          `json:"id,omitempty"`
 	Customer string          `json:"customer"`
 	LineID   string          `json:"lineId"`
 	Quantity int             `json:"quantity"`
@@ -2204,8 +2205,12 @@ func (s *MemoryStore) draftOrderInputsLocked(lineID string, currentDate time.Tim
 	if err != nil {
 		return nil, err
 	}
+	draftID := draft.ID
+	if draftID == "" {
+		draftID = previewDraftOrderID
+	}
 	inputs := []scheduler.OrderInput{{
-		ID:                 previewDraftOrderID,
+		ID:                 draftID,
 		Customer:           strings.TrimSpace(draft.Customer),
 		LineID:             draft.LineID,
 		Quantity:           draft.Quantity,
@@ -2214,8 +2219,18 @@ func (s *MemoryStore) draftOrderInputsLocked(lineID string, currentDate time.Tim
 		DueDate:            dueDate,
 		CreatedAtTimestamp: unixMilliseconds(nowUTC()),
 	}}
+	selected := map[string]bool{}
+	for _, id := range req.OrderIDs {
+		selected[id] = true
+	}
 	for _, order := range s.orders {
 		if order.LineID == lineID && order.Status == domain.StatusPending {
+			if order.ID == draft.ID {
+				continue
+			}
+			if len(selected) > 0 && !selected[order.ID] {
+				continue
+			}
 			inputs = append(inputs, orderInputFromOrder(order))
 		}
 	}
@@ -2474,11 +2489,41 @@ func (s *MemoryStore) ConfirmPreviewOrder(req confirmPreviewRequest, claims auth
 	if req.DeferDraft && strings.TrimSpace(req.Note) != "" {
 		draft.Note = strings.TrimSpace(req.Note)
 	}
-	order, err := s.createOrderLocked(draft, claims.Subject)
-	if err != nil {
-		return domain.Order{}, err
-	}
+	var order domain.Order
 	now := nowUTC()
+	if draft.ID != "" {
+		var ok bool
+		order, ok = s.orders[draft.ID]
+		if !ok {
+			return domain.Order{}, errors.New(errOrderNotFound)
+		}
+		if err := canUpdateOrderDetails(order, claims); err != nil {
+			return domain.Order{}, err
+		}
+		currentDate, err := s.currentDateForLineLocked(draft.LineID, now)
+		if err != nil {
+			return domain.Order{}, err
+		}
+		dueDate, err := validateOrderRequest(draft, s.lines, currentDate)
+		if err != nil {
+			return domain.Order{}, err
+		}
+		order.Quantity = draft.Quantity
+		order.DueDate = dueDate
+		order.Note = strings.TrimSpace(draft.Note)
+		order.Status = domain.StatusPending
+		resetRejectedState(&order)
+		order.UpdatedAt = now
+		s.orders[order.ID] = order
+		s.bumpLineRevisionLocked(order.LineID)
+		s.auditLocked(claims.Subject, "order.resubmit", order.ID, "")
+	} else {
+		var err error
+		order, err = s.createOrderLocked(draft, claims.Subject)
+		if err != nil {
+			return domain.Order{}, err
+		}
+	}
 	if req.DeferDraft {
 		order.Status = domain.StatusRejected
 		order.RejectedBy = claims.Subject

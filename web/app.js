@@ -577,8 +577,8 @@ async function handlePreviewConflictSolutionPreviewAction() {
   }
   if (state.preview?.kind === "sales-draft") {
     await retryPreview({
-      orderIds: [],
-      resolutionOrderIds: [],
+      orderIds,
+      resolutionOrderIds,
       allowLateCompletion: true,
       manualForce: false,
       reason: "",
@@ -1369,13 +1369,21 @@ function openPreviewDialog(preview) {
   state.preview = preview;
   state.previewCalendarMode = "all";
   closeProductionReport();
+  const dialog = document.getElementById("schedule-preview-dialog");
+  const isDialogAlreadyOpen = dialog?.open || dialog?.hasAttribute("open");
+  if (!isDialogAlreadyOpen) {
+    if (preview.kind === "sales-draft") {
+      state.salesDraftOriginalConflicts = preview.conflicts ?? [];
+    } else {
+      state.salesDraftOriginalConflicts = null;
+    }
+  }
   renderPreviewPage();
   renderPreviewSummary();
   renderCalendar();
-  const dialog = document.getElementById("schedule-preview-dialog");
   if (typeof dialog.showModal === "function" && !dialog.open) {
     dialog.showModal();
-  } else {
+  } else if (!dialog.open) {
     dialog.setAttribute("open", "");
   }
 }
@@ -1393,6 +1401,7 @@ function closePreviewPage() {
   }
   state.preview = null;
   state.previewCalendarMode = "all";
+  state.salesDraftOriginalConflicts = null;
   renderPreviewSummary();
   renderCalendar();
 }
@@ -1400,7 +1409,10 @@ function closePreviewPage() {
 function renderPreviewPage() {
   const pageList = document.getElementById("preview-page-list");
   const allocations = state.preview?.allocations ?? [];
-  const conflicts = state.preview?.conflicts ?? [];
+  const isSalesDraft = state.preview?.kind === "sales-draft";
+  const conflicts = isSalesDraft && state.salesDraftOriginalConflicts
+    ? state.salesDraftOriginalConflicts
+    : (state.preview?.conflicts ?? []);
   const manualForce = state.preview?.request?.manualForce ?? false;
   const canConfirmSchedule = state.preview?.kind === "schedule"
     && state.user?.role === "scheduler"
@@ -1427,6 +1439,30 @@ function renderPreviewPage() {
   confirmPreviewOrder.textContent = conflicts.length > 0 ? "接受目前解法並加入待排程" : "確認接單並更新待排程";
   document.getElementById("confirm-schedule-job").hidden = !canConfirmSchedule;
   renderPreviewCalendar(allocations);
+  bindSalesConflictLinkage();
+}
+
+function bindSalesConflictLinkage() {
+  const dialog = document.getElementById("schedule-preview-dialog");
+  if (!dialog || state.preview?.kind !== "sales-draft") return;
+  dialog.querySelectorAll("[data-conflict-solution-order]").forEach((input) => {
+    input.addEventListener("change", (event) => {
+      const orderId = event.target.value;
+      const deferInput = dialog.querySelector(`[data-sales-defer-order][value="${cssEscape(orderId)}"]`);
+      if (deferInput) {
+        deferInput.checked = !event.target.checked;
+      }
+    });
+  });
+  dialog.querySelectorAll("[data-sales-defer-order]").forEach((input) => {
+    input.addEventListener("change", (event) => {
+      const orderId = event.target.value;
+      const solutionInput = dialog.querySelector(`[data-conflict-solution-order][value="${cssEscape(orderId)}"]`);
+      if (solutionInput) {
+        solutionInput.checked = !event.target.checked;
+      }
+    });
+  });
 }
 
 function renderPreviewCalendar(allocations) {
@@ -1642,10 +1678,11 @@ function renderConflictItem(conflict, index = 0, withAcknowledgement = false) {
     </label>
   ` : "";
   if (salesDraft) {
-    const explanation = conflict.orderId === "PREVIEW-DRAFT"
+    const isCurrentDraft = conflict.orderId === "PREVIEW-DRAFT" || conflict.orderId === state.preview?.request?.draftOrder?.id;
+    const explanation = isCurrentDraft
       ? conflictExplanation(conflict)
       : "這張待排程訂單由於新訂單的影響，在目前開始日期與交期之間沒有足夠產能。需要提前開始、延後交期、拆單，或調整訂單數量。";
-    const previewDraftClass = conflict.orderId === "PREVIEW-DRAFT" ? "preview-draft" : "";
+    const previewDraftClass = isCurrentDraft ? "preview-draft" : "";
     return `
       <div class="preview-item high conflict-preview ${previewDraftClass}">
         <strong>${escapeHtml(conflict.orderId)}</strong>
@@ -1778,7 +1815,7 @@ function renderCalendarItem(allocation) {
   const quantityChangedClass = allocation.quantityChangedPreview ? "quantity-changed-preview" : "";
   const childOrderClass = isNewChildScheduledAllocation(allocation) ? "child-order-preview" : "";
   const conflictClass = allocation.conflictPreview ? "conflict-preview" : "";
-  const previewDraftClass = allocation.orderId === "PREVIEW-DRAFT" ? "preview-draft" : "";
+  const previewDraftClass = allocation.preview && (allocation.orderId === "PREVIEW-DRAFT" || state.preview?.request?.draftOrder?.id === allocation.orderId) ? "preview-draft" : "";
   const attrs = actionable
     ? `type="button" data-calendar-order-id="${escapeHtml(allocation.orderId)}" data-calendar-date="${dateOnly(allocation.date)}"`
     : "";
@@ -1887,6 +1924,7 @@ function canSalesEditPendingOrder(order) {
 function renderSalesCorrectionForm(order, options = {}) {
   const contextLabel = options.contextLabel ? `<p class="modification-reason">${escapeHtml(options.contextLabel)}</p>` : "";
   const deleteLabel = options.deleteLabel ?? "取消訂單";
+  const submitLabel = order.status === "待排程" ? "試排並儲存" : "重新送出";
   return `
     <div class="drawer-actions">
       ${contextLabel}
@@ -1902,7 +1940,7 @@ function renderSalesCorrectionForm(order, options = {}) {
         <span>原備註</span>
         <span class="drawer-note">${escapeHtml(order.note || "未填寫")}</span>
       </label>
-      <button class="row-action" data-order-action="resubmit-order" data-order-id="${escapeHtml(order.id)}" type="button">重新送出</button>
+      <button class="row-action" data-order-action="resubmit-order" data-order-id="${escapeHtml(order.id)}" type="button">${submitLabel}</button>
       <button class="row-action danger-button" data-order-action="cancel-order" data-order-id="${escapeHtml(order.id)}" type="button">${escapeHtml(deleteLabel)}</button>
     </div>
   `;
@@ -1924,13 +1962,26 @@ async function handleOrderAction(action, orderId, productionDate = "") {
       const dueDate = card?.querySelector('[data-resubmit-field="dueDate"]')?.value;
       const quantity = Number(card?.querySelector('[data-resubmit-field="quantity"]')?.value);
       assertFutureDueDate(dueDate);
-      await request("/api/orders/resubmit", {
-        method: "POST",
-        body: JSON.stringify({ orderId, dueDate, quantity }),
-      });
+      const order = state.orders.find((item) => item.id === orderId);
+      if (!order) {
+        throw new Error("找不到該筆訂單");
+      }
+      const draftOrder = {
+        id: orderId,
+        customer: order.customer,
+        lineId: order.lineId,
+        quantity,
+        priority: order.priority,
+        dueDate,
+        note: order.note ?? "",
+      };
+      const result = await createPreview({
+        lineId: order.lineId,
+        startDate: tomorrowDateInputValue(),
+        draftOrder,
+      }, "sales-draft");
+      openPreviewDialog(result);
       state.expandedSalesPendingOrderIds.delete(orderId);
-      showMessage("已重新送出", `${orderId} 已回到待排程。`);
-      await refreshWorkspace();
       return;
     }
     if (action === "cancel-order") {

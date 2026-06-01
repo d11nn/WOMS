@@ -119,8 +119,8 @@ test("calendar order cards show due date and highlight sales draft preview", () 
   const styles = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
   assert.match(app, /function formatCalendarDueDate\(value\)/);
   assert.match(app, /<span>交期 \$\{formatCalendarDueDate\(allocation\.dueDate \?\? allocation\.date\)\}<\/span>/);
-  assert.match(app, /previewDraftClass = conflict\.orderId === "PREVIEW-DRAFT" \? "preview-draft" : ""/);
-  assert.match(app, /allocation\.orderId === "PREVIEW-DRAFT" \? "preview-draft" : ""/);
+  assert.match(app, /previewDraftClass = isCurrentDraft \? "preview-draft" : ""/);
+  assert.match(app, /previewDraftClass = allocation\.preview && \(allocation\.orderId === "PREVIEW-DRAFT" || state\.preview\?\.request\?\.draftOrder\?\.id === allocation\.orderId\) \? "preview-draft" : ""/);
   assert.match(styles, /\.calendar-item\.preview-draft,\s*\.preview-item\.preview-draft\s*\{[\s\S]*border:\s+2px solid #f79009;[\s\S]*box-shadow:/);
 });
 
@@ -290,7 +290,7 @@ test("sales draft conflicts expose the same earliest completion picker as schedu
   const salesActions = app.slice(start, end);
   assert.match(salesActions, /先預覽最早完成解法/);
   assert.match(salesActions, /renderConflictSolutionPicker\(conflicts, \["PREVIEW-DRAFT"\]\)/);
-  assert.match(app, /if \(state\.preview\?\.kind === "sales-draft"\) \{[\s\S]*orderIds: \[\],[\s\S]*resolutionOrderIds: \[\],[\s\S]*allowLateCompletion: true/);
+  assert.match(app, /if \(state\.preview\?\.kind === "sales-draft"\) \{[\s\S]*orderIds,[\s\S]*resolutionOrderIds,[\s\S]*allowLateCompletion: true/);
   assert.match(app, /<button data-preview-action="preview-conflict-solution" type="button">預覽最早完成解法<\/button>/);
 });
 

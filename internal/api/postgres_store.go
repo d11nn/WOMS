@@ -984,9 +984,42 @@ func deferConflictOrdersTx(tx *sql.Tx, deferredOrders []domain.Order, claims aut
 }
 
 func (s *PostgresStore) confirmPreviewOrderTx(previewID string, draft createOrderRequest, deferredOrders []domain.Order, deferDraft bool, claims auth.Claims) (domain.Order, error) {
-	order, err := s.prepareConfirmedOrder(draft, claims)
-	if err != nil {
-		return domain.Order{}, err
+	var isUpdate bool
+	var order domain.Order
+	var err error
+	if draft.ID != "" {
+		isUpdate = true
+		var createdBy string
+		var status string
+		var createdAt time.Time
+		err = s.db.QueryRow(`
+			SELECT created_by, status, created_at
+			FROM orders
+			WHERE id = $1
+		`, draft.ID).Scan(&createdBy, &status, &createdAt)
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.Order{}, errors.New("order not found")
+		}
+		if err != nil {
+			return domain.Order{}, err
+		}
+		if createdBy != claims.Subject {
+			return domain.Order{}, errors.New("sales can update only their own orders")
+		}
+		if status != string(domain.StatusPending) && status != string(domain.StatusRejected) {
+			return domain.Order{}, errors.New("only pending or rejected orders can be updated")
+		}
+		order, err = s.prepareConfirmedOrder(draft, claims)
+		if err != nil {
+			return domain.Order{}, err
+		}
+		order.ID = draft.ID
+		order.CreatedAt = createdAt
+	} else {
+		order, err = s.prepareConfirmedOrder(draft, claims)
+		if err != nil {
+			return domain.Order{}, err
+		}
 	}
 	if deferDraft {
 		order.Status = domain.StatusRejected
@@ -998,14 +1031,31 @@ func (s *PostgresStore) confirmPreviewOrderTx(previewID string, draft createOrde
 		return domain.Order{}, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`
-		INSERT INTO orders (id, customer, line_id, quantity, priority, status, due_date, note, created_by, rejection_reason, rejected_by, rejected_at, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10, ''), NULLIF($11, ''), $12, $13, $13)
-	`, order.ID, order.Customer, order.LineID, order.Quantity, order.Priority, order.Status, order.DueDate, order.Note, order.CreatedBy, order.RejectionReason, order.RejectedBy, nullableTime(order.RejectedAt), order.CreatedAt); err != nil {
-		return domain.Order{}, err
-	}
-	if _, err := insertAuditTx(tx, claims.Subject, "order.create", order.ID, ""); err != nil {
-		return domain.Order{}, err
+	if isUpdate {
+		if _, err := tx.Exec(`
+			UPDATE orders
+			SET quantity = $2, due_date = $3, note = $4, status = $5,
+			    rejection_reason = NULLIF($6, ''), rejected_by = NULLIF($7, ''), rejected_at = $8,
+			    updated_at = $9
+			WHERE id = $1 AND created_by = $10
+		`, order.ID, order.Quantity, order.DueDate, order.Note, order.Status,
+			order.RejectionReason, order.RejectedBy, nullableTime(order.RejectedAt),
+			order.UpdatedAt, claims.Subject); err != nil {
+			return domain.Order{}, err
+		}
+		if _, err := insertAuditTx(tx, claims.Subject, "order.resubmit", order.ID, ""); err != nil {
+			return domain.Order{}, err
+		}
+	} else {
+		if _, err := tx.Exec(`
+			INSERT INTO orders (id, customer, line_id, quantity, priority, status, due_date, note, created_by, rejection_reason, rejected_by, rejected_at, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10, ''), NULLIF($11, ''), $12, $13, $13)
+		`, order.ID, order.Customer, order.LineID, order.Quantity, order.Priority, order.Status, order.DueDate, order.Note, order.CreatedBy, order.RejectionReason, order.RejectedBy, nullableTime(order.RejectedAt), order.CreatedAt); err != nil {
+			return domain.Order{}, err
+		}
+		if _, err := insertAuditTx(tx, claims.Subject, "order.create", order.ID, ""); err != nil {
+			return domain.Order{}, err
+		}
 	}
 	if deferDraft {
 		if _, err := insertAuditTx(tx, claims.Subject, "order.sales_conflict_defer_draft", order.ID, ""); err != nil {
@@ -1701,16 +1751,32 @@ func (s *PostgresStore) schedulerInputs(req scheduleRequest, claims auth.Claims,
 		if err != nil {
 			return nil, errors.New("dueDate must use YYYY-MM-DD")
 		}
-		inputs, err := s.pendingOrderInputs(lineID, nil)
+		draftID := draft.ID
+		if draftID == "" {
+			draftID = previewDraftOrderID
+		}
+		selected := map[string]bool{}
+		for _, id := range req.OrderIDs {
+			selected[id] = true
+		}
+		inputs, err := s.pendingOrderInputs(lineID, selected)
 		if err != nil {
 			return nil, err
 		}
+		var filtered []scheduler.OrderInput
+		for _, inp := range inputs {
+			if draft.ID != "" && inp.ID == draft.ID {
+				continue
+			}
+			filtered = append(filtered, inp)
+		}
+		inputs = filtered
 		// Sales draft previews account for the pending backlog as capacity usage
 		// and return those pending preview allocations for the preview dialog only.
 		// Scheduler previews/jobs do not use this draft branch, so formal scheduling
 		// keeps excluding unrelated pending orders from daily capacity.
 		inputs = append(inputs, scheduler.OrderInput{
-			ID:                 previewDraftOrderID,
+			ID:                 draftID,
 			Customer:           strings.TrimSpace(draft.Customer),
 			LineID:             draft.LineID,
 			Quantity:           draft.Quantity,

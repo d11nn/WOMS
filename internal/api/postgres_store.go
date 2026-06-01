@@ -831,15 +831,18 @@ func (s *PostgresStore) postgresPendingBacklogCalendarAllocations(line domain.Pr
 	return pendingBacklogCalendarAllocations(line, pendingInputs, existing, currentDate, window.Start, window.End)
 }
 
-func (s *PostgresStore) ConfirmPreviewOrder(previewID string, claims auth.Claims) (domain.Order, error) {
+func (s *PostgresStore) ConfirmPreviewOrder(req confirmPreviewRequest, claims auth.Claims) (domain.Order, error) {
 	var draftRaw sql.NullString
 	var actorID string
 	var actorRole domain.Role
+	var lineID string
+	var conflictsRaw []byte
+	var allocationsRaw []byte
 	err := s.db.QueryRow(`
-		SELECT actor_id, actor_role, draft_order
+		SELECT actor_id, actor_role, line_id, allocations, conflicts, draft_order
 		FROM schedule_previews
 		WHERE id = $1 AND expires_at > NOW()
-	`, previewID).Scan(&actorID, &actorRole, &draftRaw)
+	`, req.PreviewID).Scan(&actorID, &actorRole, &lineID, &allocationsRaw, &conflictsRaw, &draftRaw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Order{}, errors.New("preview result expired or not found")
 	}
@@ -856,12 +859,168 @@ func (s *PostgresStore) ConfirmPreviewOrder(previewID string, claims auth.Claims
 	if err := json.Unmarshal([]byte(draftRaw.String), &draft); err != nil {
 		return domain.Order{}, err
 	}
-	order, err := s.CreateOrder(draft, claims.Subject)
+	var allocations []scheduler.Allocation
+	if err := json.Unmarshal(allocationsRaw, &allocations); err != nil {
+		return domain.Order{}, err
+	}
+	var conflicts []scheduler.Conflict
+	if err := json.Unmarshal(conflictsRaw, &conflicts); err != nil {
+		return domain.Order{}, err
+	}
+	preview := previewRecord{
+		ActorID:     actorID,
+		ActorRole:   actorRole,
+		LineID:      lineID,
+		DraftOrder:  &draft,
+		Allocations: allocations,
+		Conflicts:   conflicts,
+	}
+	deferredOrders, err := s.validateSalesDeferredOrders(req.DeferredOrderIDs, preview, claims)
 	if err != nil {
 		return domain.Order{}, err
 	}
-	_, _ = s.db.Exec("DELETE FROM schedule_previews WHERE id = $1", previewID)
+	order, err := s.confirmPreviewOrderTx(req.PreviewID, draft, deferredOrders, claims)
+	if err != nil {
+		return domain.Order{}, err
+	}
 	return order, nil
+}
+
+func (s *PostgresStore) validateSalesDeferredOrders(orderIDs []string, preview previewRecord, claims auth.Claims) ([]domain.Order, error) {
+	ids := uniqueOrderIDs(orderIDs)
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	allowed := previewDeferredOrderIDs(preview)
+	orders := make([]domain.Order, 0, len(ids))
+	for _, orderID := range ids {
+		if !allowed[orderID] {
+			return nil, errors.New("deferred order must belong to preview conflicts")
+		}
+		order, err := s.order(orderID)
+		if err != nil {
+			return nil, err
+		}
+		if order.CreatedBy != claims.Subject {
+			return nil, errors.New("sales can defer only their own orders")
+		}
+		if order.LineID != preview.LineID {
+			return nil, errors.New("deferred order line must match preview line")
+		}
+		if order.Status != domain.StatusPending {
+			return nil, errors.New("only pending preview conflicts can be deferred")
+		}
+		orders = append(orders, order)
+	}
+	return orders, nil
+}
+
+func (s *PostgresStore) prepareConfirmedOrder(draft createOrderRequest, claims auth.Claims) (domain.Order, error) {
+	if err := validateOrderFields(draft.Customer, draft.Quantity, draft.Note); err != nil {
+		return domain.Order{}, err
+	}
+	if draft.Priority == "" {
+		draft.Priority = domain.PriorityLow
+	}
+	if draft.Priority != domain.PriorityLow && draft.Priority != domain.PriorityHigh {
+		return domain.Order{}, errors.New("priority must be low or high")
+	}
+	line, err := s.productionLine(draft.LineID)
+	if err != nil {
+		return domain.Order{}, err
+	}
+	currentDate, err := currentDateInLineTimezone(line, nowUTC())
+	if err != nil {
+		return domain.Order{}, err
+	}
+	dueDate, err := validateOrderRequest(draft, map[string]domain.ProductionLine{line.ID: line}, currentDate)
+	if err != nil {
+		return domain.Order{}, err
+	}
+	now := time.Now().UTC()
+	order := domain.Order{
+		ID:        orderIDFromTime(now),
+		Customer:  draft.Customer,
+		LineID:    draft.LineID,
+		Quantity:  draft.Quantity,
+		Priority:  draft.Priority,
+		Status:    domain.StatusPending,
+		DueDate:   dueDate,
+		Note:      strings.TrimSpace(draft.Note),
+		CreatedBy: claims.Subject,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	return order, nil
+}
+
+func deferConflictOrdersTx(tx *sql.Tx, deferredOrders []domain.Order, claims auth.Claims, now time.Time) error {
+	for _, deferred := range deferredOrders {
+		result, err := tx.Exec(`
+			UPDATE orders
+			SET status = $2, rejection_reason = $3, rejected_by = $4, rejected_at = $5, updated_at = $5
+			WHERE id = $1 AND status = $6 AND created_by = $7 AND line_id = $8
+		`, deferred.ID, domain.StatusRejected, salesConflictDeferredReason, claims.Subject, now, domain.StatusPending, claims.Subject, deferred.LineID)
+		if err != nil {
+			return err
+		}
+		if err := requireOneRowAffected(result, "deferred order changed before confirmation"); err != nil {
+			return err
+		}
+		if _, err := insertAuditTx(tx, claims.Subject, "order.sales_conflict_defer", deferred.ID, salesConflictDeferredReason); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *PostgresStore) confirmPreviewOrderTx(previewID string, draft createOrderRequest, deferredOrders []domain.Order, claims auth.Claims) (domain.Order, error) {
+	order, err := s.prepareConfirmedOrder(draft, claims)
+	if err != nil {
+		return domain.Order{}, err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return domain.Order{}, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`
+		INSERT INTO orders (id, customer, line_id, quantity, priority, status, due_date, note, created_by, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
+	`, order.ID, order.Customer, order.LineID, order.Quantity, order.Priority, order.Status, order.DueDate, order.Note, order.CreatedBy, order.CreatedAt); err != nil {
+		return domain.Order{}, err
+	}
+	if _, err := insertAuditTx(tx, claims.Subject, "order.create", order.ID, ""); err != nil {
+		return domain.Order{}, err
+	}
+	if err := deferConflictOrdersTx(tx, deferredOrders, claims, order.CreatedAt); err != nil {
+		return domain.Order{}, err
+	}
+	if _, err := tx.Exec(bumpProductionLineRevisionSQL, order.LineID); err != nil {
+		return domain.Order{}, err
+	}
+	result, err := tx.Exec("DELETE FROM schedule_previews WHERE id = $1 AND actor_id = $2 AND actor_role = $3 AND expires_at > NOW()", previewID, claims.Subject, claims.Role)
+	if err != nil {
+		return domain.Order{}, err
+	}
+	if err := requireOneRowAffected(result, "preview result expired or not found"); err != nil {
+		return domain.Order{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.Order{}, err
+	}
+	return order, nil
+}
+
+func requireOneRowAffected(result sql.Result, message string) error {
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return errors.New(message)
+	}
+	return nil
 }
 
 func (s *PostgresStore) GetScheduleJob(id string) (domain.ScheduleJob, bool) {

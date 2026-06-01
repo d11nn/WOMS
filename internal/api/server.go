@@ -157,7 +157,7 @@ type Store interface {
 	CreateOrder(req createOrderRequest, actorID string) (domain.Order, error)
 	CancelOrders(req cancelOrdersRequest, claims auth.Claims) (cancelOrdersResponse, error)
 	UpdateOrderDueDate(id string, req updateOrderRequest, claims auth.Claims) (domain.Order, error)
-	ConfirmPreviewOrder(previewID string, claims auth.Claims) (domain.Order, error)
+	ConfirmPreviewOrder(req confirmPreviewRequest, claims auth.Claims) (domain.Order, error)
 	RejectOrders(req rejectOrdersRequest, claims auth.Claims) (rejectOrdersResponse, error)
 	ResubmitOrder(req resubmitOrderRequest, claims auth.Claims) (domain.Order, error)
 	ListUsers() []domain.User
@@ -412,7 +412,7 @@ func (s *Server) handleConfirmPreviewOrder(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	order, err := s.store.ConfirmPreviewOrder(req.PreviewID, claims)
+	order, err := s.store.ConfirmPreviewOrder(req, claims)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -907,7 +907,8 @@ type resetUserPasswordRequest struct {
 }
 
 type confirmPreviewRequest struct {
-	PreviewID string `json:"previewId"`
+	PreviewID        string   `json:"previewId"`
+	DeferredOrderIDs []string `json:"deferredOrderIds,omitempty"`
 }
 
 type demoConflictRequest struct {
@@ -973,6 +974,8 @@ type schedulePreviewResponse struct {
 	FinishDate  time.Time              `json:"finishDate"`
 	DraftOrder  *createOrderRequest    `json:"draftOrder,omitempty"`
 }
+
+const salesConflictDeferredReason = "Sales 接單衝突處理：改由業務重新確認"
 
 func (s *MemoryStore) CreateOrder(req createOrderRequest, actorID string) (domain.Order, error) {
 	s.mu.Lock()
@@ -2441,11 +2444,11 @@ func (s *MemoryStore) persistAllocationsLocked(allocations []scheduler.Allocatio
 	}
 }
 
-func (s *MemoryStore) ConfirmPreviewOrder(previewID string, claims auth.Claims) (domain.Order, error) {
+func (s *MemoryStore) ConfirmPreviewOrder(req confirmPreviewRequest, claims auth.Claims) (domain.Order, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	preview, ok := s.previews[previewID]
+	preview, ok := s.previews[req.PreviewID]
 	if !ok {
 		return domain.Order{}, errors.New(errPreviewExpired)
 	}
@@ -2455,13 +2458,71 @@ func (s *MemoryStore) ConfirmPreviewOrder(previewID string, claims auth.Claims) 
 	if preview.DraftOrder == nil {
 		return domain.Order{}, errors.New("preview does not contain a draft order")
 	}
+	deferredOrderIDs, err := s.validateSalesDeferredOrdersLocked(req.DeferredOrderIDs, preview, claims)
+	if err != nil {
+		return domain.Order{}, err
+	}
 	draft := *preview.DraftOrder
 	order, err := s.createOrderLocked(draft, claims.Subject)
 	if err != nil {
 		return domain.Order{}, err
 	}
-	delete(s.previews, previewID)
+	now := nowUTC()
+	for _, orderID := range deferredOrderIDs {
+		deferred := s.orders[orderID]
+		deferred.Status = domain.StatusRejected
+		deferred.RejectionReason = salesConflictDeferredReason
+		deferred.RejectedBy = claims.Subject
+		deferred.RejectedAt = now
+		deferred.UpdatedAt = now
+		s.orders[orderID] = deferred
+		s.bumpLineRevisionLocked(deferred.LineID)
+		s.auditLocked(claims.Subject, "order.sales_conflict_defer", orderID, salesConflictDeferredReason)
+	}
+	delete(s.previews, req.PreviewID)
 	return order, nil
+}
+
+func (s *MemoryStore) validateSalesDeferredOrdersLocked(orderIDs []string, preview previewRecord, claims auth.Claims) ([]string, error) {
+	ids := uniqueOrderIDs(orderIDs)
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	allowed := previewDeferredOrderIDs(preview)
+	for _, orderID := range ids {
+		if !allowed[orderID] {
+			return nil, errors.New("deferred order must belong to preview conflicts")
+		}
+		order, ok := s.orders[orderID]
+		if !ok {
+			return nil, errors.New(errOrderNotFoundPrefix + orderID)
+		}
+		if order.CreatedBy != claims.Subject {
+			return nil, errors.New("sales can defer only their own orders")
+		}
+		if order.LineID != preview.LineID {
+			return nil, errors.New("deferred order line must match preview line")
+		}
+		if order.Status != domain.StatusPending {
+			return nil, errors.New("only pending preview conflicts can be deferred")
+		}
+	}
+	return ids, nil
+}
+
+func previewDeferredOrderIDs(preview previewRecord) map[string]bool {
+	allowed := map[string]bool{}
+	for _, conflict := range preview.Conflicts {
+		if conflict.OrderID != "" && conflict.OrderID != previewDraftOrderID {
+			allowed[conflict.OrderID] = true
+		}
+		for _, orderID := range conflict.AffectedOrderIDs {
+			if orderID != "" && orderID != previewDraftOrderID {
+				allowed[orderID] = true
+			}
+		}
+	}
+	return allowed
 }
 
 func (s *MemoryStore) CreateDemoConflictOrders(req demoConflictRequest, claims auth.Claims) ([]domain.Order, error) {

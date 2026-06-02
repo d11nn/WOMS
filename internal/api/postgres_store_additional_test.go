@@ -69,6 +69,7 @@ func TestPostgresStore_ResubmitOrder(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE orders SET").WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("UPDATE production_lines").WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("DELETE FROM schedule_allocations").WithArgs("ORD-1").WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("INSERT INTO audit_logs").WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 

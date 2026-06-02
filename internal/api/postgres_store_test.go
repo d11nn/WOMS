@@ -533,6 +533,10 @@ func TestPostgresStore_UpdateOrderDueDate(t *testing.T) {
 		WithArgs("line-a").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
+	mock.ExpectExec("DELETE FROM schedule_allocations").
+		WithArgs("ORD-001").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
 	mock.ExpectExec("INSERT INTO audit_logs").
 		WithArgs(sqlmock.AnyArg(), "sales-user", "order.update_due_date", "ORD-001", "2026-06-05").
 		WillReturnResult(sqlmock.NewResult(1, 1))
@@ -578,6 +582,10 @@ func TestPostgresStore_RejectOrders(t *testing.T) {
 
 	mock.ExpectExec("UPDATE production_lines SET schedule_revision").
 		WithArgs("line-a").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	mock.ExpectExec("DELETE FROM schedule_allocations").
+		WithArgs("ORD-001").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
 	mock.ExpectExec("INSERT INTO audit_logs").

@@ -1726,7 +1726,7 @@ function renderSolutionNotice(allocations) {
 
 function canMoveOrder(orderId) {
   const order = state.orders.find((item) => item.id === orderId);
-  if (!order || order.status !== statuses[1] || order.priority !== "low") {
+  if (order?.status !== statuses[1] || order?.priority !== "low") {
     return false;
   }
   const allocations = state.calendarAllocations.filter((allocation) => allocation.orderId === orderId);

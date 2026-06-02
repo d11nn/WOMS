@@ -2,7 +2,9 @@ FROM golang:1.22-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 COPY cmd ./cmd
+COPY db ./db
 COPY internal ./internal
+RUN chmod -R a+rX /src/db
 RUN go test ./...
 RUN CGO_ENABLED=0 GOOS=linux go build -o /out/woms-scheduler-worker ./cmd/scheduler-worker
 

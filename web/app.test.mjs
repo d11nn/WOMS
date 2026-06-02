@@ -1656,6 +1656,78 @@ test("preview calendars keep the same visible dates as the monthly calendar", as
   }
 });
 
+test("sales calendar mode renders all pending and scheduled allocation sources", async () => {
+  const document = buildDomFromIndex();
+  const allocationDateFor = (path, day) => {
+    const month = decodeURIComponent(String(path).match(/[?&]month=([^&]+)/)?.[1] ?? "2026-06");
+    return `${month}-${String(day).padStart(2, "0")}`;
+  };
+  const fetchImpl = async (path) => {
+    if (path === "/api/auth/login") {
+      return jsonResponse({
+        token: "token-sales",
+        user: { id: "user-sales", username: "sales", role: "sales" },
+      });
+    }
+    if (path === "/api/lines") {
+      return jsonResponse({
+        lines: [{ id: "A", name: "Line A", capacityPerDay: 10000, timezone: "Asia/Taipei" }],
+      });
+    }
+    if (path === "/api/orders") {
+      return jsonResponse({ orders: [] });
+    }
+    if (String(path).startsWith("/api/schedules/calendar?")) {
+      return jsonResponse({
+        allocations: [
+          { orderId: "ORD-SCHEDULED-CAL", customer: "Scheduled", lineId: "A", date: allocationDateFor(path, 10), quantity: 1000, priority: "low", status: "已排程" },
+        ],
+        pendingAllocations: [
+          { orderId: "ORD-PENDING-CAL", customer: "Pending", lineId: "A", date: allocationDateFor(path, 11), quantity: 2000, priority: "high", status: "待排程" },
+        ],
+      });
+    }
+    if (String(path).startsWith("/api/schedules/history?")) {
+      return jsonResponse({ history: [] });
+    }
+    throw new Error(`unexpected fetch ${path}`);
+  };
+  const restoreGlobals = installBrowserGlobalsWithFetch(document, fetchImpl);
+  try {
+    await import(appModuleUrl("sales-calendar-mode-sources"));
+
+    await document.getElementById("login-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+
+    const grid = document.getElementById("calendar-grid");
+    const modeControl = document.getElementById("main-calendar-mode");
+    const pendingButton = document.querySelector('button[data-calendar-mode="pending"]');
+    const scheduledButton = document.querySelector('button[data-calendar-mode="scheduled"]');
+    const allButton = document.querySelector('button[data-calendar-mode="all"]');
+
+    assert.equal(modeControl.hidden, false);
+    assert.equal(allButton.getAttribute("aria-pressed"), "true");
+    assert.match(renderedMarkup(grid), /ORD-SCHEDULED-CAL/);
+    assert.match(renderedMarkup(grid), /ORD-PENDING-CAL/);
+    assert.equal(grid.children.some((cell) => cell.classList.contains("preview-highlight")), true);
+
+    await modeControl.dispatchEvent({ type: "click", target: pendingButton });
+    await settleApp();
+    assert.equal(pendingButton.getAttribute("aria-pressed"), "true");
+    assert.match(renderedMarkup(grid), /ORD-PENDING-CAL/);
+    assert.doesNotMatch(renderedMarkup(grid), /ORD-SCHEDULED-CAL/);
+
+    await modeControl.dispatchEvent({ type: "click", target: scheduledButton });
+    await settleApp();
+    assert.equal(scheduledButton.getAttribute("aria-pressed"), "true");
+    assert.match(renderedMarkup(grid), /ORD-SCHEDULED-CAL/);
+    assert.doesNotMatch(renderedMarkup(grid), /ORD-PENDING-CAL/);
+    assert.equal(grid.children.some((cell) => cell.classList.contains("preview-highlight")), false);
+  } finally {
+    restoreGlobals();
+  }
+});
+
 test("scheduler bulk controls filter select preview reject cancel and schedule selected orders", () => {
   const app = readFileSync(new URL("./app.js", import.meta.url), "utf8");
   const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");

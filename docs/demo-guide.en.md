@@ -9,11 +9,9 @@ This document is designed for the demo walkthrough scheduled for tomorrow evenin
 To ensure a smooth presentation, we have set the daily capacity of Line A to **10,000**, and completely filled its capacity for June 4 and June 5 with Low-priority orders:
 *   **Line A**:
     *   `ORD-DEMO-3` ~ `ORD-DEMO-6` (Low, 2,500 each, Due June 4) - Exactly fills June 4 capacity (10,000).
-    *   `ORD-DEMO-7` ~ `ORD-DEMO-8` (Low, 5,000 each, Due June 5) - Exactly fills June 5 capacity (10,000).
+    *   `ORD-DEMO-2`, `ORD-DEMO-7`, `ORD-DEMO-8`, `ORD-DEMO-9` (Low, 2,500 each, Due June 5) - Exactly fills June 5 capacity (10,000).
 *   **Line B**:
     *   `ORD-DEMO-1` (High, 2,500, Due June 4)
-    *   `ORD-DEMO-2` (High, 2,500, Due June 5)
-    *   `ORD-DEMO-9` (Low, 5,000, Due June 6)
 
 ---
 

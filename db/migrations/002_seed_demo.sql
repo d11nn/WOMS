@@ -25,12 +25,12 @@ INSERT INTO orders (
 )
 VALUES
     ('ORD-DEMO-1', 'TSMC', 'B', 2500, 'high', '待排程', '2026-06-04', 'user-sales', NOW(), NOW()),
-    ('ORD-DEMO-2', 'UMC', 'B', 2500, 'high', '待排程', '2026-06-05', 'user-sales', NOW(), NOW()),
+    ('ORD-DEMO-2', 'ASE', 'A', 2500, 'low', '待排程', '2026-06-05', 'user-sales', NOW(), NOW()),
     ('ORD-DEMO-3', 'TSMC', 'A', 2500, 'low', '待排程', '2026-06-04', 'user-sales', NOW(), NOW()),
     ('ORD-DEMO-4', 'TSMC', 'A', 2500, 'low', '待排程', '2026-06-04', 'user-sales', NOW(), NOW()),
     ('ORD-DEMO-5', 'TSMC', 'A', 2500, 'low', '待排程', '2026-06-04', 'user-sales', NOW(), NOW()),
     ('ORD-DEMO-6', 'TSMC', 'A', 2500, 'low', '待排程', '2026-06-04', 'user-sales', NOW(), NOW()),
-    ('ORD-DEMO-7', 'ASE', 'A', 5000, 'low', '待排程', '2026-06-05', 'user-sales', NOW(), NOW()),
-    ('ORD-DEMO-8', 'ASE', 'A', 5000, 'low', '待排程', '2026-06-05', 'user-sales', NOW(), NOW()),
-    ('ORD-DEMO-9', 'UMC', 'B', 5000, 'low', '待排程', '2026-06-06', 'user-sales', NOW(), NOW())
+    ('ORD-DEMO-7', 'ASE', 'A', 2500, 'low', '待排程', '2026-06-05', 'user-sales', NOW(), NOW()),
+    ('ORD-DEMO-8', 'ASE', 'A', 2500, 'low', '待排程', '2026-06-05', 'user-sales', NOW(), NOW()),
+    ('ORD-DEMO-9', 'ASE', 'A', 2500, 'low', '待排程', '2026-06-05', 'user-sales', NOW(), NOW())
 ON CONFLICT (id) DO NOTHING;

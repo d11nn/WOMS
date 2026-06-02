@@ -981,9 +981,9 @@ test("scheduler workspace renders orders calendar history and previews selected 
     if (String(path).startsWith("/api/schedules/calendar?")) {
       return jsonResponse({
         allocations: [
-          { orderId: "ORD-SCHEDULED", customer: "Beta", lineId: "A", date: dateKeyAfter(2), quantity: 1500, priority: "low", status: "已排程" },
-          { orderId: "ORD-PROD", customer: "Gamma", lineId: "A", date: dateKeyAfter(3), quantity: 900, priority: "low", status: "生產中" },
-          { orderId: "ORD-DONE", customer: "Done", lineId: "A", date: dateKeyAfter(4), quantity: 700, completedQuantity: 650, priority: "low", status: "已完成" },
+          { orderId: "ORD-SCHEDULED", customer: "Beta", lineId: "A", date: dateKeyAfter(2), quantity: 1500, priority: "low", status: "已排程", dueDate: dateKeyAfter(8) },
+          { orderId: "ORD-PROD", customer: "Gamma", lineId: "A", date: dateKeyAfter(3), quantity: 900, priority: "low", status: "生產中", dueDate: dateKeyAfter(9) },
+          { orderId: "ORD-DONE", customer: "Done", lineId: "A", date: dateKeyAfter(4), quantity: 700, completedQuantity: 650, priority: "low", status: "已完成", dueDate: dateKeyAfter(10) },
         ],
         pendingAllocations: [],
       });
@@ -1041,6 +1041,8 @@ test("scheduler workspace renders orders calendar history and previews selected 
     assert.equal(document.getElementById("orders-body").children.length, 3);
     assert.equal(document.getElementById("calendar-grid").children.length, 42);
     assert.match(renderedMarkup(document.getElementById("calendar-grid")), /ORD-SCHEDULED/);
+    assert.match(renderedMarkup(document.getElementById("calendar-grid")), new RegExp(`Beta · 1,500 片 · 交期 ${dateKeyAfter(8).replaceAll("-", "/")}`));
+    assert.match(renderedMarkup(document.getElementById("calendar-grid")), /低 · 已排程/);
     assert.match(renderedMarkup(document.getElementById("schedule-history-list")), /排程成功/);
     assert.equal(document.getElementById("selected-count").textContent, "已選取 0 張訂單");
 

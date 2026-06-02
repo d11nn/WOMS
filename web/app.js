@@ -1768,13 +1768,27 @@ function renderCalendarItem(allocation) {
   return `
     <${tag} class="calendar-item ${priorityClass(allocation.priority)} ${allocation.preview ? "preview-item-inline" : ""} ${movedClass} ${movedFromClass} ${quantityChangedClass} ${childOrderClass} ${conflictClass}" ${attrs}>
       <strong>${escapeHtml(allocation.orderId)}</strong>
-      <span>${escapeHtml(allocation.customer ?? "Preview")} · ${calendarDisplayQuantity(allocation).toLocaleString()} 片</span>
+      <span>${escapeHtml(calendarOrderSummary(allocation))}</span>
       <span>${priorityLabel(allocation.priority)} · ${escapeHtml(allocation.status ?? "試排")}</span>
       ${movedNote}
       ${quantityNote}
       ${childNote}
     </${tag}>
   `;
+}
+
+function calendarOrderSummary(allocation) {
+  const customer = allocation.customer ?? "Preview";
+  const dueDate = calendarDueDateLabel(allocation.dueDate);
+  const dueDateText = dueDate ? ` · 交期 ${dueDate}` : "";
+  return `${customer} · ${calendarDisplayQuantity(allocation).toLocaleString()} 片${dueDateText}`;
+}
+
+function calendarDueDateLabel(value) {
+  if (!value) {
+    return "";
+  }
+  return dateOnly(value).replaceAll("-", "/");
 }
 
 function isNewChildScheduledAllocation(allocation) {

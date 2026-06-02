@@ -2718,10 +2718,29 @@ func (s *MemoryStore) HPAPeakJobs() []domain.ScheduleJob {
 	return jobs
 }
 
+func isHPADemoJob(job domain.ScheduleJob) bool {
+	return job.Source == hpaDemoSource || isHPADemoLine(job.LineID)
+}
+
+func shouldCancelHPADemoJob(job domain.ScheduleJob) bool {
+	return job.Status == domain.JobQueued || job.Status == domain.JobRunning
+}
+
 func (s *MemoryStore) clearHPAPeakDemoLocked(actorID string) {
+	s.clearHPAPeakDemoJobsLocked()
+	s.clearHPAPeakDemoOrdersLocked()
+	s.clearHPAPeakDemoAllocationsLocked()
+	s.clearHPAPeakDemoLinesLocked()
+	s.clearHPAPeakDemoAuditsLocked()
+	if actorID != "" {
+		s.auditLocked(actorID, "demo.hpa_peak.clear", hpaDemoSource, hpaDemoSource)
+	}
+}
+
+func (s *MemoryStore) clearHPAPeakDemoJobsLocked() {
 	for id, job := range s.jobs {
-		if job.Source == hpaDemoSource || isHPADemoLine(job.LineID) {
-			if job.Status == domain.JobQueued || job.Status == domain.JobRunning {
+		if isHPADemoJob(job) {
+			if shouldCancelHPADemoJob(job) {
 				job.Status = domain.JobCancelled
 				job.Message = "排程尖峰展示已取消。"
 				job.UpdatedAt = time.Now().UTC()
@@ -2731,11 +2750,17 @@ func (s *MemoryStore) clearHPAPeakDemoLocked(actorID string) {
 			delete(s.jobs, id)
 		}
 	}
+}
+
+func (s *MemoryStore) clearHPAPeakDemoOrdersLocked() {
 	for id, order := range s.orders {
 		if isHPADemoLine(order.LineID) {
 			delete(s.orders, id)
 		}
 	}
+}
+
+func (s *MemoryStore) clearHPAPeakDemoAllocationsLocked() {
 	keptAllocations := s.allocations[:0]
 	for _, allocation := range s.allocations {
 		if !isHPADemoLine(allocation.LineID) {
@@ -2743,11 +2768,17 @@ func (s *MemoryStore) clearHPAPeakDemoLocked(actorID string) {
 		}
 	}
 	s.allocations = keptAllocations
+}
+
+func (s *MemoryStore) clearHPAPeakDemoLinesLocked() {
 	for lineID := range s.lines {
 		if isHPADemoLine(lineID) {
 			delete(s.lines, lineID)
 		}
 	}
+}
+
+func (s *MemoryStore) clearHPAPeakDemoAuditsLocked() {
 	keptAudits := s.audits[:0]
 	for _, audit := range s.audits {
 		if audit.Reason == hpaDemoSource {
@@ -2759,9 +2790,6 @@ func (s *MemoryStore) clearHPAPeakDemoLocked(actorID string) {
 		keptAudits = append(keptAudits, audit)
 	}
 	s.audits = keptAudits
-	if actorID != "" {
-		s.auditLocked(actorID, "demo.hpa_peak.clear", hpaDemoSource, hpaDemoSource)
-	}
 }
 
 func (s *MemoryStore) resetHPAPeakDemoLocked(actorID string) {

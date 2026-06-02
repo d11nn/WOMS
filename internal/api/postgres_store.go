@@ -1934,6 +1934,20 @@ func (s *PostgresStore) pendingOrderInputs(lineID string, selected map[string]bo
 	return inputs, nil
 }
 
+func checkInfoisValide(orderLineID string, lineID string, status string, priority domain.Priority) error {
+
+	if orderLineID != lineID {
+		return errors.New("resolution order line must match preview line")
+	}
+	if status != string(domain.StatusScheduled) {
+		return errors.New(resolutionOrdersMsg)
+	}
+	if priority != domain.PriorityLow {
+		return errors.New(resolutionOrdersMsg)
+	}
+	return nil
+}
+
 func (s *PostgresStore) resolutionOrderInputs(resolutionOrderIDs []string, lineID string) ([]scheduler.OrderInput, error) {
 	ids := uniqueOrderIDs(resolutionOrderIDs)
 	if len(ids) == 0 {
@@ -1963,14 +1977,8 @@ func (s *PostgresStore) resolutionOrderInputs(resolutionOrderIDs []string, lineI
 		if err := rows.Scan(&id, &customer, &orderLineID, &quantity, &priority, &status, &dueDate, &createdAt); err != nil {
 			return nil, err
 		}
-		if orderLineID != lineID {
-			return nil, errors.New("resolution order line must match preview line")
-		}
-		if status != string(domain.StatusScheduled) {
-			return nil, errors.New(resolutionOrdersMsg)
-		}
-		if priority != domain.PriorityLow {
-			return nil, errors.New(resolutionOrdersMsg)
+		if err := checkInfoisValide(orderLineID, lineID, status, priority); err != nil {
+			return nil, err
 		}
 		if err := s.ensureResolutionOrderMovable(id); err != nil {
 			return nil, err

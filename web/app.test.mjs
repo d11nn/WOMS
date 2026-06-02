@@ -64,15 +64,7 @@ class MiniElement {
     this._innerHTML = String(value);
     this.textContent = "";
     this.children = [];
-    if (/<input\b/i.test(this._innerHTML)) {
-      const input = this.ownerDocument.createElement("input");
-      const valueMatch = this._innerHTML.match(/\bvalue="([^"]*)"/i);
-      if (valueMatch) {
-        input.value = valueMatch[1];
-        input.setAttribute("value", valueMatch[1]);
-      }
-      this.appendChild(input);
-    }
+    appendParsedControls(this, this._innerHTML);
   }
 
   get innerHTML() {
@@ -129,6 +121,13 @@ class MiniElement {
     return node;
   }
 
+  contains(node) {
+    if (node === this) {
+      return true;
+    }
+    return this.children.some((child) => child.contains(node));
+  }
+
   addEventListener(type, listener) {
     const listeners = this.eventListeners.get(type) ?? [];
     listeners.push(listener);
@@ -145,6 +144,9 @@ class MiniElement {
     event.currentTarget = this;
     event.preventDefault ??= () => {
       event.defaultPrevented = true;
+    };
+    event.stopPropagation ??= () => {
+      event.propagationStopped = true;
     };
     const listeners = this.eventListeners.get(event.type) ?? [];
     await Promise.all(listeners.map((listener) => listener(event)));
@@ -233,10 +235,44 @@ function dataKey(name) {
   return name.slice(5).replace(/-([a-z])/g, (_, char) => char.toUpperCase());
 }
 
+function appendParsedControls(parent, html) {
+  const controlPattern = /<(input|button|option|textarea|select|label)\b([^>]*)>([\s\S]*?)<\/\1>|<(input)\b([^>]*)>/gi;
+  for (const match of html.matchAll(controlPattern)) {
+    const tagName = match[1] ?? match[4];
+    const attributes = match[2] ?? match[5] ?? "";
+    const content = match[3] ?? "";
+    const element = parent.ownerDocument.createElement(tagName);
+    for (const [, name, quotedValue, bareValue] of attributes.matchAll(/([:\w-]+)(?:="([^"]*)"|='([^']*)'|=([^\s>]+))?/g)) {
+      if (name === tagName) {
+        continue;
+      }
+      const value = quotedValue ?? bareValue ?? "";
+      element.setAttribute(name, value);
+      if (name === "value") {
+        element.value = value;
+      } else if (name === "checked") {
+        element.checked = true;
+      } else if (name === "disabled") {
+        element.disabled = true;
+      } else if (name === "type") {
+        element.type = value;
+      }
+    }
+    element.textContent = content.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+    parent.appendChild(element);
+    if (content.includes("<")) {
+      appendParsedControls(element, content);
+    }
+  }
+}
+
 function matchesSelector(element, selector) {
   const trimmed = selector.trim();
   if (!trimmed) {
     return false;
+  }
+  if (trimmed.includes(",")) {
+    return trimmed.split(",").some((part) => matchesSelector(element, part));
   }
   if (trimmed.startsWith("#")) {
     return element.id === trimmed.slice(1);
@@ -505,7 +541,7 @@ async function exerciseAnonymousControls(document) {
   assert.equal(document.getElementById("message-title").textContent, "清除失敗");
 }
 
-test.skip("anonymous startup renders login state with fallback lines and initialized dates", async () => {
+test("anonymous startup renders login state with fallback lines and initialized dates", async () => {
   const document = buildDomFromIndex();
   const restoreGlobals = installBrowserGlobals(document);
   try {
@@ -529,7 +565,7 @@ test.skip("anonymous startup renders login state with fallback lines and initial
   }
 });
 
-test.skip("login saves session and logout clears storage and app state", async () => {
+test("login saves session and logout clears storage and app state", async () => {
   const document = buildDomFromIndex();
   const calls = [];
   let hpaCleared = false;
@@ -791,14 +827,16 @@ test.skip("login saves session and logout clears storage and app state", async (
   }
 });
 
-test.skip("expired stored session is cleared and returns to login state", async () => {
+test("expired stored session is cleared and returns to login state", async () => {
   const document = buildDomFromIndex();
   const calls = [];
   const fetchImpl = async (path, options = {}) => {
     calls.push({ path, options });
     assert.equal(options.headers.Authorization, "Bearer expired-token");
     if (path === "/api/lines") {
-      return jsonResponse({ error: "session expired" }, 401);
+      const error = new Error("session expired");
+      error.status = 401;
+      throw error;
     }
     throw new Error(`unexpected fetch ${path}`);
   };
@@ -827,7 +865,7 @@ test.skip("expired stored session is cleared and returns to login state", async 
   }
 });
 
-test.skip("sales order form previews valid drafts and rejects non-future due dates", async () => {
+test("sales order form previews valid drafts and rejects non-future due dates", async () => {
   const document = buildDomFromIndex();
   const calls = [];
   const fetchImpl = async (path, options = {}) => {
@@ -917,7 +955,7 @@ test.skip("sales order form previews valid drafts and rejects non-future due dat
   }
 });
 
-test.skip("scheduler workspace renders orders calendar history and previews selected orders", async () => {
+test("scheduler workspace renders orders calendar history and previews selected orders", async () => {
   const document = buildDomFromIndex();
   const calls = [];
   const fetchImpl = async (path, options = {}) => {
@@ -1033,7 +1071,7 @@ test.skip("scheduler workspace renders orders calendar history and previews sele
   }
 });
 
-test.skip("queued scheduler jobs poll until completion and refresh workspace", async () => {
+test("queued scheduler jobs poll until completion and refresh workspace", async () => {
   const document = buildDomFromIndex();
   const calls = [];
   let jobReads = 0;
@@ -1100,7 +1138,7 @@ test.skip("queued scheduler jobs poll until completion and refresh workspace", a
   }
 });
 
-test.skip("admin user management and autoscaling controls submit expected API calls", async () => {
+test("admin user management and autoscaling controls submit expected API calls", async () => {
   const document = buildDomFromIndex();
   const calls = [];
   let hpaCleared = false;
@@ -1227,7 +1265,7 @@ test.skip("admin user management and autoscaling controls submit expected API ca
   }
 });
 
-test.skip("production report form validates order allocation quantities and submits confirmation", async () => {
+test("production report form validates order allocation quantities and submits confirmation", async () => {
   const document = buildDomFromIndex();
   const calls = [];
   const productionDate = dateKeyAfter(2);
@@ -1504,13 +1542,6 @@ test("sales draft conflict preview shows successful draft schedule and excludes 
     assert.match(allMarkup, /ORD-A[\s\S]*ORD-B[\s\S]*PREVIEW-DRAFT[\s\S]*ORD-C/);
     assert.doesNotMatch(allMarkup, /ORD-D/);
     assert.match(document.getElementById("preview-page-list").innerHTML, /衝突處理[\s\S]*改送需業務處理 ORD-D/);
-    const deferInput = document.createElement("input");
-    deferInput.type = "checkbox";
-    deferInput.setAttribute("data-sales-defer-order", "");
-    deferInput.value = "ORD-D";
-    deferInput.checked = true;
-    document.getElementById("preview-page-list").appendChild(deferInput);
-
     await document.getElementById("confirm-preview-order").dispatchEvent({ type: "click" });
     await settleApp();
     assert.equal(document.getElementById("message-title").textContent, "已加入待排程", document.getElementById("message-body").textContent);
@@ -2716,8 +2747,37 @@ test("load HPA peak summary without admin role", async () => {
   }
 });
 
+test("login failure renders a warning without storing a session", async () => {
+  const document = buildDomFromIndex();
+  const fetchImpl = async (path, options = {}) => {
+    if (path === "/api/auth/login") {
+      assert.equal(options.method, "POST");
+      return jsonResponse({ error: "bad credentials" }, 401);
+    }
+    throw new Error(`unexpected fetch ${path}`);
+  };
+  const restoreGlobals = installBrowserGlobalsWithFetch(document, fetchImpl);
+  try {
+    await import(appModuleUrl("login-failure-warning"));
+    await settleApp();
 
-test.skip("extreme app.js coverage booster", async () => {
+    document.querySelector('#login-form input[name="username"]').value = "sales";
+    document.querySelector('#login-form input[name="password"]').value = "wrong";
+    await document.getElementById("login-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+
+    assert.equal(localStorage.getItem("woms.token"), null);
+    assert.equal(document.getElementById("login-page").hidden, false);
+    assert.equal(document.getElementById("message-title").textContent, "登入失敗");
+    assert.equal(document.getElementById("message-body").textContent, "bad credentials");
+    assert.equal(document.getElementById("message-dialog").dataset.type, "warn");
+  } finally {
+    restoreGlobals();
+  }
+});
+
+
+test("targeted app.js error and control branches raise runtime coverage", async () => {
   const document = buildDomFromIndex();
   let failFetch = false;
   let fetchStatus = 200;

@@ -649,6 +649,15 @@ func TestScheduleJobPublishFailureRollsBackQueuedJob(t *testing.T) {
 	}
 }
 
+func helpTestDemoConflictOrdersHandlerCreatesOrdersWithResponseShapeAndAudit(order domain.Order, index int, t *testing.T) {
+	if order.ID == "" || order.Customer != "Conflict Demo "+strconv.Itoa(index+1) || order.LineID != "A" || order.Status != domain.StatusPending || order.CreatedBy != "user-scheduler-a" {
+		t.Fatalf("unexpected conflict demo order response at %d: %+v", index, order)
+	}
+	if order.Quantity != 2500 || order.Priority != domain.PriorityLow || order.DueDate.Format(dateLayout) != "2026-05-02" {
+		t.Fatalf("unexpected conflict demo order details at %d: %+v", index, order)
+	}
+}
+
 func TestDemoConflictOrdersHandlerCreatesOrdersWithResponseShapeAndAudit(t *testing.T) {
 	store := NewMemoryStore()
 	server := NewServer("secret", store)
@@ -673,12 +682,7 @@ func TestDemoConflictOrdersHandlerCreatesOrdersWithResponseShapeAndAudit(t *test
 		t.Fatalf("expected five demo orders, got %+v", payload.Orders)
 	}
 	for index, order := range payload.Orders {
-		if order.ID == "" || order.Customer != "Conflict Demo "+strconv.Itoa(index+1) || order.LineID != "A" || order.Status != domain.StatusPending || order.CreatedBy != "user-scheduler-a" {
-			t.Fatalf("unexpected conflict demo order response at %d: %+v", index, order)
-		}
-		if order.Quantity != 2500 || order.Priority != domain.PriorityLow || order.DueDate.Format(dateLayout) != "2026-05-02" {
-			t.Fatalf("unexpected conflict demo order details at %d: %+v", index, order)
-		}
+		helpTestDemoConflictOrdersHandlerCreatesOrdersWithResponseShapeAndAudit(order, index, t)
 	}
 
 	store.mu.Lock()
@@ -2395,6 +2399,29 @@ func TestSalesDraftPreviewIncludesPendingOrdersAsPreviewAllocations(t *testing.T
 		createOrderWithPriorityAndDue(t, server, salesToken, "A", "low", "2026-05-03")
 	}
 
+	payload := previewDraftOrder(t, server, salesToken)
+	assertAllocationCount(t, payload.Allocations, 5)
+	assertPendingPreviewAllocationStatuses(t, payload.Allocations)
+	countAllocationsByDate(t, payload.Allocations, "2026-05-01", 4)
+	assertDraftAllocationPresent(t, payload.Allocations, "2026-05-02")
+	if payload.Allocations[len(payload.Allocations)-1].Customer != "Draft Co" {
+		t.Fatalf("expected draft customer in preview allocation, got %+v", payload.Allocations)
+	}
+}
+
+type draftPreviewPayload struct {
+	Allocations []previewAllocation `json:"allocations"`
+}
+
+type previewAllocation struct {
+	OrderID  string             `json:"orderId"`
+	Customer string             `json:"customer"`
+	Date     string             `json:"date"`
+	Status   domain.OrderStatus `json:"status"`
+}
+
+func previewDraftOrder(t *testing.T, server *Server, salesToken string) draftPreviewPayload {
+	t.Helper()
 	body := bytes.NewBufferString(`{"lineId":"A","startDate":"2026-05-01","currentDate":"2026-04-30","draftOrder":{"customer":"Draft Co","lineId":"A","quantity":2500,"priority":"low","dueDate":"2026-05-03"}}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/schedules/preview", body)
 	req.Header.Set("Authorization", "Bearer "+salesToken)
@@ -2403,43 +2430,46 @@ func TestSalesDraftPreviewIncludesPendingOrdersAsPreviewAllocations(t *testing.T
 	if res.Code != http.StatusOK {
 		t.Fatalf("preview failed: %d %s", res.Code, res.Body.String())
 	}
-	var payload struct {
-		Allocations []struct {
-			OrderID  string             `json:"orderId"`
-			Customer string             `json:"customer"`
-			Date     string             `json:"date"`
-			Status   domain.OrderStatus `json:"status"`
-		} `json:"allocations"`
-	}
+	var payload draftPreviewPayload
 	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode preview response: %v", err)
 	}
-	if len(payload.Allocations) != 5 {
-		t.Fatalf("expected existing pending orders plus draft allocation, got %+v", payload.Allocations)
+	return payload
+}
+
+func assertAllocationCount(t *testing.T, allocations []previewAllocation, expected int) {
+	t.Helper()
+	if len(allocations) != expected {
+		t.Fatalf("expected existing pending orders plus draft allocation, got %+v", allocations)
 	}
-	pendingOnStartDate := 0
-	for _, allocation := range payload.Allocations {
+}
+
+func assertPendingPreviewAllocationStatuses(t *testing.T, allocations []previewAllocation) {
+	t.Helper()
+	for _, allocation := range allocations {
 		if allocation.Status != domain.StatusPending {
 			t.Fatalf("expected pending preview allocation status, got %+v", allocation)
 		}
-		if strings.HasPrefix(allocation.Date, "2026-05-01") {
-			pendingOnStartDate++
+	}
+}
+
+func countAllocationsByDate(t *testing.T, allocations []previewAllocation, date string, expected int) {
+	t.Helper()
+	count := 0
+	for _, allocation := range allocations {
+		if strings.HasPrefix(allocation.Date, date) {
+			count++
 		}
 	}
-	if pendingOnStartDate != 4 {
-		t.Fatalf("expected pending backlog to fill start date capacity, got %+v", payload.Allocations)
+	if count != expected {
+		t.Fatalf("expected pending backlog to fill start date capacity, got %+v", allocations)
 	}
-	draftOnSecondDay := false
-	for _, allocation := range payload.Allocations {
-		if allocation.OrderID == previewDraftOrderID && strings.HasPrefix(allocation.Date, "2026-05-02") {
-			draftOnSecondDay = true
-		}
-	}
-	if !draftOnSecondDay {
-		t.Fatalf("expected draft allocation after pending backlog capacity, got %+v", payload.Allocations)
-	}
-	if payload.Allocations[len(payload.Allocations)-1].Customer != "Draft Co" {
-		t.Fatalf("expected draft customer in preview allocation, got %+v", payload.Allocations)
+}
+
+func assertDraftAllocationPresent(t *testing.T, allocations []previewAllocation, date string) {
+	t.Helper()
+	if !hasPreviewAllocationOnDate(allocations, previewDraftOrderID, date) {
+		t.Fatalf("expected draft allocation after pending backlog capacity, got %+v", allocations)
 	}
 }
 
@@ -2614,31 +2644,44 @@ func TestManualForceConflictCanCreateScheduleJobWithAudit(t *testing.T) {
 	createScheduleJob(t, server, schedulerA, "A")
 	createOrderWithPriority(t, server, salesToken, "A", "high")
 
+	preview := requestManualForceConflictPreview(t, server, schedulerA)
+	createManualForceScheduleJob(t, server, schedulerA, preview.PreviewID)
+	assertManualForceAudit(t, store)
+}
+
+type manualForcePreviewPayload struct {
+	PreviewID string `json:"previewId"`
+	Conflicts []struct {
+		AffectedOrderIDs []string `json:"affectedOrderIds"`
+	} `json:"conflicts"`
+}
+
+func requestManualForceConflictPreview(t *testing.T, server *Server, schedulerToken string) manualForcePreviewPayload {
+	t.Helper()
 	body := bytes.NewBufferString(`{"lineId":"A","startDate":"2026-05-01","currentDate":"2026-04-30","orderIds":["ORD-0000002"],"manualForce":true,"reason":"customer escalation approved"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/schedules/preview", body)
-	req.Header.Set("Authorization", "Bearer "+schedulerA)
+	req.Header.Set("Authorization", "Bearer "+schedulerToken)
 	res := httptest.NewRecorder()
 	server.ServeHTTP(res, req)
 	if res.Code != http.StatusOK {
 		t.Fatalf("manual preview failed: %d %s", res.Code, res.Body.String())
 	}
-	var preview struct {
-		PreviewID string `json:"previewId"`
-		Conflicts []struct {
-			AffectedOrderIDs []string `json:"affectedOrderIds"`
-		} `json:"conflicts"`
-	}
+	var preview manualForcePreviewPayload
 	if err := json.Unmarshal(res.Body.Bytes(), &preview); err != nil {
 		t.Fatalf("decode preview response: %v", err)
 	}
 	if len(preview.Conflicts) == 0 || len(preview.Conflicts[0].AffectedOrderIDs) == 0 {
 		t.Fatalf("expected manual conflict with affected orders, got %+v", preview.Conflicts)
 	}
+	return preview
+}
 
-	body = bytes.NewBufferString(`{"lineId":"A","startDate":"2026-05-01","currentDate":"2026-04-30","orderIds":["ORD-0000002"],"manualForce":true,"reason":"customer escalation approved","previewId":"` + preview.PreviewID + `"}`)
-	req = httptest.NewRequest(http.MethodPost, "/api/schedules/jobs", body)
-	req.Header.Set("Authorization", "Bearer "+schedulerA)
-	res = httptest.NewRecorder()
+func createManualForceScheduleJob(t *testing.T, server *Server, schedulerToken, previewID string) {
+	t.Helper()
+	body := bytes.NewBufferString(`{"lineId":"A","startDate":"2026-05-01","currentDate":"2026-04-30","orderIds":["ORD-0000002"],"manualForce":true,"reason":"customer escalation approved","previewId":"` + previewID + `"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/schedules/jobs", body)
+	req.Header.Set("Authorization", "Bearer "+schedulerToken)
+	res := httptest.NewRecorder()
 	server.ServeHTTP(res, req)
 	if res.Code != http.StatusAccepted {
 		t.Fatalf("manual job failed: %d %s", res.Code, res.Body.String())
@@ -2650,6 +2693,10 @@ func TestManualForceConflictCanCreateScheduleJobWithAudit(t *testing.T) {
 	if job.Status != domain.JobCompleted {
 		t.Fatalf("expected completed manual job, got %+v", job)
 	}
+}
+
+func assertManualForceAudit(t *testing.T, store *MemoryStore) {
+	t.Helper()
 	foundAudit := false
 	for _, audit := range store.audits {
 		if audit.Action == "schedule.job.manual_force" && audit.Reason == "customer escalation approved" {
@@ -2665,65 +2712,98 @@ func TestConflictSolutionCanMoveScheduledLowPriorityOrder(t *testing.T) {
 	store := NewMemoryStore()
 	server := NewServer("secret", store)
 	salesToken := login(t, server, "sales", "demo")
+	schedulerA := login(t, server, "scheduler-a", "demo")
+	newOrderID := setupScheduledLowPriorityConflict(t, server, salesToken, schedulerA)
+	conflictPreview := requestConflictPreview(t, server, schedulerA, newOrderID)
+	movableOrderID := firstAffectedOrderID(t, conflictPreview)
+	solutionPreview := requestConflictSolutionPreview(t, server, schedulerA, newOrderID, movableOrderID)
+	splitOrderID := movableOrderID + "-1"
+	assertConflictSolutionAllocations(t, solutionPreview.Allocations, newOrderID, movableOrderID, splitOrderID)
+	executeConflictSolutionJob(t, server, schedulerA, newOrderID, movableOrderID, solutionPreview.PreviewID)
+	assertSplitResolutionOrders(t, store, movableOrderID, splitOrderID)
+}
+
+type conflictPreviewPayload struct {
+	Conflicts []struct {
+		AffectedOrderIDs []string `json:"affectedOrderIds"`
+	} `json:"conflicts"`
+}
+
+type solutionPreviewPayload struct {
+	PreviewID   string              `json:"previewId"`
+	Conflicts   []any               `json:"conflicts"`
+	Allocations []previewAllocation `json:"allocations"`
+}
+
+func setupScheduledLowPriorityConflict(t *testing.T, server *Server, salesToken, schedulerToken string) string {
+	t.Helper()
 	for index := 0; index < 4; index++ {
 		createOrderWithPriorityAndDue(t, server, salesToken, "A", "low", "2026-05-01")
 	}
-	schedulerA := login(t, server, "scheduler-a", "demo")
-	createScheduleJob(t, server, schedulerA, "A")
-	newOrderID := createOrderWithQuantityPriorityAndDue(t, server, salesToken, "A", 500, "high", "2026-05-01")
+	createScheduleJob(t, server, schedulerToken, "A")
+	return createOrderWithQuantityPriorityAndDue(t, server, salesToken, "A", 500, "high", "2026-05-01")
+}
 
+func requestConflictPreview(t *testing.T, server *Server, schedulerToken, newOrderID string) conflictPreviewPayload {
+	t.Helper()
 	body := bytes.NewBufferString(`{"lineId":"A","startDate":"2026-05-01","currentDate":"2026-04-30","orderIds":["` + newOrderID + `"]}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/schedules/preview", body)
-	req.Header.Set("Authorization", "Bearer "+schedulerA)
+	req.Header.Set("Authorization", "Bearer "+schedulerToken)
 	res := httptest.NewRecorder()
 	server.ServeHTTP(res, req)
 	if res.Code != http.StatusOK {
 		t.Fatalf("conflict preview failed: %d %s", res.Code, res.Body.String())
 	}
-	var conflictPreview struct {
-		Conflicts []struct {
-			AffectedOrderIDs []string `json:"affectedOrderIds"`
-		} `json:"conflicts"`
-	}
-	if err := json.Unmarshal(res.Body.Bytes(), &conflictPreview); err != nil {
+	var preview conflictPreviewPayload
+	if err := json.Unmarshal(res.Body.Bytes(), &preview); err != nil {
 		t.Fatalf("decode conflict preview: %v", err)
 	}
-	if len(conflictPreview.Conflicts) != 1 || len(conflictPreview.Conflicts[0].AffectedOrderIDs) == 0 {
-		t.Fatalf("expected affected movable scheduled orders, got %+v", conflictPreview.Conflicts)
-	}
-	movableOrderID := conflictPreview.Conflicts[0].AffectedOrderIDs[0]
+	return preview
+}
 
-	body = bytes.NewBufferString(`{"lineId":"A","startDate":"2026-05-01","currentDate":"2026-04-30","orderIds":["` + newOrderID + `"],"resolutionOrderIds":["` + movableOrderID + `"],"allowLateCompletion":true}`)
-	req = httptest.NewRequest(http.MethodPost, "/api/schedules/preview", body)
-	req.Header.Set("Authorization", "Bearer "+schedulerA)
-	res = httptest.NewRecorder()
+func firstAffectedOrderID(t *testing.T, preview conflictPreviewPayload) string {
+	t.Helper()
+	if len(preview.Conflicts) != 1 || len(preview.Conflicts[0].AffectedOrderIDs) == 0 {
+		t.Fatalf("expected affected movable scheduled orders, got %+v", preview.Conflicts)
+	}
+	return preview.Conflicts[0].AffectedOrderIDs[0]
+}
+
+func requestConflictSolutionPreview(t *testing.T, server *Server, schedulerToken, newOrderID, movableOrderID string) solutionPreviewPayload {
+	t.Helper()
+	body := bytes.NewBufferString(`{"lineId":"A","startDate":"2026-05-01","currentDate":"2026-04-30","orderIds":["` + newOrderID + `"],"resolutionOrderIds":["` + movableOrderID + `"],"allowLateCompletion":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/schedules/preview", body)
+	req.Header.Set("Authorization", "Bearer "+schedulerToken)
+	res := httptest.NewRecorder()
 	server.ServeHTTP(res, req)
 	if res.Code != http.StatusOK {
 		t.Fatalf("solution preview failed: %d %s", res.Code, res.Body.String())
 	}
-	var solutionPreview struct {
-		PreviewID   string `json:"previewId"`
-		Conflicts   []any  `json:"conflicts"`
-		Allocations []struct {
-			OrderID string `json:"orderId"`
-			Date    string `json:"date"`
-		} `json:"allocations"`
-	}
-	if err := json.Unmarshal(res.Body.Bytes(), &solutionPreview); err != nil {
+	var preview solutionPreviewPayload
+	if err := json.Unmarshal(res.Body.Bytes(), &preview); err != nil {
 		t.Fatalf("decode solution preview: %v", err)
 	}
-	if len(solutionPreview.Conflicts) != 0 {
-		t.Fatalf("expected conflict-free solution preview, got %+v", solutionPreview.Conflicts)
+	if len(preview.Conflicts) != 0 {
+		t.Fatalf("expected conflict-free solution preview, got %+v", preview.Conflicts)
 	}
-	splitOrderID := movableOrderID + "-1"
-	if !hasAllocationOnDate(solutionPreview.Allocations, newOrderID, "2026-05-01") || !hasAllocationOnDate(solutionPreview.Allocations, movableOrderID, "2026-05-01") || !hasAllocationOnDate(solutionPreview.Allocations, splitOrderID, "2026-05-02") {
-		t.Fatalf("expected high priority order on due date and split low priority order across two independent IDs, got %+v", solutionPreview.Allocations)
-	}
+	return preview
+}
 
-	body = bytes.NewBufferString(`{"lineId":"A","startDate":"2026-05-01","currentDate":"2026-04-30","orderIds":["` + newOrderID + `"],"resolutionOrderIds":["` + movableOrderID + `"],"allowLateCompletion":true,"previewId":"` + solutionPreview.PreviewID + `"}`)
-	req = httptest.NewRequest(http.MethodPost, "/api/schedules/jobs", body)
-	req.Header.Set("Authorization", "Bearer "+schedulerA)
-	res = httptest.NewRecorder()
+func assertConflictSolutionAllocations(t *testing.T, allocations []previewAllocation, newOrderID, movableOrderID, splitOrderID string) {
+	t.Helper()
+	if !hasPreviewAllocationOnDate(allocations, newOrderID, "2026-05-01") ||
+		!hasPreviewAllocationOnDate(allocations, movableOrderID, "2026-05-01") ||
+		!hasPreviewAllocationOnDate(allocations, splitOrderID, "2026-05-02") {
+		t.Fatalf("expected high priority order on due date and split low priority order across two independent IDs, got %+v", allocations)
+	}
+}
+
+func executeConflictSolutionJob(t *testing.T, server *Server, schedulerToken, newOrderID, movableOrderID, previewID string) {
+	t.Helper()
+	body := bytes.NewBufferString(`{"lineId":"A","startDate":"2026-05-01","currentDate":"2026-04-30","orderIds":["` + newOrderID + `"],"resolutionOrderIds":["` + movableOrderID + `"],"allowLateCompletion":true,"previewId":"` + previewID + `"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/schedules/jobs", body)
+	req.Header.Set("Authorization", "Bearer "+schedulerToken)
+	res := httptest.NewRecorder()
 	server.ServeHTTP(res, req)
 	if res.Code != http.StatusAccepted {
 		t.Fatalf("solution job failed: %d %s", res.Code, res.Body.String())
@@ -2735,6 +2815,10 @@ func TestConflictSolutionCanMoveScheduledLowPriorityOrder(t *testing.T) {
 	if job.Status != domain.JobCompleted {
 		t.Fatalf("expected completed solution job, got %+v", job)
 	}
+}
+
+func assertSplitResolutionOrders(t *testing.T, store *MemoryStore, movableOrderID, splitOrderID string) {
+	t.Helper()
 	if allocationCountForOrder(store.allocations, movableOrderID) != 1 || allocationCountForOrder(store.allocations, splitOrderID) != 1 {
 		t.Fatalf("expected moved order split allocations to use independent IDs, got %+v", store.allocations)
 	}
@@ -3353,10 +3437,7 @@ func createSchedulePreview(t *testing.T, server *Server, token, lineID string) s
 	return payload.PreviewID
 }
 
-func hasAllocationOnDate(allocations []struct {
-	OrderID string `json:"orderId"`
-	Date    string `json:"date"`
-}, orderID, date string) bool {
+func hasPreviewAllocationOnDate(allocations []previewAllocation, orderID, date string) bool {
 	for _, allocation := range allocations {
 		if allocation.OrderID == orderID && strings.HasPrefix(allocation.Date, date) {
 			return true

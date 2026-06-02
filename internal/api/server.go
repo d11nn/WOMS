@@ -2186,24 +2186,38 @@ func (s *MemoryStore) scheduleOrderInputsLocked(lineID string, currentDate time.
 }
 
 func (s *MemoryStore) draftOrderInputsLocked(lineID string, currentDate time.Time, req scheduleRequest, claims auth.Claims) ([]scheduler.OrderInput, error) {
+	draft, dueDate, err := validateDraftPreviewRequest(lineID, currentDate, req, claims, s.lines)
+	if err != nil {
+		return nil, err
+	}
+	inputs := []scheduler.OrderInput{draftOrderInput(draft, dueDate)}
+	inputs = append(inputs, s.pendingOrderInputsForLineLocked(lineID)...)
+	return inputs, nil
+}
+
+func validateDraftPreviewRequest(lineID string, currentDate time.Time, req scheduleRequest, claims auth.Claims, lines map[string]domain.ProductionLine) (createOrderRequest, time.Time, error) {
 	if claims.Role != domain.RoleSales {
-		return nil, errors.New("only sales can preview draft orders")
+		return createOrderRequest{}, time.Time{}, errors.New("only sales can preview draft orders")
 	}
 	draft := *req.DraftOrder
 	if draft.LineID == "" {
 		draft.LineID = lineID
 	}
 	if draft.LineID != lineID {
-		return nil, errors.New("draft order line must match preview line")
+		return createOrderRequest{}, time.Time{}, errors.New("draft order line must match preview line")
 	}
 	if draft.Priority == "" {
 		draft.Priority = domain.PriorityLow
 	}
-	dueDate, err := validateOrderRequest(draft, s.lines, effectiveCurrentDate(currentDate))
+	dueDate, err := validateOrderRequest(draft, lines, effectiveCurrentDate(currentDate))
 	if err != nil {
-		return nil, err
+		return createOrderRequest{}, time.Time{}, err
 	}
-	inputs := []scheduler.OrderInput{{
+	return draft, dueDate, nil
+}
+
+func draftOrderInput(draft createOrderRequest, dueDate time.Time) scheduler.OrderInput {
+	return scheduler.OrderInput{
 		ID:                 previewDraftOrderID,
 		Customer:           strings.TrimSpace(draft.Customer),
 		LineID:             draft.LineID,
@@ -2212,13 +2226,7 @@ func (s *MemoryStore) draftOrderInputsLocked(lineID string, currentDate time.Tim
 		Status:             domain.StatusPending,
 		DueDate:            dueDate,
 		CreatedAtTimestamp: unixMilliseconds(nowUTC()),
-	}}
-	for _, order := range s.orders {
-		if order.LineID == lineID && order.Status == domain.StatusPending {
-			inputs = append(inputs, orderInputFromOrder(order))
-		}
 	}
-	return inputs, nil
 }
 
 func (s *MemoryStore) selectedOrderInputsLocked(lineID string, req scheduleRequest) []scheduler.OrderInput {
@@ -2394,6 +2402,15 @@ func (s *MemoryStore) splitAllocationOrderIDsLocked(allocations []scheduler.Allo
 
 func (s *MemoryStore) persistAllocationsLocked(allocations []scheduler.Allocation) {
 	allocations, firstQuantities := s.splitAllocationOrderIDsLocked(allocations)
+	s.updateSourceOrderFirstQuantitiesLocked(firstQuantities)
+	s.createSplitOrdersLocked(allocations)
+	s.removeOpenAllocationsForOrdersLocked(replacedAllocationOrderIDs(allocations))
+	for _, allocation := range allocations {
+		s.appendAllocationAndMarkOrderScheduledLocked(allocation)
+	}
+}
+
+func (s *MemoryStore) updateSourceOrderFirstQuantitiesLocked(firstQuantities map[string]int) {
 	for sourceID, firstQuantity := range firstQuantities {
 		order, ok := s.orders[sourceID]
 		if ok && order.Quantity != firstQuantity {
@@ -2402,6 +2419,9 @@ func (s *MemoryStore) persistAllocationsLocked(allocations []scheduler.Allocatio
 			s.orders[sourceID] = order
 		}
 	}
+}
+
+func (s *MemoryStore) createSplitOrdersLocked(allocations []scheduler.Allocation) {
 	for _, allocation := range allocations {
 		if allocation.SourceOrderID == "" {
 			continue
@@ -2418,6 +2438,9 @@ func (s *MemoryStore) persistAllocationsLocked(allocations []scheduler.Allocatio
 		source.UpdatedAt = source.CreatedAt
 		s.orders[source.ID] = source
 	}
+}
+
+func replacedAllocationOrderIDs(allocations []scheduler.Allocation) map[string]bool {
 	replacedOrderIDs := map[string]bool{}
 	for _, allocation := range allocations {
 		replacedOrderIDs[allocation.OrderID] = true
@@ -2425,23 +2448,24 @@ func (s *MemoryStore) persistAllocationsLocked(allocations []scheduler.Allocatio
 			replacedOrderIDs[allocation.SourceOrderID] = true
 		}
 	}
-	s.removeOpenAllocationsForOrdersLocked(replacedOrderIDs)
-	for _, allocation := range allocations {
-		s.allocations = append(s.allocations, domain.ScheduleAllocation{
-			OrderID:  allocation.OrderID,
-			LineID:   allocation.LineID,
-			Date:     truncateDate(allocation.Date),
-			Quantity: allocation.Quantity,
-			Priority: allocation.Priority,
-			Locked:   allocation.Locked,
-			Status:   domain.StatusScheduled,
-		})
-		order, ok := s.orders[allocation.OrderID]
-		if ok && order.Status == domain.StatusPending {
-			order.Status = domain.StatusScheduled
-			order.UpdatedAt = time.Now().UTC()
-			s.orders[order.ID] = order
-		}
+	return replacedOrderIDs
+}
+
+func (s *MemoryStore) appendAllocationAndMarkOrderScheduledLocked(allocation scheduler.Allocation) {
+	s.allocations = append(s.allocations, domain.ScheduleAllocation{
+		OrderID:  allocation.OrderID,
+		LineID:   allocation.LineID,
+		Date:     truncateDate(allocation.Date),
+		Quantity: allocation.Quantity,
+		Priority: allocation.Priority,
+		Locked:   allocation.Locked,
+		Status:   domain.StatusScheduled,
+	})
+	order, ok := s.orders[allocation.OrderID]
+	if ok && order.Status == domain.StatusPending {
+		order.Status = domain.StatusScheduled
+		order.UpdatedAt = time.Now().UTC()
+		s.orders[order.ID] = order
 	}
 }
 
@@ -2449,21 +2473,12 @@ func (s *MemoryStore) ConfirmPreviewOrder(req confirmPreviewRequest, claims auth
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	preview, ok := s.previews[req.PreviewID]
-	if !ok {
-		return domain.Order{}, errors.New(errPreviewExpired)
+	preview, err := s.loadPreviewForConfirmationLocked(req, claims)
+	if err != nil {
+		return domain.Order{}, err
 	}
-	if preview.ActorID != claims.Subject || preview.ActorRole != claims.Role {
-		return domain.Order{}, errors.New(errPreviewOtherUser)
-	}
-	if preview.DraftOrder == nil {
-		return domain.Order{}, errors.New("preview does not contain a draft order")
-	}
-	if req.DeferDraft && len(req.DeferredOrderIDs) > 0 {
-		return domain.Order{}, errors.New("draft defer cannot include deferred pending orders")
-	}
-	if req.DeferDraft && len(preview.Conflicts) == 0 {
-		return domain.Order{}, errors.New("draft can be deferred only when preview has conflicts")
+	if err := validateDraftDeferRequest(req, preview); err != nil {
+		return domain.Order{}, err
 	}
 	deferredOrderIDs, err := s.validateSalesDeferredOrdersLocked(req.DeferredOrderIDs, preview, claims)
 	if err != nil {
@@ -2476,14 +2491,39 @@ func (s *MemoryStore) ConfirmPreviewOrder(req confirmPreviewRequest, claims auth
 	}
 	now := nowUTC()
 	if req.DeferDraft {
-		order.Status = domain.StatusRejected
-		order.RejectedBy = claims.Subject
-		order.RejectedAt = now
-		order.UpdatedAt = now
-		s.orders[order.ID] = order
-		s.auditLocked(claims.Subject, "order.sales_conflict_defer_draft", order.ID, "")
+		order = s.applyDeferredDraftLocked(order, claims, now)
 	}
-	for _, orderID := range deferredOrderIDs {
+	s.deferPreviewConflictOrdersLocked(deferredOrderIDs, claims, now)
+	delete(s.previews, req.PreviewID)
+	return order, nil
+}
+
+func (s *MemoryStore) loadPreviewForConfirmationLocked(req confirmPreviewRequest, claims auth.Claims) (previewRecord, error) {
+	preview, ok := s.previews[req.PreviewID]
+	if !ok {
+		return previewRecord{}, errors.New(errPreviewExpired)
+	}
+	if preview.ActorID != claims.Subject || preview.ActorRole != claims.Role {
+		return previewRecord{}, errors.New(errPreviewOtherUser)
+	}
+	if preview.DraftOrder == nil {
+		return previewRecord{}, errors.New("preview does not contain a draft order")
+	}
+	return preview, nil
+}
+
+func (s *MemoryStore) applyDeferredDraftLocked(order domain.Order, claims auth.Claims, now time.Time) domain.Order {
+	order.Status = domain.StatusRejected
+	order.RejectedBy = claims.Subject
+	order.RejectedAt = now
+	order.UpdatedAt = now
+	s.orders[order.ID] = order
+	s.auditLocked(claims.Subject, "order.sales_conflict_defer_draft", order.ID, "")
+	return order
+}
+
+func (s *MemoryStore) deferPreviewConflictOrdersLocked(orderIDs []string, claims auth.Claims, now time.Time) {
+	for _, orderID := range orderIDs {
 		deferred := s.orders[orderID]
 		deferred.Status = domain.StatusRejected
 		deferred.RejectionReason = salesConflictDeferredReason
@@ -2494,8 +2534,6 @@ func (s *MemoryStore) ConfirmPreviewOrder(req confirmPreviewRequest, claims auth
 		s.bumpLineRevisionLocked(deferred.LineID)
 		s.auditLocked(claims.Subject, "order.sales_conflict_defer", orderID, salesConflictDeferredReason)
 	}
-	delete(s.previews, req.PreviewID)
-	return order, nil
 }
 
 func (s *MemoryStore) validateSalesDeferredOrdersLocked(orderIDs []string, preview previewRecord, claims auth.Claims) ([]string, error) {
@@ -2595,49 +2633,59 @@ func (s *MemoryStore) CreateHPAPeakDemo(claims auth.Claims) (hpaPeakSummary, err
 	now := time.Now().UTC()
 	for lineIndex := hpaDemoFirstLine; lineIndex <= hpaDemoLastLine; lineIndex++ {
 		lineID := hpaDemoLineID(lineIndex)
-		s.lines[lineID] = domain.ProductionLine{
-			ID:             lineID,
-			Name:           "HPA Demo Line " + lineID,
-			CapacityPerDay: 10000,
-			Timezone:       defaultLineTimezone,
-		}
-		orderIDs := make([]string, 0, hpaDemoOrdersPerLine)
-		for orderIndex := 1; orderIndex <= hpaDemoOrdersPerLine; orderIndex++ {
-			id := fmt.Sprintf("HPA-%s-%03d", lineID, orderIndex)
-			order := domain.Order{
-				ID:        id,
-				Customer:  "HPA Demo",
-				LineID:    lineID,
-				Quantity:  2500,
-				Priority:  domain.PriorityLow,
-				Status:    domain.StatusPending,
-				DueDate:   now.AddDate(0, 0, 7),
-				Note:      hpaDemoSource,
-				CreatedBy: claims.Subject,
-				CreatedAt: now,
-				UpdatedAt: now,
-			}
-			s.orders[id] = order
-			orderIDs = append(orderIDs, id)
-		}
-
-		for jobIndex := 1; jobIndex <= hpaDemoJobsPerLine; jobIndex++ {
-			jobID := fmt.Sprintf("HPA-JOB-%s-%03d", lineID, jobIndex)
-			jobOrderIDs := []string{orderIDs[jobIndex-1]}
-			s.jobs[jobID] = domain.ScheduleJob{
-				ID:        jobID,
-				LineID:    lineID,
-				Status:    domain.JobQueued,
-				Message:   "多產線排程尖峰任務已送入背景佇列。",
-				Source:    hpaDemoSource,
-				OrderIDs:  jobOrderIDs,
-				CreatedAt: now,
-				UpdatedAt: now,
-			}
-			s.auditLocked(claims.Subject, createJob, jobID, hpaDemoSource)
-		}
+		s.createHPADemoLineLocked(lineID)
+		orderIDs := s.createHPADemoOrdersLocked(lineID, claims.Subject, now)
+		s.createHPADemoJobsLocked(lineID, orderIDs, claims.Subject, now)
 	}
 	return s.hpaPeakSummaryLocked(), nil
+}
+
+func (s *MemoryStore) createHPADemoLineLocked(lineID string) {
+	s.lines[lineID] = domain.ProductionLine{
+		ID:             lineID,
+		Name:           "HPA Demo Line " + lineID,
+		CapacityPerDay: 10000,
+		Timezone:       defaultLineTimezone,
+	}
+}
+
+func (s *MemoryStore) createHPADemoOrdersLocked(lineID, actorID string, now time.Time) []string {
+	orderIDs := make([]string, 0, hpaDemoOrdersPerLine)
+	for orderIndex := 1; orderIndex <= hpaDemoOrdersPerLine; orderIndex++ {
+		id := fmt.Sprintf("HPA-%s-%03d", lineID, orderIndex)
+		s.orders[id] = domain.Order{
+			ID:        id,
+			Customer:  "HPA Demo",
+			LineID:    lineID,
+			Quantity:  2500,
+			Priority:  domain.PriorityLow,
+			Status:    domain.StatusPending,
+			DueDate:   now.AddDate(0, 0, 7),
+			Note:      hpaDemoSource,
+			CreatedBy: actorID,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+		orderIDs = append(orderIDs, id)
+	}
+	return orderIDs
+}
+
+func (s *MemoryStore) createHPADemoJobsLocked(lineID string, orderIDs []string, actorID string, now time.Time) {
+	for jobIndex := 1; jobIndex <= hpaDemoJobsPerLine; jobIndex++ {
+		jobID := fmt.Sprintf("HPA-JOB-%s-%03d", lineID, jobIndex)
+		s.jobs[jobID] = domain.ScheduleJob{
+			ID:        jobID,
+			LineID:    lineID,
+			Status:    domain.JobQueued,
+			Message:   "多產線排程尖峰任務已送入背景佇列。",
+			Source:    hpaDemoSource,
+			OrderIDs:  []string{orderIDs[jobIndex-1]},
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+		s.auditLocked(actorID, createJob, jobID, hpaDemoSource)
+	}
 }
 
 func (s *MemoryStore) ClearHPAPeakDemo(claims auth.Claims) (hpaPeakSummary, error) {
@@ -2670,10 +2718,29 @@ func (s *MemoryStore) HPAPeakJobs() []domain.ScheduleJob {
 	return jobs
 }
 
+func isHPADemoJob(job domain.ScheduleJob) bool {
+	return job.Source == hpaDemoSource || isHPADemoLine(job.LineID)
+}
+
+func shouldCancelHPADemoJob(job domain.ScheduleJob) bool {
+	return job.Status == domain.JobQueued || job.Status == domain.JobRunning
+}
+
 func (s *MemoryStore) clearHPAPeakDemoLocked(actorID string) {
+	s.clearHPAPeakDemoJobsLocked()
+	s.clearHPAPeakDemoOrdersLocked()
+	s.clearHPAPeakDemoAllocationsLocked()
+	s.clearHPAPeakDemoLinesLocked()
+	s.clearHPAPeakDemoAuditsLocked()
+	if actorID != "" {
+		s.auditLocked(actorID, "demo.hpa_peak.clear", hpaDemoSource, hpaDemoSource)
+	}
+}
+
+func (s *MemoryStore) clearHPAPeakDemoJobsLocked() {
 	for id, job := range s.jobs {
-		if job.Source == hpaDemoSource || isHPADemoLine(job.LineID) {
-			if job.Status == domain.JobQueued || job.Status == domain.JobRunning {
+		if isHPADemoJob(job) {
+			if shouldCancelHPADemoJob(job) {
 				job.Status = domain.JobCancelled
 				job.Message = "排程尖峰展示已取消。"
 				job.UpdatedAt = time.Now().UTC()
@@ -2683,11 +2750,17 @@ func (s *MemoryStore) clearHPAPeakDemoLocked(actorID string) {
 			delete(s.jobs, id)
 		}
 	}
+}
+
+func (s *MemoryStore) clearHPAPeakDemoOrdersLocked() {
 	for id, order := range s.orders {
 		if isHPADemoLine(order.LineID) {
 			delete(s.orders, id)
 		}
 	}
+}
+
+func (s *MemoryStore) clearHPAPeakDemoAllocationsLocked() {
 	keptAllocations := s.allocations[:0]
 	for _, allocation := range s.allocations {
 		if !isHPADemoLine(allocation.LineID) {
@@ -2695,11 +2768,17 @@ func (s *MemoryStore) clearHPAPeakDemoLocked(actorID string) {
 		}
 	}
 	s.allocations = keptAllocations
+}
+
+func (s *MemoryStore) clearHPAPeakDemoLinesLocked() {
 	for lineID := range s.lines {
 		if isHPADemoLine(lineID) {
 			delete(s.lines, lineID)
 		}
 	}
+}
+
+func (s *MemoryStore) clearHPAPeakDemoAuditsLocked() {
 	keptAudits := s.audits[:0]
 	for _, audit := range s.audits {
 		if audit.Reason == hpaDemoSource {
@@ -2711,9 +2790,6 @@ func (s *MemoryStore) clearHPAPeakDemoLocked(actorID string) {
 		keptAudits = append(keptAudits, audit)
 	}
 	s.audits = keptAudits
-	if actorID != "" {
-		s.auditLocked(actorID, "demo.hpa_peak.clear", hpaDemoSource, hpaDemoSource)
-	}
 }
 
 func (s *MemoryStore) resetHPAPeakDemoLocked(actorID string) {
@@ -2727,28 +2803,52 @@ func (s *MemoryStore) resetHPAPeakDemoLocked(actorID string) {
 
 func (s *MemoryStore) hpaPeakSummaryLocked() hpaPeakSummary {
 	summary := hpaPeakSummaryDefaults()
-	statuses := map[string]int{
+	statuses := hpaJobStatusDefaults()
+	lineIDs := map[string]bool{}
+	orderCount := s.collectHPADemoOrdersLocked(lineIDs)
+	s.collectHPADemoLinesLocked(lineIDs)
+	recentJobs, failedMessages := s.collectHPADemoJobsLocked(statuses)
+	summary.LineCount = len(lineIDs)
+	summary.OrderCount = orderCount
+	summary.JobCount = hpaJobCount(statuses)
+	summary.Statuses = statuses
+	summary.FailedMessages = failedMessages
+	summary.RecentJobs = recentJobs
+	return summary
+}
+
+func hpaJobStatusDefaults() map[string]int {
+	return map[string]int{
 		string(domain.JobQueued):    0,
 		string(domain.JobRunning):   0,
 		string(domain.JobCompleted): 0,
 		string(domain.JobFailed):    0,
 		string(domain.JobCancelled): 0,
 	}
-	lineIDs := map[string]bool{}
+}
+
+func (s *MemoryStore) collectHPADemoOrdersLocked(lineIDs map[string]bool) int {
 	orderCount := 0
-	failedMessages := []string{}
-	recentJobs := []domain.ScheduleJob{}
 	for _, order := range s.orders {
 		if isHPADemoLine(order.LineID) {
 			orderCount++
 			lineIDs[order.LineID] = true
 		}
 	}
+	return orderCount
+}
+
+func (s *MemoryStore) collectHPADemoLinesLocked(lineIDs map[string]bool) {
 	for _, line := range s.lines {
 		if isHPADemoLine(line.ID) {
 			lineIDs[line.ID] = true
 		}
 	}
+}
+
+func (s *MemoryStore) collectHPADemoJobsLocked(statuses map[string]int) ([]domain.ScheduleJob, []string) {
+	failedMessages := []string{}
+	recentJobs := []domain.ScheduleJob{}
 	for _, job := range s.jobs {
 		if job.Source != hpaDemoSource && !isHPADemoLine(job.LineID) {
 			continue
@@ -2759,19 +2859,25 @@ func (s *MemoryStore) hpaPeakSummaryLocked() hpaPeakSummary {
 			failedMessages = append(failedMessages, job.ID+"："+job.Message)
 		}
 	}
-	sort.Slice(recentJobs, func(i, j int) bool {
-		return recentJobs[i].ID < recentJobs[j].ID
+	return limitRecentHPAJobs(recentJobs), failedMessages
+}
+
+func limitRecentHPAJobs(jobs []domain.ScheduleJob) []domain.ScheduleJob {
+	sort.Slice(jobs, func(i, j int) bool {
+		return jobs[i].ID < jobs[j].ID
 	})
-	if len(recentJobs) > 10 {
-		recentJobs = recentJobs[:10]
+	if len(jobs) > 10 {
+		return jobs[:10]
 	}
-	summary.LineCount = len(lineIDs)
-	summary.OrderCount = orderCount
-	summary.JobCount = statuses[string(domain.JobQueued)] + statuses[string(domain.JobRunning)] + statuses[string(domain.JobCompleted)] + statuses[string(domain.JobFailed)] + statuses[string(domain.JobCancelled)]
-	summary.Statuses = statuses
-	summary.FailedMessages = failedMessages
-	summary.RecentJobs = recentJobs
-	return summary
+	return jobs
+}
+
+func hpaJobCount(statuses map[string]int) int {
+	return statuses[string(domain.JobQueued)] +
+		statuses[string(domain.JobRunning)] +
+		statuses[string(domain.JobCompleted)] +
+		statuses[string(domain.JobFailed)] +
+		statuses[string(domain.JobCancelled)]
 }
 
 func hpaPeakSummaryDefaults() hpaPeakSummary {
@@ -2798,36 +2904,69 @@ func loadHPAAutoscalingState(namespace, hpaName, deploymentName string) *hpaAuto
 		return nil
 	}
 	labelSelector := envDefault("HPA_DEMO_POD_LABEL_SELECTOR", "app.kubernetes.io/component=web")
-	cacheKey := strings.Join([]string{host, namespace, hpaName, deploymentName, labelSelector}, "\x00")
-	now := time.Now()
-	hpaAutoscalingCache.Lock()
-	if hpaAutoscalingCache.key == cacheKey && now.Before(hpaAutoscalingCache.expires) {
-		state := hpaAutoscalingCache.state
-		hpaAutoscalingCache.Unlock()
+	cacheKey := hpaAutoscalingCacheKey(host, namespace, hpaName, deploymentName, labelSelector)
+	if state := cachedHPAAutoscalingState(cacheKey, time.Now()); state != nil {
 		return state
 	}
-	hpaAutoscalingCache.Unlock()
-
-	port := envDefault("KUBERNETES_SERVICE_PORT", "443")
-	token, err := os.ReadFile(kubernetesServiceAccountTokenPath)
-	if err != nil {
-		return &hpaAutoscalingState{Error: "無法讀取 Kubernetes service account token：" + err.Error()}
+	client, baseURL, token, errState := kubernetesAutoscalingClient(host)
+	if errState != nil {
+		return errState
 	}
-	ca, err := os.ReadFile(kubernetesServiceAccountCAPath)
-	if err != nil {
-		return &hpaAutoscalingState{Error: "無法讀取 Kubernetes CA：" + err.Error()}
-	}
-	roots := x509.NewCertPool()
-	if !roots.AppendCertsFromPEM(ca) {
-		return &hpaAutoscalingState{Error: "無法載入 Kubernetes CA。"}
-	}
-	client := newKubernetesHTTPClient(host, roots)
-	baseURL := "https://" + host + ":" + port
 	ctx, cancel := context.WithTimeout(context.Background(), 900*time.Millisecond)
 	defer cancel()
 
 	state := &hpaAutoscalingState{}
-	var messages []string
+	messages := []string{}
+	messages = append(messages, loadKubernetesHPAState(ctx, client, baseURL, token, namespace, hpaName, state)...)
+	messages = append(messages, loadKubernetesDeploymentState(ctx, client, baseURL, token, namespace, deploymentName, state)...)
+	messages = append(messages, loadKubernetesPodState(ctx, client, baseURL, token, namespace, labelSelector, state)...)
+	if len(messages) > 0 {
+		state.Error = strings.Join(messages, "；")
+	}
+	storeCachedHPAAutoscalingState(cacheKey, state)
+	return state
+}
+
+func hpaAutoscalingCacheKey(host, namespace, hpaName, deploymentName, labelSelector string) string {
+	return strings.Join([]string{host, namespace, hpaName, deploymentName, labelSelector}, "\x00")
+}
+
+func cachedHPAAutoscalingState(cacheKey string, now time.Time) *hpaAutoscalingState {
+	hpaAutoscalingCache.Lock()
+	defer hpaAutoscalingCache.Unlock()
+	if hpaAutoscalingCache.key == cacheKey && now.Before(hpaAutoscalingCache.expires) {
+		return hpaAutoscalingCache.state
+	}
+	return nil
+}
+
+func storeCachedHPAAutoscalingState(cacheKey string, state *hpaAutoscalingState) {
+	hpaAutoscalingCache.Lock()
+	hpaAutoscalingCache.key = cacheKey
+	hpaAutoscalingCache.expires = time.Now().Add(2 * time.Second)
+	hpaAutoscalingCache.state = state
+	hpaAutoscalingCache.Unlock()
+}
+
+func kubernetesAutoscalingClient(host string) (*http.Client, string, string, *hpaAutoscalingState) {
+	token, err := os.ReadFile(kubernetesServiceAccountTokenPath)
+	if err != nil {
+		return nil, "", "", &hpaAutoscalingState{Error: "無法讀取 Kubernetes service account token：" + err.Error()}
+	}
+	ca, err := os.ReadFile(kubernetesServiceAccountCAPath)
+	if err != nil {
+		return nil, "", "", &hpaAutoscalingState{Error: "無法讀取 Kubernetes CA：" + err.Error()}
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(ca) {
+		return nil, "", "", &hpaAutoscalingState{Error: "無法載入 Kubernetes CA。"}
+	}
+	client := newKubernetesHTTPClient(host, roots)
+	baseURL := "https://" + host + ":" + envDefault("KUBERNETES_SERVICE_PORT", "443")
+	return client, baseURL, string(token), nil
+}
+
+func loadKubernetesHPAState(ctx context.Context, client *http.Client, baseURL, token, namespace, hpaName string, state *hpaAutoscalingState) []string {
 	var hpa struct {
 		Spec struct {
 			MinReplicas *int `json:"minReplicas"`
@@ -2839,16 +2978,18 @@ func loadHPAAutoscalingState(namespace, hpaName, deploymentName string) *hpaAuto
 		} `json:"status"`
 	}
 	if err := kubernetesGetJSON(ctx, client, baseURL, string(token), path.Join("/apis/autoscaling/v2/namespaces", namespace, "horizontalpodautoscalers", hpaName), &hpa); err != nil {
-		messages = append(messages, "HPA 狀態讀取失敗："+err.Error())
-	} else {
-		if hpa.Spec.MinReplicas != nil {
-			state.MinReplicas = *hpa.Spec.MinReplicas
-		}
-		state.MaxReplicas = hpa.Spec.MaxReplicas
-		state.CurrentReplicas = hpa.Status.CurrentReplicas
-		state.DesiredReplicas = hpa.Status.DesiredReplicas
+		return []string{"HPA 狀態讀取失敗：" + err.Error()}
 	}
+	if hpa.Spec.MinReplicas != nil {
+		state.MinReplicas = *hpa.Spec.MinReplicas
+	}
+	state.MaxReplicas = hpa.Spec.MaxReplicas
+	state.CurrentReplicas = hpa.Status.CurrentReplicas
+	state.DesiredReplicas = hpa.Status.DesiredReplicas
+	return nil
+}
 
+func loadKubernetesDeploymentState(ctx context.Context, client *http.Client, baseURL, token, namespace, deploymentName string, state *hpaAutoscalingState) []string {
 	var deployment struct {
 		Status struct {
 			Replicas          int `json:"replicas"`
@@ -2857,13 +2998,15 @@ func loadHPAAutoscalingState(namespace, hpaName, deploymentName string) *hpaAuto
 		} `json:"status"`
 	}
 	if err := kubernetesGetJSON(ctx, client, baseURL, string(token), path.Join("/apis/apps/v1/namespaces", namespace, "deployments", deploymentName), &deployment); err != nil {
-		messages = append(messages, "Deployment 狀態讀取失敗："+err.Error())
-	} else {
-		state.DeploymentReplicas = deployment.Status.Replicas
-		state.ReadyReplicas = deployment.Status.ReadyReplicas
-		state.AvailableReplicas = deployment.Status.AvailableReplicas
+		return []string{"Deployment 狀態讀取失敗：" + err.Error()}
 	}
+	state.DeploymentReplicas = deployment.Status.Replicas
+	state.ReadyReplicas = deployment.Status.ReadyReplicas
+	state.AvailableReplicas = deployment.Status.AvailableReplicas
+	return nil
+}
 
+func loadKubernetesPodState(ctx context.Context, client *http.Client, baseURL, token, namespace, labelSelector string, state *hpaAutoscalingState) []string {
 	var pods struct {
 		Items []struct {
 			Status struct {
@@ -2879,30 +3022,27 @@ func loadHPAAutoscalingState(namespace, hpaName, deploymentName string) *hpaAuto
 	query.Set("labelSelector", labelSelector)
 	podsPath := path.Join("/api/v1/namespaces", namespace, "pods") + "?" + query.Encode()
 	if err := kubernetesGetJSON(ctx, client, baseURL, string(token), podsPath, &pods); err != nil {
-		messages = append(messages, "Pod 狀態讀取失敗："+err.Error())
-	} else {
-		state.PodCount = len(pods.Items)
-		for _, pod := range pods.Items {
-			if pod.Status.Phase != "Running" {
-				continue
-			}
-			for _, condition := range pod.Status.Conditions {
-				if condition.Type == "Ready" && condition.Status == "True" {
-					state.ReadyPods++
-					break
-				}
-			}
+		return []string{"Pod 狀態讀取失敗：" + err.Error()}
+	}
+	state.PodCount = len(pods.Items)
+	for _, pod := range pods.Items {
+		if pod.Status.Phase == "Running" && podHasReadyCondition(pod.Status.Conditions) {
+			state.ReadyPods++
 		}
 	}
-	if len(messages) > 0 {
-		state.Error = strings.Join(messages, "；")
+	return nil
+}
+
+func podHasReadyCondition(conditions []struct {
+	Type   string `json:"type"`
+	Status string `json:"status"`
+}) bool {
+	for _, condition := range conditions {
+		if condition.Type == "Ready" && condition.Status == "True" {
+			return true
+		}
 	}
-	hpaAutoscalingCache.Lock()
-	hpaAutoscalingCache.key = cacheKey
-	hpaAutoscalingCache.expires = time.Now().Add(2 * time.Second)
-	hpaAutoscalingCache.state = state
-	hpaAutoscalingCache.Unlock()
-	return state
+	return false
 }
 
 var (

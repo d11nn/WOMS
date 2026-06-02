@@ -64,15 +64,7 @@ class MiniElement {
     this._innerHTML = String(value);
     this.textContent = "";
     this.children = [];
-    if (/<input\b/i.test(this._innerHTML)) {
-      const input = this.ownerDocument.createElement("input");
-      const valueMatch = this._innerHTML.match(/\bvalue="([^"]*)"/i);
-      if (valueMatch) {
-        input.value = valueMatch[1];
-        input.setAttribute("value", valueMatch[1]);
-      }
-      this.appendChild(input);
-    }
+    appendParsedControls(this, this._innerHTML);
   }
 
   get innerHTML() {
@@ -129,6 +121,13 @@ class MiniElement {
     return node;
   }
 
+  contains(node) {
+    if (node === this) {
+      return true;
+    }
+    return this.children.some((child) => child.contains(node));
+  }
+
   addEventListener(type, listener) {
     const listeners = this.eventListeners.get(type) ?? [];
     listeners.push(listener);
@@ -145,6 +144,9 @@ class MiniElement {
     event.currentTarget = this;
     event.preventDefault ??= () => {
       event.defaultPrevented = true;
+    };
+    event.stopPropagation ??= () => {
+      event.propagationStopped = true;
     };
     const listeners = this.eventListeners.get(event.type) ?? [];
     await Promise.all(listeners.map((listener) => listener(event)));
@@ -233,10 +235,44 @@ function dataKey(name) {
   return name.slice(5).replace(/-([a-z])/g, (_, char) => char.toUpperCase());
 }
 
+function appendParsedControls(parent, html) {
+  const controlPattern = /<(input|button|option|textarea|select|label)\b([^>]*)>([\s\S]*?)<\/\1>|<(input)\b([^>]*)>/gi;
+  for (const match of html.matchAll(controlPattern)) {
+    const tagName = match[1] ?? match[4];
+    const attributes = match[2] ?? match[5] ?? "";
+    const content = match[3] ?? "";
+    const element = parent.ownerDocument.createElement(tagName);
+    for (const [, name, quotedValue, bareValue] of attributes.matchAll(/([:\w-]+)(?:="([^"]*)"|='([^']*)'|=([^\s>]+))?/g)) {
+      if (name === tagName) {
+        continue;
+      }
+      const value = quotedValue ?? bareValue ?? "";
+      element.setAttribute(name, value);
+      if (name === "value") {
+        element.value = value;
+      } else if (name === "checked") {
+        element.checked = true;
+      } else if (name === "disabled") {
+        element.disabled = true;
+      } else if (name === "type") {
+        element.type = value;
+      }
+    }
+    element.textContent = content.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+    parent.appendChild(element);
+    if (content.includes("<")) {
+      appendParsedControls(element, content);
+    }
+  }
+}
+
 function matchesSelector(element, selector) {
   const trimmed = selector.trim();
   if (!trimmed) {
     return false;
+  }
+  if (trimmed.includes(",")) {
+    return trimmed.split(",").some((part) => matchesSelector(element, part));
   }
   if (trimmed.startsWith("#")) {
     return element.id === trimmed.slice(1);
@@ -505,7 +541,7 @@ async function exerciseAnonymousControls(document) {
   assert.equal(document.getElementById("message-title").textContent, "清除失敗");
 }
 
-test.skip("anonymous startup renders login state with fallback lines and initialized dates", async () => {
+test("anonymous startup renders login state with fallback lines and initialized dates", async () => {
   const document = buildDomFromIndex();
   const restoreGlobals = installBrowserGlobals(document);
   try {
@@ -529,7 +565,7 @@ test.skip("anonymous startup renders login state with fallback lines and initial
   }
 });
 
-test.skip("login saves session and logout clears storage and app state", async () => {
+test("login saves session and logout clears storage and app state", async () => {
   const document = buildDomFromIndex();
   const calls = [];
   let hpaCleared = false;
@@ -791,14 +827,16 @@ test.skip("login saves session and logout clears storage and app state", async (
   }
 });
 
-test.skip("expired stored session is cleared and returns to login state", async () => {
+test("expired stored session is cleared and returns to login state", async () => {
   const document = buildDomFromIndex();
   const calls = [];
   const fetchImpl = async (path, options = {}) => {
     calls.push({ path, options });
     assert.equal(options.headers.Authorization, "Bearer expired-token");
     if (path === "/api/lines") {
-      return jsonResponse({ error: "session expired" }, 401);
+      const error = new Error("session expired");
+      error.status = 401;
+      throw error;
     }
     throw new Error(`unexpected fetch ${path}`);
   };
@@ -827,7 +865,7 @@ test.skip("expired stored session is cleared and returns to login state", async 
   }
 });
 
-test.skip("sales order form previews valid drafts and rejects non-future due dates", async () => {
+test("sales order form previews valid drafts and rejects non-future due dates", async () => {
   const document = buildDomFromIndex();
   const calls = [];
   const fetchImpl = async (path, options = {}) => {
@@ -917,7 +955,7 @@ test.skip("sales order form previews valid drafts and rejects non-future due dat
   }
 });
 
-test.skip("scheduler workspace renders orders calendar history and previews selected orders", async () => {
+test("scheduler workspace renders orders calendar history and previews selected orders", async () => {
   const document = buildDomFromIndex();
   const calls = [];
   const fetchImpl = async (path, options = {}) => {
@@ -1033,7 +1071,7 @@ test.skip("scheduler workspace renders orders calendar history and previews sele
   }
 });
 
-test.skip("queued scheduler jobs poll until completion and refresh workspace", async () => {
+test("queued scheduler jobs poll until completion and refresh workspace", async () => {
   const document = buildDomFromIndex();
   const calls = [];
   let jobReads = 0;
@@ -1100,7 +1138,7 @@ test.skip("queued scheduler jobs poll until completion and refresh workspace", a
   }
 });
 
-test.skip("admin user management and autoscaling controls submit expected API calls", async () => {
+test("admin user management and autoscaling controls submit expected API calls", async () => {
   const document = buildDomFromIndex();
   const calls = [];
   let hpaCleared = false;
@@ -1227,7 +1265,7 @@ test.skip("admin user management and autoscaling controls submit expected API ca
   }
 });
 
-test.skip("production report form validates order allocation quantities and submits confirmation", async () => {
+test("production report form validates order allocation quantities and submits confirmation", async () => {
   const document = buildDomFromIndex();
   const calls = [];
   const productionDate = dateKeyAfter(2);
@@ -1504,13 +1542,6 @@ test("sales draft conflict preview shows successful draft schedule and excludes 
     assert.match(allMarkup, /ORD-A[\s\S]*ORD-B[\s\S]*PREVIEW-DRAFT[\s\S]*ORD-C/);
     assert.doesNotMatch(allMarkup, /ORD-D/);
     assert.match(document.getElementById("preview-page-list").innerHTML, /衝突處理[\s\S]*改送需業務處理 ORD-D/);
-    const deferInput = document.createElement("input");
-    deferInput.type = "checkbox";
-    deferInput.setAttribute("data-sales-defer-order", "");
-    deferInput.value = "ORD-D";
-    deferInput.checked = true;
-    document.getElementById("preview-page-list").appendChild(deferInput);
-
     await document.getElementById("confirm-preview-order").dispatchEvent({ type: "click" });
     await settleApp();
     assert.equal(document.getElementById("message-title").textContent, "已加入待排程", document.getElementById("message-body").textContent);
@@ -1651,6 +1682,78 @@ test("preview calendars keep the same visible dates as the monthly calendar", as
     await settleApp();
 
     assert.deepEqual(calendarDateKeys(document.getElementById("preview-calendar-grid")), monthlyDates);
+  } finally {
+    restoreGlobals();
+  }
+});
+
+test("sales calendar mode renders all pending and scheduled allocation sources", async () => {
+  const document = buildDomFromIndex();
+  const allocationDateFor = (path, day) => {
+    const month = decodeURIComponent(String(path).match(/[?&]month=([^&]+)/)?.[1] ?? "2026-06");
+    return `${month}-${String(day).padStart(2, "0")}`;
+  };
+  const fetchImpl = async (path) => {
+    if (path === "/api/auth/login") {
+      return jsonResponse({
+        token: "token-sales",
+        user: { id: "user-sales", username: "sales", role: "sales" },
+      });
+    }
+    if (path === "/api/lines") {
+      return jsonResponse({
+        lines: [{ id: "A", name: "Line A", capacityPerDay: 10000, timezone: "Asia/Taipei" }],
+      });
+    }
+    if (path === "/api/orders") {
+      return jsonResponse({ orders: [] });
+    }
+    if (String(path).startsWith("/api/schedules/calendar?")) {
+      return jsonResponse({
+        allocations: [
+          { orderId: "ORD-SCHEDULED-CAL", customer: "Scheduled", lineId: "A", date: allocationDateFor(path, 10), quantity: 1000, priority: "low", status: "已排程" },
+        ],
+        pendingAllocations: [
+          { orderId: "ORD-PENDING-CAL", customer: "Pending", lineId: "A", date: allocationDateFor(path, 11), quantity: 2000, priority: "high", status: "待排程" },
+        ],
+      });
+    }
+    if (String(path).startsWith("/api/schedules/history?")) {
+      return jsonResponse({ history: [] });
+    }
+    throw new Error(`unexpected fetch ${path}`);
+  };
+  const restoreGlobals = installBrowserGlobalsWithFetch(document, fetchImpl);
+  try {
+    await import(appModuleUrl("sales-calendar-mode-sources"));
+
+    await document.getElementById("login-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+
+    const grid = document.getElementById("calendar-grid");
+    const modeControl = document.getElementById("main-calendar-mode");
+    const pendingButton = document.querySelector('button[data-calendar-mode="pending"]');
+    const scheduledButton = document.querySelector('button[data-calendar-mode="scheduled"]');
+    const allButton = document.querySelector('button[data-calendar-mode="all"]');
+
+    assert.equal(modeControl.hidden, false);
+    assert.equal(allButton.getAttribute("aria-pressed"), "true");
+    assert.match(renderedMarkup(grid), /ORD-SCHEDULED-CAL/);
+    assert.match(renderedMarkup(grid), /ORD-PENDING-CAL/);
+    assert.equal(grid.children.some((cell) => cell.classList.contains("preview-highlight")), true);
+
+    await modeControl.dispatchEvent({ type: "click", target: pendingButton });
+    await settleApp();
+    assert.equal(pendingButton.getAttribute("aria-pressed"), "true");
+    assert.match(renderedMarkup(grid), /ORD-PENDING-CAL/);
+    assert.doesNotMatch(renderedMarkup(grid), /ORD-SCHEDULED-CAL/);
+
+    await modeControl.dispatchEvent({ type: "click", target: scheduledButton });
+    await settleApp();
+    assert.equal(scheduledButton.getAttribute("aria-pressed"), "true");
+    assert.match(renderedMarkup(grid), /ORD-SCHEDULED-CAL/);
+    assert.doesNotMatch(renderedMarkup(grid), /ORD-PENDING-CAL/);
+    assert.equal(grid.children.some((cell) => cell.classList.contains("preview-highlight")), false);
   } finally {
     restoreGlobals();
   }
@@ -2608,7 +2711,389 @@ test("comprehensive event listener integration tests to maximize app.js coverage
   }
 });
 
-test.skip("extreme app.js coverage booster", async () => {
+test("load HPA peak summary without admin role", async () => {
+  const document = buildDomFromIndex();
+  const fetchImpl = async (path, options = {}) => {
+    if (path === "/api/auth/login") {
+      const body = JSON.parse(options.body);
+      const role = body.username === "admin" ? "admin" : "scheduler";
+      return jsonResponse({
+        token: "token-" + role,
+        user: { id: role + "-1", username: body.username, role: role, lineId: "A" }
+      });
+    }
+    if (path === "/api/demo/hpa-peak") {
+      return jsonResponse({ summary: { autoscaling: { desiredReplicas: 3 } } });
+    }
+    return jsonResponse({});
+  };
+
+  const restoreGlobals = installBrowserGlobalsWithFetch(document, fetchImpl);
+  try {
+    await import(new URL(`./app.js?dphpanon=${Date.now()}`, import.meta.url));
+    await settleApp();
+
+    // Log in as scheduler
+    document.querySelector('#login-form input[name="username"]').value = "scheduler";
+    document.querySelector('#login-form input[name="password"]').value = "demo";
+    await document.getElementById("login-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+
+    // HPA peak summary should not be visible to non-admin users, so the element won't be in the DOM
+    const hpaSummaryEl = document.getElementById("hpa-peak-summary");
+    assert.equal(hpaSummaryEl, null);
+  } finally {
+    restoreGlobals();
+  }
+});
+
+function createAppCoverageFetch(calls, options = {}) {
+  const role = options.role ?? "scheduler";
+  const userId = options.userId ?? `${role}-1`;
+  const lineId = options.lineId ?? "A";
+  const orders = options.orders ?? [
+    { id: "ORD-PENDING", customer: "ACME", lineId, quantity: 2500, priority: "high", status: "待排程", dueDate: dateKeyAfter(6), createdBy: "sales-1" },
+    { id: "ORD-SCHEDULED", customer: "Beta", lineId, quantity: 1500, priority: "low", status: "已排程", dueDate: dateKeyAfter(8), createdBy: "sales-1" },
+    { id: "ORD-PROD", customer: "Gamma", lineId, quantity: 900, priority: "low", status: "生產中", dueDate: dateKeyAfter(9), createdBy: "sales-1" },
+  ];
+  const allocations = options.allocations ?? [
+    { orderId: "ORD-SCHEDULED", customer: "Beta", lineId, date: dateKeyAfter(2), quantity: 1500, priority: "low", status: "已排程" },
+    { orderId: "ORD-PROD", customer: "Gamma", lineId, date: dateKeyAfter(3), quantity: 900, priority: "low", status: "生產中" },
+  ];
+
+  return async (path, fetchOptions = {}) => {
+    calls.push({ path, options: fetchOptions });
+    if (path === "/api/auth/logout") {
+      return jsonResponse({});
+    }
+    if (path === "/api/lines") {
+      return jsonResponse({
+        lines: [
+          { id: "A", name: "Line A", capacityPerDay: 10000, timezone: "Asia/Taipei" },
+          { id: "B", name: "Line B", capacityPerDay: 9000, timezone: "Asia/Taipei" },
+        ],
+      });
+    }
+    if (path === "/api/orders") {
+      if (fetchOptions.method === "DELETE") {
+        return jsonResponse({ cancelledOrderIds: JSON.parse(fetchOptions.body).orderIds });
+      }
+      return jsonResponse({ orders });
+    }
+    if (path === "/api/orders/reject") {
+      return jsonResponse({ orders: JSON.parse(fetchOptions.body).orderIds });
+    }
+    if (path === "/api/orders/resubmit") {
+      return jsonResponse({ id: JSON.parse(fetchOptions.body).orderId });
+    }
+    if (path === "/api/production/start") {
+      return jsonResponse({ id: JSON.parse(fetchOptions.body).orderId });
+    }
+    if (String(path).startsWith("/api/schedules/calendar?")) {
+      return jsonResponse({ allocations, pendingAllocations: options.pendingAllocations ?? [] });
+    }
+    if (String(path).startsWith("/api/schedules/history?")) {
+      return jsonResponse({ history: options.history ?? [] });
+    }
+    if (path === "/api/users") {
+      return jsonResponse({ users: [{ username: "ops", role: "sales" }] });
+    }
+    if (path === "/api/demo/hpa-peak") {
+      return jsonResponse({ summary: null });
+    }
+    throw new Error(`unexpected fetch ${path} for ${role}/${userId}`);
+  };
+}
+
+function storedSession(role, extra = {}) {
+  const user = { id: `${role}-1`, username: role, role, ...extra };
+  return {
+    "woms.token": `token-${role}`,
+    "woms.user": JSON.stringify(user),
+  };
+}
+
+test("app.js case 1: scheduler startup loads orders calendar and history only", async () => {
+  const document = buildDomFromIndex();
+  const calls = [];
+  const restoreGlobals = installBrowserGlobalsWithFetch(
+    document,
+    createAppCoverageFetch(calls, { role: "scheduler", lineId: "A" }),
+    storedSession("scheduler", { lineId: "A" }),
+  );
+  try {
+    await import(appModuleUrl("app-case-scheduler-startup"));
+    await settleApp();
+
+    assert.equal(document.body.dataset.role, "scheduler");
+    assert.equal(document.getElementById("orders-body").children.length, 3);
+    assert.equal(calls.some((call) => call.path === "/api/users"), false);
+    assert.equal(calls.some((call) => call.path === "/api/demo/hpa-peak"), false);
+  } finally {
+    restoreGlobals();
+  }
+});
+
+test("app.js case 2: sales line change persists selected line and reloads workspace data", async () => {
+  const document = buildDomFromIndex();
+  const calls = [];
+  const restoreGlobals = installBrowserGlobalsWithFetch(
+    document,
+    createAppCoverageFetch(calls, { role: "sales", userId: "sales-1" }),
+    storedSession("sales", { id: "sales-1" }),
+  );
+  try {
+    await import(appModuleUrl("app-case-sales-line-change"));
+    await settleApp();
+
+    const select = document.getElementById("active-line-select");
+    select.value = "B";
+    await select.dispatchEvent({ type: "change" });
+    await settleApp();
+
+    assert.equal(localStorage.getItem("woms.selectedLine"), "B");
+    assert.equal(document.querySelector('#order-form input[name="lineId"]').value, "B");
+    assert.equal(calls.filter((call) => String(call.path).startsWith("/api/schedules/calendar?")).length >= 2, true);
+  } finally {
+    restoreGlobals();
+  }
+});
+
+test("app.js case 3: anonymous logout does not call the logout API", async () => {
+  const document = buildDomFromIndex();
+  const calls = [];
+  const restoreGlobals = installBrowserGlobalsWithFetch(document, async (path, options = {}) => {
+    calls.push({ path, options });
+    return jsonResponse({});
+  });
+  try {
+    await import(appModuleUrl("app-case-anonymous-logout"));
+    await settleApp();
+
+    await document.getElementById("logout-button").dispatchEvent({ type: "click" });
+    await settleApp();
+
+    assert.equal(calls.some((call) => call.path === "/api/auth/logout"), false);
+    assert.equal(document.getElementById("message-title").textContent, "已登出");
+  } finally {
+    restoreGlobals();
+  }
+});
+
+test("app.js case 4: cancelling selected scheduler orders respects confirm cancellation", async () => {
+  const document = buildDomFromIndex();
+  const calls = [];
+  const restoreGlobals = installBrowserGlobalsWithFetch(
+    document,
+    createAppCoverageFetch(calls, { role: "scheduler", lineId: "A" }),
+    storedSession("scheduler", { lineId: "A" }),
+  );
+  try {
+    await import(appModuleUrl("app-case-cancel-confirm-false"));
+    await settleApp();
+
+    const card = document.getElementById("orders-body").children.find((item) => item.dataset.orderId === "ORD-PENDING");
+    await card.dispatchEvent({ type: "click", target: card });
+    window.confirm = () => false;
+    globalThis.confirm = window.confirm;
+    await document.getElementById("cancel-selected").dispatchEvent({ type: "click" });
+    await settleApp();
+
+    assert.equal(calls.some((call) => call.path === "/api/orders" && call.options.method === "DELETE"), false);
+    assert.equal(document.getElementById("selected-count").textContent, "已選取 1 張訂單");
+  } finally {
+    restoreGlobals();
+  }
+});
+
+test("app.js case 5: reject selected scheduler orders posts a reason", async () => {
+  const document = buildDomFromIndex();
+  const calls = [];
+  const restoreGlobals = installBrowserGlobalsWithFetch(
+    document,
+    createAppCoverageFetch(calls, { role: "scheduler", lineId: "A" }),
+    storedSession("scheduler", { lineId: "A" }),
+  );
+  try {
+    await import(appModuleUrl("app-case-reject-reason"));
+    await settleApp();
+
+    const card = document.getElementById("orders-body").children.find((item) => item.dataset.orderId === "ORD-PENDING");
+    await card.dispatchEvent({ type: "click", target: card });
+    await document.getElementById("reject-selected").dispatchEvent({ type: "click" });
+    document.getElementById("reject-reason").value = "customer requested later due date";
+    await document.getElementById("confirm-reject-orders").dispatchEvent({ type: "click" });
+    await settleApp();
+
+    const rejectCall = calls.find((call) => call.path === "/api/orders/reject");
+    assert.deepEqual(JSON.parse(rejectCall.options.body), {
+      orderIds: ["ORD-PENDING"],
+      reason: "customer requested later due date",
+    });
+    assert.equal(document.getElementById("message-title").textContent, "已駁回訂單");
+  } finally {
+    restoreGlobals();
+  }
+});
+
+test("app.js case 6: starting production from a scheduled order posts production start", async () => {
+  const document = buildDomFromIndex();
+  const calls = [];
+  const restoreGlobals = installBrowserGlobalsWithFetch(
+    document,
+    createAppCoverageFetch(calls, { role: "scheduler", lineId: "A" }),
+    storedSession("scheduler", { lineId: "A" }),
+  );
+  try {
+    await import(appModuleUrl("app-case-start-production"));
+    await settleApp();
+
+    const startButton = document.querySelector('button[data-order-action="start-production"]');
+    await startButton.dispatchEvent({ type: "click" });
+    await settleApp();
+
+    const startCall = calls.find((call) => call.path === "/api/production/start");
+    assert.deepEqual(JSON.parse(startCall.options.body), { orderId: "ORD-SCHEDULED" });
+    assert.equal(document.getElementById("message-title").textContent, "已開始生產");
+  } finally {
+    restoreGlobals();
+  }
+});
+
+test("app.js case 7: sales can expand pending order correction controls", async () => {
+  const document = buildDomFromIndex();
+  const calls = [];
+  const restoreGlobals = installBrowserGlobalsWithFetch(
+    document,
+    createAppCoverageFetch(calls, { role: "sales", userId: "sales-1" }),
+    storedSession("sales", { id: "sales-1" }),
+  );
+  try {
+    await import(appModuleUrl("app-case-sales-expand-pending"));
+    await settleApp();
+
+    const toggle = document.querySelector('button[data-order-action="toggle-sales-pending-edit"]');
+    assert.equal(toggle.getAttribute("aria-expanded"), "false");
+    await toggle.dispatchEvent({ type: "click" });
+    await settleApp();
+
+    assert.match(renderedMarkup(document.getElementById("orders-body")), /重新送出/);
+    assert.match(renderedMarkup(document.getElementById("orders-body")), /修改：業務修改/);
+  } finally {
+    restoreGlobals();
+  }
+});
+
+test("app.js case 8: sales resubmit rejects a non-future due date before API call", async () => {
+  const document = buildDomFromIndex();
+  const calls = [];
+  const restoreGlobals = installBrowserGlobalsWithFetch(
+    document,
+    createAppCoverageFetch(calls, { role: "sales", userId: "sales-1" }),
+    storedSession("sales", { id: "sales-1" }),
+  );
+  try {
+    await import(appModuleUrl("app-case-sales-resubmit-invalid"));
+    await settleApp();
+
+    await document.querySelector('button[data-order-action="toggle-sales-pending-edit"]').dispatchEvent({ type: "click" });
+    const dueDate = document.querySelector('[data-resubmit-field="dueDate"]');
+    dueDate.value = "2000-01-01";
+    await document.querySelector('button[data-order-action="resubmit-order"]').dispatchEvent({ type: "click" });
+    await settleApp();
+
+    assert.equal(calls.some((call) => call.path === "/api/orders/resubmit"), false);
+    assert.equal(document.getElementById("message-title").textContent, "操作失敗");
+  } finally {
+    restoreGlobals();
+  }
+});
+
+test("app.js case 9: sales resubmit validates the correction form before posting", async () => {
+  const document = buildDomFromIndex();
+  const calls = [];
+  const restoreGlobals = installBrowserGlobalsWithFetch(
+    document,
+    createAppCoverageFetch(calls, { role: "sales", userId: "sales-1" }),
+    storedSession("sales", { id: "sales-1" }),
+  );
+  try {
+    await import(appModuleUrl("app-case-sales-resubmit-valid"));
+    await settleApp();
+
+    await document.querySelector('button[data-order-action="toggle-sales-pending-edit"]').dispatchEvent({ type: "click" });
+    await settleApp();
+    const card = document.getElementById("orders-body").children.find((item) => item.dataset.orderId === "ORD-PENDING");
+    card.querySelector('[data-resubmit-field="dueDate"]').value = "2099-01-01";
+    card.querySelector('[data-resubmit-field="quantity"]').value = "1000";
+    const resubmitButton = document.querySelector('button[data-order-action="resubmit-order"]');
+    assert.ok(resubmitButton, renderedMarkup(document.getElementById("orders-body")));
+    await resubmitButton.dispatchEvent({ type: "click" });
+    await settleApp();
+
+    assert.equal(calls.some((call) => call.path === "/api/orders/resubmit"), false);
+    assert.equal(document.getElementById("message-title").textContent, "操作失敗");
+    assert.match(renderedMarkup(document.getElementById("orders-body")), /重新送出/);
+  } finally {
+    restoreGlobals();
+  }
+});
+
+test("app.js case 10: sales cancel-order action deletes a single pending order", async () => {
+  const document = buildDomFromIndex();
+  const calls = [];
+  const restoreGlobals = installBrowserGlobalsWithFetch(
+    document,
+    createAppCoverageFetch(calls, { role: "sales", userId: "sales-1" }),
+    storedSession("sales", { id: "sales-1" }),
+  );
+  try {
+    await import(appModuleUrl("app-case-sales-cancel-single"));
+    await settleApp();
+
+    await document.querySelector('button[data-order-action="toggle-sales-pending-edit"]').dispatchEvent({ type: "click" });
+    await document.querySelector('button[data-order-action="cancel-order"]').dispatchEvent({ type: "click" });
+    await settleApp();
+
+    const deleteCall = calls.find((call) => call.path === "/api/orders" && call.options.method === "DELETE");
+    assert.deepEqual(JSON.parse(deleteCall.options.body), { orderIds: ["ORD-PENDING"] });
+    assert.equal(document.getElementById("message-title").textContent, "取消完成");
+  } finally {
+    restoreGlobals();
+  }
+});
+
+test("login failure renders a warning without storing a session", async () => {
+  const document = buildDomFromIndex();
+  const fetchImpl = async (path, options = {}) => {
+    if (path === "/api/auth/login") {
+      assert.equal(options.method, "POST");
+      return jsonResponse({ error: "bad credentials" }, 401);
+    }
+    throw new Error(`unexpected fetch ${path}`);
+  };
+  const restoreGlobals = installBrowserGlobalsWithFetch(document, fetchImpl);
+  try {
+    await import(appModuleUrl("login-failure-warning"));
+    await settleApp();
+
+    document.querySelector('#login-form input[name="username"]').value = "sales";
+    document.querySelector('#login-form input[name="password"]').value = "wrong";
+    await document.getElementById("login-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+
+    assert.equal(localStorage.getItem("woms.token"), null);
+    assert.equal(document.getElementById("login-page").hidden, false);
+    assert.equal(document.getElementById("message-title").textContent, "登入失敗");
+    assert.equal(document.getElementById("message-body").textContent, "bad credentials");
+    assert.equal(document.getElementById("message-dialog").dataset.type, "warn");
+  } finally {
+    restoreGlobals();
+  }
+});
+
+
+test("targeted app.js error and control branches raise runtime coverage", async () => {
   const document = buildDomFromIndex();
   let failFetch = false;
   let fetchStatus = 200;
@@ -2788,5 +3273,389 @@ test.skip("extreme app.js coverage booster", async () => {
 
   } finally {
     restoreGlobals();
+  }
+});
+
+async function runSchedulerJobPollingCase({ label, jobStatus, polledStatuses = [], expectedTitle, expectedBodyPattern }) {
+  const document = buildDomFromIndex();
+  const calls = [];
+  const fetchImpl = async (path, options = {}) => {
+    calls.push({ path, options });
+    if (path === "/api/lines") {
+      return jsonResponse({
+        lines: [{ id: "A", name: "Line A", capacityPerDay: 10000, timezone: "Asia/Taipei" }],
+      });
+    }
+    if (path === "/api/orders") {
+      return jsonResponse({
+        orders: [
+          { id: "ORD-JOB", customer: "ACME", lineId: "A", quantity: 1200, priority: "high", status: "待排程", dueDate: dateKeyAfter(6), createdBy: "sales-1" },
+        ],
+      });
+    }
+    if (String(path).startsWith("/api/schedules/calendar?")) {
+      return jsonResponse({ allocations: [], pendingAllocations: [] });
+    }
+    if (String(path).startsWith("/api/schedules/history?")) {
+      return jsonResponse({ history: [] });
+    }
+    if (path === "/api/schedules/preview") {
+      return jsonResponse({
+        previewId: `PREVIEW-${label}`,
+        currentDate: dateKeyAfter(0),
+        allocations: [
+          { orderId: "ORD-JOB", customer: "ACME", lineId: "A", date: dateKeyAfter(2), quantity: 1200, priority: "high", status: "已排程" },
+        ],
+        conflicts: [],
+      });
+    }
+    if (path === "/api/schedules/jobs") {
+      return jsonResponse({ id: `JOB-${label}`, status: jobStatus });
+    }
+    if (String(path).startsWith("/api/schedules/jobs/")) {
+      const next = polledStatuses.shift() ?? "running";
+      return jsonResponse({
+        id: `JOB-${label}`,
+        status: next,
+        message: next === "cancelled" ? "cancelled by worker" : undefined,
+      });
+    }
+    throw new Error(`unexpected fetch ${path}`);
+  };
+  const restoreGlobals = installBrowserGlobalsWithFetch(
+    document,
+    fetchImpl,
+    storedSession("scheduler", { lineId: "A" }),
+  );
+  try {
+    await import(appModuleUrl(`scheduler-job-${label}`));
+    await settleApp();
+
+    const card = document.getElementById("orders-body").children.find((item) => item.dataset.orderId === "ORD-JOB");
+    await card.dispatchEvent({ type: "click", target: card });
+    await document.getElementById("preview-selected").dispatchEvent({ type: "click" });
+    await settleApp();
+    await document.getElementById("confirm-schedule-job").dispatchEvent({ type: "click" });
+    await settleApp();
+
+    assert.equal(document.getElementById("message-title").textContent, expectedTitle);
+    assert.match(document.getElementById("message-body").textContent, expectedBodyPattern);
+    return calls;
+  } finally {
+    restoreGlobals();
+  }
+}
+
+test("queued scheduler jobs cover completed failed cancelled and timeout polling outcomes", async () => {
+  const completedCalls = await runSchedulerJobPollingCase({
+    label: "completed",
+    jobStatus: "queued",
+    polledStatuses: ["running", "completed"],
+    expectedTitle: "排程完成",
+    expectedBodyPattern: /JOB-completed 已完成/,
+  });
+  assert.equal(completedCalls.filter((call) => String(call.path).startsWith("/api/schedules/jobs/JOB-completed")).length, 2);
+
+  await runSchedulerJobPollingCase({
+    label: "cancelled",
+    jobStatus: "running",
+    polledStatuses: ["cancelled"],
+    expectedTitle: "排程未完成",
+    expectedBodyPattern: /cancelled by worker/,
+  });
+
+  await runSchedulerJobPollingCase({
+    label: "timeout",
+    jobStatus: "queued",
+    polledStatuses: Array.from({ length: 20 }, () => "running"),
+    expectedTitle: "排程仍在背景執行",
+    expectedBodyPattern: /尚未完成/,
+  });
+});
+
+test("login and startup request failures cover fallback auth messages", async () => {
+  const loginDocument = buildDomFromIndex();
+  const loginRestore = installBrowserGlobalsWithFetch(loginDocument, async (path) => {
+    if (path === "/api/auth/login") {
+      return {
+        ok: false,
+        status: 500,
+        json: async () => {
+          throw new Error("not json");
+        },
+      };
+    }
+    throw new Error(`unexpected fetch ${path}`);
+  });
+  try {
+    await import(appModuleUrl("login-non-json-fallback"));
+    await settleApp();
+    await loginDocument.getElementById("login-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+
+    assert.equal(loginDocument.getElementById("message-title").textContent, "登入失敗");
+    assert.equal(loginDocument.getElementById("message-body").textContent, "請求失敗，請稍後再試。");
+    assert.equal(localStorage.getItem("woms.token"), null);
+  } finally {
+    loginRestore();
+  }
+
+  const startupDocument = buildDomFromIndex();
+  const startupRestore = installBrowserGlobalsWithFetch(
+    startupDocument,
+    async (path) => {
+      if (path === "/api/lines") {
+        return jsonResponse({ error: "server unavailable" }, 503);
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+    storedSession("admin"),
+  );
+  try {
+    await import(appModuleUrl("startup-non-401-failure"));
+    await settleApp();
+
+    assert.equal(startupDocument.getElementById("message-title").textContent, "工作區重新整理失敗");
+    assert.equal(startupDocument.getElementById("message-body").textContent, "server unavailable");
+    assert.equal(startupDocument.body.dataset.role, "admin");
+  } finally {
+    startupRestore();
+  }
+});
+
+test("role and line configuration covers fallback line and scheduler fixed-line branches", async () => {
+  const schedulerDocument = buildDomFromIndex();
+  const schedulerCalls = [];
+  const schedulerRestore = installBrowserGlobalsWithFetch(
+    schedulerDocument,
+    async (path, options = {}) => {
+      schedulerCalls.push({ path, options });
+      if (path === "/api/lines") {
+        return jsonResponse({ lines: [] });
+      }
+      if (path === "/api/orders") {
+        return jsonResponse({
+          orders: [
+            { id: "ORD-D", customer: "London", lineId: "D", quantity: 700, priority: "low", status: "待排程", dueDate: dateKeyAfter(7), createdBy: "sales-1" },
+          ],
+        });
+      }
+      if (String(path).startsWith("/api/schedules/calendar?")) {
+        return jsonResponse({ allocations: [], pendingAllocations: [] });
+      }
+      if (String(path).startsWith("/api/schedules/history?")) {
+        return jsonResponse({ history: [] });
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+    {
+      ...storedSession("scheduler", { lineId: "D" }),
+      "woms.selectedLine": "Z",
+    },
+  );
+  try {
+    await import(appModuleUrl("scheduler-fallback-line"));
+    await settleApp();
+
+    assert.equal(schedulerDocument.getElementById("active-line-select").disabled, true);
+    assert.equal(schedulerDocument.getElementById("active-line-select").value, "D");
+    assert.equal(schedulerDocument.querySelector('#schedule-form input[name="lineId"]').value, "D");
+    assert.equal(schedulerCalls.some((call) => String(call.path).includes("lineId=D")), true);
+  } finally {
+    schedulerRestore();
+  }
+
+  const salesDocument = buildDomFromIndex();
+  const salesRestore = installBrowserGlobalsWithFetch(
+    salesDocument,
+    createAppCoverageFetch([], { role: "sales", userId: "sales-1" }),
+    {
+      ...storedSession("sales", { id: "sales-1" }),
+      "woms.selectedLine": "Z",
+    },
+  );
+  try {
+    await import(appModuleUrl("sales-default-filter-line"));
+    await settleApp();
+
+    assert.equal(salesDocument.getElementById("active-line-select").disabled, false);
+    assert.equal(salesDocument.getElementById("active-line-select").value, "A");
+    assert.equal(salesDocument.getElementById("orders-heading-eyebrow").textContent, "業務接單");
+    assert.equal(salesDocument.getElementById("orders-heading-title").textContent, "待排程訂單");
+  } finally {
+    salesRestore();
+  }
+});
+
+test("dialog fallback branches open and close without native dialog methods", async () => {
+  const document = buildDomFromIndex();
+  for (const id of ["message-dialog", "schedule-preview-dialog", "production-dialog", "reject-dialog"]) {
+    const dialog = document.getElementById(id);
+    dialog.showModal = undefined;
+    dialog.close = undefined;
+  }
+  const fetchImpl = async (path, options = {}) => {
+    if (path === "/api/lines") {
+      return jsonResponse({ lines: [{ id: "A", name: "Line A", capacityPerDay: 10000, timezone: "Asia/Taipei" }] });
+    }
+    if (path === "/api/orders") {
+      if (options.method === "DELETE") {
+        return jsonResponse({ cancelledOrderIds: JSON.parse(options.body).orderIds });
+      }
+      return jsonResponse({
+        orders: [
+          { id: "ORD-PENDING", customer: "ACME", lineId: "A", quantity: 2500, priority: "high", status: "待排程", dueDate: dateKeyAfter(6), createdBy: "sales-1" },
+          { id: "ORD-PROD", customer: "Gamma", lineId: "A", quantity: 900, priority: "low", status: "生產中", dueDate: dateKeyAfter(9), createdBy: "sales-1" },
+        ],
+      });
+    }
+    if (String(path).startsWith("/api/schedules/calendar?")) {
+      return jsonResponse({
+        allocations: [
+          { orderId: "ORD-PROD", customer: "Gamma", lineId: "A", date: dateKeyAfter(3), quantity: 900, priority: "low", status: "生產中" },
+        ],
+        pendingAllocations: [],
+      });
+    }
+    if (String(path).startsWith("/api/schedules/history?")) {
+      return jsonResponse({ history: [] });
+    }
+    if (path === "/api/schedules/preview") {
+      return jsonResponse({
+        previewId: "PREVIEW-FALLBACK",
+        currentDate: dateKeyAfter(0),
+        allocations: [],
+        conflicts: [],
+      });
+    }
+    throw new Error(`unexpected fetch ${path}`);
+  };
+  const restoreGlobals = installBrowserGlobalsWithFetch(
+    document,
+    fetchImpl,
+    storedSession("scheduler", { lineId: "A" }),
+  );
+  try {
+    await import(appModuleUrl("dialog-fallbacks"));
+    await settleApp();
+
+    const card = document.getElementById("orders-body").children.find((item) => item.dataset.orderId === "ORD-PENDING");
+    await card.dispatchEvent({ type: "click", target: card });
+    await document.getElementById("preview-selected").dispatchEvent({ type: "click" });
+    await settleApp();
+    assert.equal(document.getElementById("schedule-preview-dialog").getAttribute("open"), "");
+
+    await document.getElementById("close-preview-page").dispatchEvent({ type: "click" });
+    await settleApp();
+    assert.equal(document.getElementById("schedule-preview-dialog").getAttribute("open"), null);
+
+    await document.getElementById("reject-selected").dispatchEvent({ type: "click" });
+    assert.equal(document.getElementById("reject-dialog").getAttribute("open"), "");
+
+    const productionButton = document.querySelector('button[data-order-action="confirm-production"]');
+    await productionButton.dispatchEvent({ type: "click" });
+    await settleApp();
+    assert.equal(document.getElementById("production-dialog").getAttribute("open"), "");
+    await document.getElementById("cancel-production-report").dispatchEvent({ type: "click" });
+    assert.equal(document.getElementById("production-dialog").getAttribute("open"), null);
+  } finally {
+    restoreGlobals();
+  }
+});
+
+test("calendar order clicks cover authorization missing-order and production action branches", async () => {
+  const salesDocument = buildDomFromIndex();
+  const salesRestore = installBrowserGlobalsWithFetch(
+    salesDocument,
+    async (path) => {
+      if (path === "/api/lines") {
+        return jsonResponse({ lines: [{ id: "A", name: "Line A", capacityPerDay: 10000, timezone: "Asia/Taipei" }] });
+      }
+      if (path === "/api/orders") {
+        return jsonResponse({ orders: [] });
+      }
+      if (String(path).startsWith("/api/schedules/calendar?")) {
+        return jsonResponse({
+          allocations: [
+            { orderId: "ORD-NOT-MINE", customer: "Beta", lineId: "A", date: dateKeyAfter(2), quantity: 300, priority: "low", status: "已排程" },
+          ],
+          pendingAllocations: [],
+        });
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+    storedSession("sales", { id: "sales-1" }),
+  );
+  try {
+    await import(appModuleUrl("calendar-sales-auth"));
+    await settleApp();
+
+    const calendarItem = salesDocument.querySelector("[data-calendar-order-id]");
+    assert.equal(calendarItem, null);
+    assert.match(renderedMarkup(salesDocument.getElementById("calendar-grid")), /ORD-NOT-MINE/);
+  } finally {
+    salesRestore();
+  }
+
+  const schedulerDocument = buildDomFromIndex();
+  const schedulerCalls = [];
+  const schedulerRestore = installBrowserGlobalsWithFetch(
+    schedulerDocument,
+    async (path, options = {}) => {
+      schedulerCalls.push({ path, options });
+      if (path === "/api/lines") {
+        return jsonResponse({ lines: [{ id: "A", name: "Line A", capacityPerDay: 10000, timezone: "Asia/Taipei" }] });
+      }
+      if (path === "/api/orders") {
+        return jsonResponse({
+          orders: [
+            { id: "ORD-SCHEDULED", customer: "Beta", lineId: "A", quantity: 300, priority: "low", status: "已排程", dueDate: dateKeyAfter(5), createdBy: "sales-1" },
+            { id: "ORD-PROD", customer: "Gamma", lineId: "A", quantity: 400, priority: "low", status: "生產中", dueDate: dateKeyAfter(6), createdBy: "sales-1" },
+          ],
+        });
+      }
+      if (path === "/api/production/start") {
+        return jsonResponse({ id: JSON.parse(options.body).orderId });
+      }
+      if (String(path).startsWith("/api/schedules/calendar?")) {
+        return jsonResponse({
+          allocations: [
+            { orderId: "ORD-SCHEDULED", customer: "Beta", lineId: "A", date: dateKeyAfter(2), quantity: 300, priority: "low", status: "已排程" },
+            { orderId: "ORD-PROD", customer: "Gamma", lineId: "A", date: dateKeyAfter(3), quantity: 400, priority: "low", status: "生產中" },
+            { orderId: "ORD-MISSING", customer: "Missing", lineId: "A", date: dateKeyAfter(4), quantity: 500, priority: "low", status: "已排程" },
+          ],
+          pendingAllocations: [],
+        });
+      }
+      if (String(path).startsWith("/api/schedules/history?")) {
+        return jsonResponse({ history: [] });
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+    storedSession("scheduler", { lineId: "A" }),
+  );
+  try {
+    await import(appModuleUrl("calendar-scheduler-actions"));
+    await settleApp();
+
+    const scheduled = Array.from(schedulerDocument.querySelectorAll("[data-calendar-order-id]"))
+      .find((button) => button.dataset.calendarOrderId === "ORD-SCHEDULED");
+    await scheduled.dispatchEvent({ type: "click" });
+    await settleApp();
+    assert.equal(schedulerCalls.some((call) => call.path === "/api/production/start"), true);
+    assert.equal(schedulerDocument.getElementById("message-title").textContent, "已開始生產");
+
+    const producing = Array.from(schedulerDocument.querySelectorAll("[data-calendar-order-id]"))
+      .find((button) => button.dataset.calendarOrderId === "ORD-PROD");
+    await producing.dispatchEvent({ type: "click" });
+    await settleApp();
+    assert.equal(schedulerDocument.getElementById("production-dialog").open, true);
+
+    const missing = Array.from(schedulerDocument.querySelectorAll("[data-calendar-order-id]"))
+      .find((button) => button.dataset.calendarOrderId === "ORD-MISSING");
+    await missing.dispatchEvent({ type: "click" });
+    assert.equal(schedulerDocument.getElementById("message-title").textContent, "找不到訂單");
+  } finally {
+    schedulerRestore();
   }
 });

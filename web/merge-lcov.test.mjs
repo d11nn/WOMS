@@ -24,6 +24,7 @@ FNDA:5,bar
 DA:1,1
 DA:3,5
 BRDA:1,1,1,1
+BRDA:1,99,1,4
 BRDA:1,1,2,-
 end_of_record
 some junk text without SF line
@@ -45,8 +46,8 @@ end_of_record
     assert.match(merged, /DA:1,3/); // 2 + 1 = 3
     assert.match(merged, /DA:2,0/);
     assert.match(merged, /DA:3,5/);
-    assert.match(merged, /BRDA:1,1,1,3/); // 2 + 1 = 3
-    assert.match(merged, /BRDA:1,1,2,0/);
+    assert.match(merged, /BRDA:1,0,1,7/); // 2 + 1 + duplicate V8 block hit 4 = 7
+    assert.match(merged, /BRDA:1,0,2,0/);
     assert.match(merged, /FNF:2/);
     assert.match(merged, /FNH:2/);
     assert.match(merged, /BRF:2/);

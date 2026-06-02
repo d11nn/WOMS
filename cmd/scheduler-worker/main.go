@@ -25,58 +25,107 @@ func main() {
 	if err != nil {
 		log.Fatalf("invalid scheduler worker configuration: %v", err)
 	}
+	if err := runWorker(config); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func runWorker(config workerConfig) error {
 	brokerList := startup.SplitCSV(config.brokers)
-	var db *sql.DB
-	var lockProvider womslock.Provider
-	if config.databaseURL != "" {
-		if err := validateLockConfig(config.lockTTL, config.lockRenewInterval, config.lockTimeout); err != nil {
-			log.Fatalf("invalid Redis lock configuration: %v", err)
-		}
-		if config.backfillInterval <= 0 {
-			log.Fatal("WORKER_BACKFILL_INTERVAL_MS must be greater than zero when DATABASE_URL is set")
-		}
-		if config.redisAddr == "" {
-			log.Fatal("REDIS_ADDR is required when DATABASE_URL is set; scheduler-worker refuses to run without Redis line locks")
-		}
-		var err error
-		redisLocks := womslock.NewRedisProvider(config.redisAddr)
-		ctx, cancel := context.WithTimeout(context.Background(), config.dependencyTimeout)
-		err = startup.RetryDependency(ctx, "redis line lock", config.dependencyInterval, log.Printf, func(ctx context.Context) error {
-			return redisLocks.Ping(ctx)
-		})
-		cancel()
-		if err != nil {
-			log.Fatalf("redis line lock failed: %v", err)
-		}
-		lockProvider = redisLocks
-		db, err = sql.Open("postgres", config.databaseURL)
-		if err != nil {
-			log.Fatalf("postgres open failed: %v", err)
-		}
-		ctx, cancel = context.WithTimeout(context.Background(), config.dependencyTimeout)
-		err = startup.RetryDependency(ctx, "postgres", config.dependencyInterval, log.Printf, func(ctx context.Context) error {
-			return db.PingContext(ctx)
-		})
-		cancel()
-		if err != nil {
-			log.Fatalf("postgres ping failed: %v", err)
-		}
+	db, lockProvider, err := setupDatabaseAndLocks(config)
+	if err != nil {
+		return err
+	}
+	if db != nil {
 		defer db.Close()
 		if err := backfillQueuedJobs(context.Background(), db, lockProvider, config.maxRetries, config.lockTTL, config.lockRenewInterval, config.lockTimeout); err != nil {
 			log.Printf("scheduler backfill failed: %v", err)
 		}
 	}
-
 	log.Printf("scheduler worker starting brokers=%s topic=%s group=%s minJobDuration=%s", config.brokers, config.topic, config.group, config.minJobDuration)
+	if err := waitForKafka(config, brokerList); err != nil {
+		return err
+	}
+	reader := newScheduleJobReader(config, brokerList)
+	defer reader.Close()
+	startBackfillLoop(db, lockProvider, config)
+	return runMessageLoop(reader, db, lockProvider, config)
+}
+
+func setupDatabaseAndLocks(config workerConfig) (*sql.DB, womslock.Provider, error) {
+	if config.databaseURL == "" {
+		return nil, nil, nil
+	}
+	if err := validateDatabaseModeConfig(config); err != nil {
+		return nil, nil, err
+	}
+	lockProvider, err := connectRedisLockProvider(config)
+	if err != nil {
+		return nil, nil, err
+	}
+	db, err := connectPostgres(config)
+	if err != nil {
+		return nil, nil, err
+	}
+	return db, lockProvider, nil
+}
+
+func validateDatabaseModeConfig(config workerConfig) error {
+	if err := validateLockConfig(config.lockTTL, config.lockRenewInterval, config.lockTimeout); err != nil {
+		return errors.New("invalid Redis lock configuration: " + err.Error())
+	}
+	if config.backfillInterval <= 0 {
+		return errors.New("WORKER_BACKFILL_INTERVAL_MS must be greater than zero when DATABASE_URL is set")
+	}
+	if config.redisAddr == "" {
+		return errors.New("REDIS_ADDR is required when DATABASE_URL is set; scheduler-worker refuses to run without Redis line locks")
+	}
+	return nil
+}
+
+func connectRedisLockProvider(config workerConfig) (womslock.Provider, error) {
+	redisLocks := womslock.NewRedisProvider(config.redisAddr)
 	ctx, cancel := context.WithTimeout(context.Background(), config.dependencyTimeout)
+	err := startup.RetryDependency(ctx, "redis line lock", config.dependencyInterval, log.Printf, func(ctx context.Context) error {
+		return redisLocks.Ping(ctx)
+	})
+	cancel()
+	if err != nil {
+		return nil, errors.New("redis line lock failed: " + err.Error())
+	}
+	return redisLocks, nil
+}
+
+func connectPostgres(config workerConfig) (*sql.DB, error) {
+	db, err := sql.Open("postgres", config.databaseURL)
+	if err != nil {
+		return nil, errors.New("postgres open failed: " + err.Error())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), config.dependencyTimeout)
+	err = startup.RetryDependency(ctx, "postgres", config.dependencyInterval, log.Printf, func(ctx context.Context) error {
+		return db.PingContext(ctx)
+	})
+	cancel()
+	if err != nil {
+		db.Close()
+		return nil, errors.New("postgres ping failed: " + err.Error())
+	}
+	return db, nil
+}
+
+func waitForKafka(config workerConfig, brokerList []string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), config.dependencyTimeout)
+	defer cancel()
 	if err := startup.RetryDependency(ctx, "kafka broker", config.dependencyInterval, log.Printf, func(ctx context.Context) error {
 		return startup.PingAnyTCP(ctx, brokerList)
 	}); err != nil {
-		cancel()
-		log.Fatalf("kafka broker failed: %v", err)
+		return errors.New("kafka broker failed: " + err.Error())
 	}
-	cancel()
-	reader := kafka.NewReader(kafka.ReaderConfig{
+	return nil
+}
+
+func newScheduleJobReader(config workerConfig, brokerList []string) *kafka.Reader {
+	return kafka.NewReader(kafka.ReaderConfig{
 		Brokers: brokerList,
 		Topic:   config.topic,
 		GroupID: config.group,
@@ -85,7 +134,9 @@ func main() {
 		PartitionWatchInterval: 5 * time.Second,
 		StartOffset:            config.startOffset,
 	})
-	defer reader.Close()
+}
+
+func startBackfillLoop(db *sql.DB, lockProvider womslock.Provider, config workerConfig) {
 	if db != nil && config.backfillInterval > 0 {
 		go func() {
 			ticker := time.NewTicker(config.backfillInterval)
@@ -97,7 +148,9 @@ func main() {
 			}
 		}()
 	}
+}
 
+func runMessageLoop(reader *kafka.Reader, db *sql.DB, lockProvider womslock.Provider, config workerConfig) error {
 	for {
 		message, err := reader.FetchMessage(context.Background())
 		if err != nil {
@@ -107,15 +160,10 @@ func main() {
 		}
 		started := time.Now()
 		log.Printf("scheduler job received topic=%s partition=%d offset=%d key=%s bytes=%d", message.Topic, message.Partition, message.Offset, string(message.Key), len(message.Value))
-		if config.minJobDuration > 0 {
-			time.Sleep(config.minJobDuration)
-		}
-		if db != nil {
-			if err := processDBJob(context.Background(), db, lockProvider, message.Value, workerJobConfigFromConfig(config)); err != nil {
-				log.Printf("scheduler job db execution failed key=%s error=%v", string(message.Key), err)
-				time.Sleep(2 * time.Second)
-				continue
-			}
+		if err := handleScheduleMessage(message, db, lockProvider, config); err != nil {
+			log.Printf("scheduler job db execution failed key=%s error=%v", string(message.Key), err)
+			time.Sleep(2 * time.Second)
+			continue
 		}
 		if err := reader.CommitMessages(context.Background(), message); err != nil {
 			log.Printf("scheduler job commit failed key=%s error=%v", string(message.Key), err)
@@ -123,6 +171,16 @@ func main() {
 		}
 		log.Printf("scheduler job acknowledged key=%s elapsed=%s", string(message.Key), time.Since(started).Round(time.Millisecond))
 	}
+}
+
+func handleScheduleMessage(message kafka.Message, db *sql.DB, lockProvider womslock.Provider, config workerConfig) error {
+	if config.minJobDuration > 0 {
+		time.Sleep(config.minJobDuration)
+	}
+	if db == nil {
+		return nil
+	}
+	return processDBJob(context.Background(), db, lockProvider, message.Value, workerJobConfigFromConfig(config))
 }
 
 type workerConfig struct {
@@ -491,49 +549,78 @@ func insertWorkerAuditTx(ctx context.Context, tx *sql.Tx, jobID, action, reason 
 	return err
 }
 
-func persistLineSchedule(ctx context.Context, tx *sql.Tx, job domain.ScheduleJob) error {
-	rows, err := tx.QueryContext(ctx, `
-		SELECT id, quantity, priority
-		FROM orders
-		WHERE line_id = $1 AND status = '待排程'
-		ORDER BY CASE WHEN priority = 'high' THEN 0 ELSE 1 END, due_date, created_at, id
-	`, job.LineID)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
+type workerOrderRow struct {
+	id       string
+	quantity int
+	priority string
+}
 
-	type orderRow struct {
-		id       string
-		quantity int
-		priority string
-	}
-	orders := []orderRow{}
-	for rows.Next() {
-		var order orderRow
-		if err := rows.Scan(&order.id, &order.quantity, &order.priority); err != nil {
-			return err
-		}
-		if len(job.OrderIDs) > 0 && !contains(job.OrderIDs, order.id) {
-			continue
-		}
-		orders = append(orders, order)
-	}
-	if err := rows.Err(); err != nil {
+func persistLineSchedule(ctx context.Context, tx *sql.Tx, job domain.ScheduleJob) error {
+	orders, err := loadPendingOrdersForLineTx(ctx, tx, job.LineID, job.OrderIDs)
+	if err != nil {
 		return err
 	}
 	if len(orders) == 0 {
 		return nil
 	}
-
-	var capacity int
-	var revision int64
-	if err := tx.QueryRowContext(ctx, "SELECT capacity_per_day, schedule_revision FROM production_lines WHERE id = $1 FOR UPDATE", job.LineID).Scan(&capacity, &revision); err != nil {
+	capacity, revision, err := lockProductionLineForScheduleTx(ctx, tx, job.LineID)
+	if err != nil {
 		return err
 	}
+	if err := validateJobLineRevision(job, revision); err != nil {
+		return err
+	}
+	if err := insertLineScheduleAllocationsTx(ctx, tx, job, orders, capacity); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, "UPDATE production_lines SET schedule_revision = schedule_revision + 1 WHERE id = $1", job.LineID)
+	return err
+}
+
+func loadPendingOrdersForLineTx(ctx context.Context, tx *sql.Tx, lineID string, selectedIDs []string) ([]workerOrderRow, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, quantity, priority
+		FROM orders
+		WHERE line_id = $1 AND status = '待排程'
+		ORDER BY CASE WHEN priority = 'high' THEN 0 ELSE 1 END, due_date, created_at, id
+	`, lineID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	orders := []workerOrderRow{}
+	for rows.Next() {
+		var order workerOrderRow
+		if err := rows.Scan(&order.id, &order.quantity, &order.priority); err != nil {
+			return nil, err
+		}
+		if len(selectedIDs) > 0 && !contains(selectedIDs, order.id) {
+			continue
+		}
+		orders = append(orders, order)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return orders, nil
+}
+
+func lockProductionLineForScheduleTx(ctx context.Context, tx *sql.Tx, lineID string) (int, int64, error) {
+	var capacity int
+	var revision int64
+	err := tx.QueryRowContext(ctx, "SELECT capacity_per_day, schedule_revision FROM production_lines WHERE id = $1 FOR UPDATE", lineID).Scan(&capacity, &revision)
+	return capacity, revision, err
+}
+
+func validateJobLineRevision(job domain.ScheduleJob, revision int64) error {
 	if job.Source != "hpa-peak-demo" && job.LineRevision != 0 && revision != job.LineRevision {
 		return errStaleScheduleData{}
 	}
+	return nil
+}
+
+func insertLineScheduleAllocationsTx(ctx context.Context, tx *sql.Tx, job domain.ScheduleJob, orders []workerOrderRow, capacity int) error {
 	scheduleDate := truncateDate(time.Now().UTC())
 	used := 0
 	for _, order := range orders {
@@ -552,11 +639,38 @@ func persistLineSchedule(ctx context.Context, tx *sql.Tx, job domain.ScheduleJob
 		}
 		used += order.quantity
 	}
+	return nil
+}
+
+func persistPreviewAllocations(ctx context.Context, tx *sql.Tx, job domain.ScheduleJob) error {
+	revision, allocations, err := loadPreviewAllocationsTx(ctx, tx, job)
+	if err != nil {
+		return err
+	}
+	if err := validatePreviewRevisionTx(ctx, tx, job, revision); err != nil {
+		return err
+	}
+	if len(allocations) == 0 {
+		return nil
+	}
+	orderIDs, err := validatePreviewAllocationLine(allocations, job.LineID)
+	if err != nil {
+		return err
+	}
+	if err := prepareSplitPreviewOrdersTx(ctx, tx, allocations); err != nil {
+		return err
+	}
+	if err := replacePreviewAllocationsTx(ctx, tx, orderIDs, allocations); err != nil {
+		return err
+	}
+	if err := markPreviewOrdersScheduledTx(ctx, tx, orderIDs); err != nil {
+		return err
+	}
 	_, err = tx.ExecContext(ctx, "UPDATE production_lines SET schedule_revision = schedule_revision + 1 WHERE id = $1", job.LineID)
 	return err
 }
 
-func persistPreviewAllocations(ctx context.Context, tx *sql.Tx, job domain.ScheduleJob) error {
+func loadPreviewAllocationsTx(ctx context.Context, tx *sql.Tx, job domain.ScheduleJob) (int64, []scheduler.Allocation, error) {
 	var revision int64
 	var allocationsJSON []byte
 	if err := tx.QueryRowContext(ctx, `
@@ -565,31 +679,40 @@ func persistPreviewAllocations(ctx context.Context, tx *sql.Tx, job domain.Sched
 		WHERE id = $1 AND line_id = $2 AND expires_at > NOW()
 	`, job.PreviewID, job.LineID).Scan(&revision, &allocationsJSON); err != nil {
 		if err == sql.ErrNoRows {
-			return errStaleScheduleData{}
+			return 0, nil, errStaleScheduleData{}
 		}
-		return err
+		return 0, nil, err
 	}
+	var allocations []scheduler.Allocation
+	if err := json.Unmarshal(allocationsJSON, &allocations); err != nil {
+		return 0, nil, err
+	}
+	return revision, allocations, nil
+}
+
+func validatePreviewRevisionTx(ctx context.Context, tx *sql.Tx, job domain.ScheduleJob, previewRevision int64) error {
 	var currentRevision int64
 	if err := tx.QueryRowContext(ctx, "SELECT schedule_revision FROM production_lines WHERE id = $1 FOR UPDATE", job.LineID).Scan(&currentRevision); err != nil {
 		return err
 	}
-	if currentRevision != revision || (job.LineRevision != 0 && job.LineRevision != revision) {
+	if currentRevision != previewRevision || (job.LineRevision != 0 && job.LineRevision != previewRevision) {
 		return errStaleScheduleData{}
 	}
-	var allocations []scheduler.Allocation
-	if err := json.Unmarshal(allocationsJSON, &allocations); err != nil {
-		return err
-	}
-	if len(allocations) == 0 {
-		return nil
-	}
+	return nil
+}
+
+func validatePreviewAllocationLine(allocations []scheduler.Allocation, lineID string) (map[string]bool, error) {
 	orderIDs := map[string]bool{}
 	for _, allocation := range allocations {
-		if allocation.LineID != job.LineID {
-			return errStaleScheduleData{}
+		if allocation.LineID != lineID {
+			return nil, errStaleScheduleData{}
 		}
 		orderIDs[allocation.OrderID] = true
 	}
+	return orderIDs, nil
+}
+
+func prepareSplitPreviewOrdersTx(ctx context.Context, tx *sql.Tx, allocations []scheduler.Allocation) error {
 	sourceFirstQuantities := map[string]int{}
 	splitAllocations := []scheduler.Allocation{}
 	for _, allocation := range allocations {
@@ -617,6 +740,10 @@ func persistPreviewAllocations(ctx context.Context, tx *sql.Tx, job domain.Sched
 			return err
 		}
 	}
+	return nil
+}
+
+func replacePreviewAllocationsTx(ctx context.Context, tx *sql.Tx, orderIDs map[string]bool, allocations []scheduler.Allocation) error {
 	for orderID := range orderIDs {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM schedule_allocations WHERE order_id = $1 AND COALESCE(status, '已排程') <> '已完成'", orderID); err != nil {
 			return err
@@ -630,104 +757,121 @@ func persistPreviewAllocations(ctx context.Context, tx *sql.Tx, job domain.Sched
 			return err
 		}
 	}
+	return nil
+}
+
+func markPreviewOrdersScheduledTx(ctx context.Context, tx *sql.Tx, orderIDs map[string]bool) error {
 	for orderID := range orderIDs {
 		if _, err := tx.ExecContext(ctx, "UPDATE orders SET status = '已排程', updated_at = NOW() WHERE id = $1 AND status = '待排程'", orderID); err != nil {
 			return err
 		}
 	}
-	_, err := tx.ExecContext(ctx, "UPDATE production_lines SET schedule_revision = schedule_revision + 1 WHERE id = $1", job.LineID)
-	return err
+	return nil
+}
+
+type backfillCursor struct {
+	createdAt time.Time
+	id        string
+	active    bool
 }
 
 func backfillQueuedJobs(ctx context.Context, db *sql.DB, lockProvider womslock.Provider, maxRetries int, lockTTL, lockRenewInterval, lockTimeout time.Duration) error {
-	const backfillBatchSize = 100
-
-	var (
-		lastCreatedAt time.Time
-		lastID        string
-		hasCursor     bool
-	)
-
+	cursor := backfillCursor{}
+	config := workerJobConfig{
+		maxRetries:        maxRetries,
+		lockTTL:           lockTTL,
+		lockRenewInterval: lockRenewInterval,
+		lockTimeout:       lockTimeout,
+	}
 	for {
-		var (
-			rows *sql.Rows
-			err  error
-		)
-
-		if hasCursor {
-			rows, err = db.QueryContext(ctx, `
-				SELECT id, line_id, COALESCE(source, ''), COALESCE(preview_id, ''),
-				       COALESCE(request_hash, ''), line_revision, order_ids, created_at, updated_at
-				FROM schedule_jobs
-				WHERE status = 'queued'
-				  AND (created_at > $1 OR (created_at = $1 AND id > $2))
-				ORDER BY created_at, id
-				LIMIT $3
-			`, lastCreatedAt, lastID, backfillBatchSize)
-		} else {
-			rows, err = db.QueryContext(ctx, `
-				SELECT id, line_id, COALESCE(source, ''), COALESCE(preview_id, ''),
-				       COALESCE(request_hash, ''), line_revision, order_ids, created_at, updated_at
-				FROM schedule_jobs
-				WHERE status = 'queued'
-				ORDER BY created_at, id
-				LIMIT $1
-			`, backfillBatchSize)
-		}
+		count, nextCursor, err := backfillNextBatch(ctx, db, lockProvider, cursor, config)
 		if err != nil {
 			return err
 		}
-
-		batchCount := 0
-		for rows.Next() {
-			var job domain.ScheduleJob
-			var orderIDsJSON []byte
-			if err := rows.Scan(
-				&job.ID,
-				&job.LineID,
-				&job.Source,
-				&job.PreviewID,
-				&job.RequestHash,
-				&job.LineRevision,
-				&orderIDsJSON,
-				&job.CreatedAt,
-				&job.UpdatedAt,
-			); err != nil {
-				rows.Close()
-				return err
-			}
-			_ = json.Unmarshal(orderIDsJSON, &job.OrderIDs)
-			job.Status = domain.JobQueued
-			payload, err := json.Marshal(job)
-			if err != nil {
-				rows.Close()
-				return err
-			}
-			if err := processDBJob(ctx, db, lockProvider, payload, workerJobConfig{
-				maxRetries:        maxRetries,
-				lockTTL:           lockTTL,
-				lockRenewInterval: lockRenewInterval,
-				lockTimeout:       lockTimeout,
-			}); err != nil {
-				log.Printf("scheduler backfill job failed id=%s error=%v", job.ID, err)
-			}
-
-			lastCreatedAt = job.CreatedAt
-			lastID = job.ID
-			hasCursor = true
-			batchCount++
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return err
-		}
-		if err := rows.Close(); err != nil {
-			return err
-		}
-		if batchCount < backfillBatchSize {
+		if count < backfillBatchSize {
 			return nil
 		}
+		cursor = nextCursor
 	}
+}
+
+const backfillBatchSize = 100
+
+func queryQueuedJobBatch(ctx context.Context, db *sql.DB, cursor backfillCursor, limit int) (*sql.Rows, error) {
+	if cursor.active {
+		return db.QueryContext(ctx, `
+			SELECT id, line_id, COALESCE(source, ''), COALESCE(preview_id, ''),
+			       COALESCE(request_hash, ''), line_revision, order_ids, created_at, updated_at
+			FROM schedule_jobs
+			WHERE status = 'queued'
+			  AND (created_at > $1 OR (created_at = $1 AND id > $2))
+			ORDER BY created_at, id
+			LIMIT $3
+		`, cursor.createdAt, cursor.id, limit)
+	}
+	return db.QueryContext(ctx, `
+		SELECT id, line_id, COALESCE(source, ''), COALESCE(preview_id, ''),
+		       COALESCE(request_hash, ''), line_revision, order_ids, created_at, updated_at
+		FROM schedule_jobs
+		WHERE status = 'queued'
+		ORDER BY created_at, id
+		LIMIT $1
+	`, limit)
+}
+
+func scanQueuedScheduleJob(rows *sql.Rows) (domain.ScheduleJob, error) {
+	var job domain.ScheduleJob
+	var orderIDsJSON []byte
+	if err := rows.Scan(
+		&job.ID,
+		&job.LineID,
+		&job.Source,
+		&job.PreviewID,
+		&job.RequestHash,
+		&job.LineRevision,
+		&orderIDsJSON,
+		&job.CreatedAt,
+		&job.UpdatedAt,
+	); err != nil {
+		return domain.ScheduleJob{}, err
+	}
+	_ = json.Unmarshal(orderIDsJSON, &job.OrderIDs)
+	job.Status = domain.JobQueued
+	return job, nil
+}
+
+func processBackfillJob(ctx context.Context, db *sql.DB, lockProvider womslock.Provider, job domain.ScheduleJob, config workerJobConfig) error {
+	payload, err := json.Marshal(job)
+	if err != nil {
+		return err
+	}
+	return processDBJob(ctx, db, lockProvider, payload, config)
+}
+
+func backfillNextBatch(ctx context.Context, db *sql.DB, lockProvider womslock.Provider, cursor backfillCursor, config workerJobConfig) (int, backfillCursor, error) {
+	rows, err := queryQueuedJobBatch(ctx, db, cursor, backfillBatchSize)
+	if err != nil {
+		return 0, cursor, err
+	}
+	defer rows.Close()
+
+	count := 0
+	nextCursor := cursor
+	for rows.Next() {
+		job, err := scanQueuedScheduleJob(rows)
+		if err != nil {
+			return count, nextCursor, err
+		}
+		if err := processBackfillJob(ctx, db, lockProvider, job, config); err != nil {
+			log.Printf("scheduler backfill job failed id=%s error=%v", job.ID, err)
+		}
+		nextCursor = backfillCursor{createdAt: job.CreatedAt, id: job.ID, active: true}
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		return count, nextCursor, err
+	}
+	return count, nextCursor, nil
 }
 
 type errStaleScheduleData struct{}

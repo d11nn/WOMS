@@ -785,26 +785,8 @@ function renderHPAPeakSummary() {
     panel.textContent = "尚未載入 web autoscaling 狀態";
     return;
   }
-  const failedMessages = summary.failedMessages?.length
-    ? `<div class="hpa-failures">${summary.failedMessages.map((message) => `<span>${escapeHtml(message)}</span>`).join("")}</div>`
-    : "";
-  const autoscaling = summary.autoscaling;
-  const autoscalingError = autoscaling?.error
-    ? `<div class="hpa-failures"><span>${escapeHtml(autoscaling.error)}</span></div>`
-    : "";
-  const autoscalingPanel = autoscaling
-    ? `
-    <div class="hpa-autoscaling">
-      <span>HPA 目標 ${Number(autoscaling.desiredReplicas ?? 0).toLocaleString()} / ${Number(autoscaling.maxReplicas ?? 0).toLocaleString()}</span>
-      <span>目前 replicas ${Number(autoscaling.currentReplicas ?? 0).toLocaleString()}</span>
-      <span>Deployment ready ${Number(autoscaling.readyReplicas ?? 0).toLocaleString()} / ${Number(autoscaling.deploymentReplicas ?? 0).toLocaleString()}</span>
-      <span>web pods ready ${Number(autoscaling.readyPods ?? 0).toLocaleString()} / ${Number(autoscaling.podCount ?? 0).toLocaleString()}</span>
-    </div>
-    ${autoscalingError}`
-    : `
-    <div class="hpa-autoscaling">
-      <span>Kubernetes 狀態 未連線</span>
-    </div>`;
+  const failedMessages = renderHPAFailures(summary.failedMessages);
+  const autoscalingPanel = renderHPAAutoscalingPanel(summary.autoscaling);
   panel.innerHTML = `
     <div class="hpa-metrics">
       <span>NGINX Ingress / LoadBalancer</span>
@@ -823,6 +805,46 @@ function renderHPAPeakSummary() {
     <p class="hpa-reason">${escapeHtml(summary.reason ?? "NGINX per-pod req/s 上升時，KEDA 會擴充 web pods。")}</p>
     ${failedMessages}
   `;
+}
+
+function renderHPAFailures(messages = []) {
+  if (!messages.length) {
+    return "";
+  }
+  const renderedMessages = messages.map((message) => `<span>${escapeHtml(message)}</span>`).join("");
+  return `<div class="hpa-failures">${renderedMessages}</div>`;
+}
+
+function renderHPAAutoscalingError(autoscaling) {
+  if (!autoscaling?.error) {
+    return "";
+  }
+  return renderHPAFailures([autoscaling.error]);
+}
+
+function renderHPAAutoscalingPanel(autoscaling) {
+  if (!autoscaling) {
+    return `
+    <div class="hpa-autoscaling">
+      <span>Kubernetes 狀態 未連線</span>
+    </div>`;
+  }
+  const desiredReplicas = Number(autoscaling.desiredReplicas ?? 0).toLocaleString();
+  const maxReplicas = Number(autoscaling.maxReplicas ?? 0).toLocaleString();
+  const currentReplicas = Number(autoscaling.currentReplicas ?? 0).toLocaleString();
+  const readyReplicas = Number(autoscaling.readyReplicas ?? 0).toLocaleString();
+  const deploymentReplicas = Number(autoscaling.deploymentReplicas ?? 0).toLocaleString();
+  const readyPods = Number(autoscaling.readyPods ?? 0).toLocaleString();
+  const podCount = Number(autoscaling.podCount ?? 0).toLocaleString();
+  const errorPanel = renderHPAAutoscalingError(autoscaling);
+  return `
+    <div class="hpa-autoscaling">
+      <span>HPA 目標 ${desiredReplicas} / ${maxReplicas}</span>
+      <span>目前 replicas ${currentReplicas}</span>
+      <span>Deployment ready ${readyReplicas} / ${deploymentReplicas}</span>
+      <span>web pods ready ${readyPods} / ${podCount}</span>
+    </div>
+    ${errorPanel}`;
 }
 
 function renderLineOptions() {
@@ -1807,18 +1829,39 @@ function handleCalendarOrderClick(orderId, productionDate = "") {
 }
 
 function renderOrderAction(order) {
-  if (state.user?.role === "sales" && order.status === "需業務處理") {
+  if (state.user?.role === "sales") {
+    return renderSalesOrderAction(order);
+  }
+  if (state.user?.role === "scheduler") {
+    return renderSchedulerOrderAction(order);
+  }
+  return "";
+}
+
+function canSalesEditPendingOrder(order) {
+  return state.user?.role === "sales" && order?.status === "待排程" && order.createdBy === state.user.id;
+}
+
+function renderSalesOrderAction(order) {
+  if (order.status === "需業務處理") {
     return renderSalesCorrectionForm(order, {
       deleteLabel: "取消訂單",
     });
   }
   if (canSalesEditPendingOrder(order)) {
-    const expanded = state.expandedSalesPendingOrderIds.has(order.id);
-    return `
-      ${expanded ? renderSalesCorrectionForm(order, {
-        deleteLabel: "刪除訂單",
-        contextLabel: "修改：業務修改",
-      }) : ""}
+    return renderPendingSalesToggle(order);
+  }
+  return "";
+}
+
+function renderPendingSalesToggle(order) {
+  const expanded = state.expandedSalesPendingOrderIds.has(order.id);
+  const correctionForm = expanded ? renderSalesCorrectionForm(order, {
+    deleteLabel: "刪除訂單",
+    contextLabel: "修改：業務修改",
+  }) : "";
+  return `
+      ${correctionForm}
       <button
         class="sales-pending-toggle"
         data-order-action="toggle-sales-pending-edit"
@@ -1829,10 +1872,9 @@ function renderOrderAction(order) {
         title="${expanded ? "收合修改訂單" : "展開修改訂單"}"
       >訂單修改</button>
     `;
-  }
-  if (state.user?.role !== "scheduler") {
-    return "";
-  }
+}
+
+function renderSchedulerOrderAction(order) {
   if (order.status === "已排程") {
     return `<button class="row-action" data-order-action="start-production" data-order-id="${escapeHtml(order.id)}" type="button">開始生產</button>`;
   }
@@ -1843,10 +1885,6 @@ function renderOrderAction(order) {
     return `<span class="row-hint">可拖曳到月曆</span>`;
   }
   return "";
-}
-
-function canSalesEditPendingOrder(order) {
-  return state.user?.role === "sales" && order?.status === "待排程" && order.createdBy === state.user.id;
 }
 
 function renderSalesCorrectionForm(order, options = {}) {

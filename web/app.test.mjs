@@ -2608,6 +2608,43 @@ test("comprehensive event listener integration tests to maximize app.js coverage
   }
 });
 
+test("load HPA peak summary without admin role", async () => {
+  const document = buildDomFromIndex();
+  const fetchImpl = async (path, options = {}) => {
+    if (path === "/api/auth/login") {
+      const body = JSON.parse(options.body);
+      const role = body.username === "admin" ? "admin" : "scheduler";
+      return jsonResponse({
+        token: "token-" + role,
+        user: { id: role + "-1", username: body.username, role: role, lineId: "A" }
+      });
+    }
+    if (path === "/api/demo/hpa-peak") {
+      return jsonResponse({ summary: { autoscaling: { desiredReplicas: 3 } } });
+    }
+    return jsonResponse({});
+  };
+
+  const restoreGlobals = installBrowserGlobalsWithFetch(document, fetchImpl);
+  try {
+    await import(new URL(`./app.js?dphpanon=${Date.now()}`, import.meta.url));
+    await settleApp();
+
+    // Log in as scheduler
+    document.querySelector('#login-form input[name="username"]').value = "scheduler";
+    document.querySelector('#login-form input[name="password"]').value = "demo";
+    await document.getElementById("login-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+
+    // HPA peak summary should not be visible to non-admin users, so the element won't be in the DOM
+    const hpaSummaryEl = document.getElementById("hpa-peak-summary");
+    assert.equal(hpaSummaryEl, null);
+  } finally {
+    restoreGlobals();
+  }
+});
+
+
 test.skip("extreme app.js coverage booster", async () => {
   const document = buildDomFromIndex();
   let failFetch = false;

@@ -1032,6 +1032,7 @@ func (s *MemoryStore) UpdateOrderDueDate(id string, req updateOrderRequest, clai
 	}
 	order.UpdatedAt = now
 	s.orders[order.ID] = order
+	s.removeAllocationsLocked(order.ID)
 	s.bumpLineRevisionLocked(order.LineID)
 	s.auditLocked(claims.Subject, "order.update_due_date", order.ID, req.DueDate)
 	return order, nil
@@ -1175,6 +1176,7 @@ func (s *MemoryStore) RejectOrders(req rejectOrdersRequest, claims auth.Claims) 
 		order.RejectedAt = now
 		order.UpdatedAt = now
 		s.orders[order.ID] = order
+		s.removeAllocationsLocked(order.ID)
 		s.bumpLineRevisionLocked(order.LineID)
 		s.auditLocked(claims.Subject, "order.reject", order.ID, reason)
 		result.Orders = append(result.Orders, order)
@@ -1216,6 +1218,7 @@ func (s *MemoryStore) ResubmitOrder(req resubmitOrderRequest, claims auth.Claims
 	resetRejectedState(&order)
 	order.UpdatedAt = now
 	s.orders[order.ID] = order
+	s.removeAllocationsLocked(order.ID)
 	s.bumpLineRevisionLocked(order.LineID)
 	s.auditLocked(claims.Subject, "order.resubmit", order.ID, "")
 	return order, nil

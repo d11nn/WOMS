@@ -2136,6 +2136,9 @@ func (s *PostgresStore) updateOrderAndRevision(order domain.Order, actorID, acti
 	if _, err := tx.Exec(bumpProductionLineRevisionSQL, order.LineID); err != nil {
 		return err
 	}
+	if _, err := tx.Exec("DELETE FROM schedule_allocations WHERE order_id = $1", order.ID); err != nil {
+		return err
+	}
 	if _, err := insertAuditTx(tx, actorID, action, order.ID, reason); err != nil {
 		return err
 	}

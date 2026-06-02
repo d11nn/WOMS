@@ -2908,9 +2908,17 @@ func TestUpdateOrderDueDateRejectsTodayOrPast(t *testing.T) {
 }
 
 func TestUpdateOrderDueDateAcceptsFuture(t *testing.T) {
-	server := NewServer("secret", NewMemoryStore())
+	store := NewMemoryStore()
+	server := NewServer("secret", store)
 	salesToken := login(t, server, "sales", "demo")
 	createOrder(t, server, salesToken, "A")
+
+	// Set up an existing allocation for this order
+	store.allocations = append(store.allocations, domain.ScheduleAllocation{
+		OrderID: "ORD-0000001",
+		LineID:  "A",
+		Date:    mustAPIDate(t, "2026-05-02"),
+	})
 
 	body := bytes.NewBufferString(`{"dueDate":"2026-05-01"}`)
 	req := httptest.NewRequest(http.MethodPatch, "/api/orders/ORD-0000001", body)
@@ -2920,6 +2928,9 @@ func TestUpdateOrderDueDateAcceptsFuture(t *testing.T) {
 
 	if res.Code != http.StatusOK {
 		t.Fatalf("expected due date update, got %d body=%s", res.Code, res.Body.String())
+	}
+	if len(store.allocations) != 0 {
+		t.Fatalf("expected allocations to be cleared after update order due date, got %d", len(store.allocations))
 	}
 }
 
@@ -3180,6 +3191,13 @@ func TestSalesCanResubmitOwnPendingOrder(t *testing.T) {
 	salesToken := login(t, server, "sales", "demo")
 	createOrder(t, server, salesToken, "A")
 
+	// Set up an existing allocation for this order
+	store.allocations = append(store.allocations, domain.ScheduleAllocation{
+		OrderID: "ORD-0000001",
+		LineID:  "A",
+		Date:    mustAPIDate(t, "2026-05-02"),
+	})
+
 	body := bytes.NewBufferString(`{"orderId":"ORD-0000001","dueDate":"2026-05-05","quantity":2000}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/orders/resubmit", body)
 	req.Header.Set("Authorization", "Bearer "+salesToken)
@@ -3194,6 +3212,9 @@ func TestSalesCanResubmitOwnPendingOrder(t *testing.T) {
 	}
 	if store.orders["ORD-0000001"].Quantity != 2000 || store.orders["ORD-0000001"].DueDate.Format(dateLayout) != "2026-05-05" {
 		t.Fatalf("expected sales edits to persist, got %+v", store.orders["ORD-0000001"])
+	}
+	if len(store.allocations) != 0 {
+		t.Fatalf("expected allocations to be cleared after resubmit, got %d", len(store.allocations))
 	}
 }
 

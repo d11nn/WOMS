@@ -1450,9 +1450,73 @@ test("sales draft conflict preview keeps baseline pending and scheduled calendar
   }
 });
 
+test("sales draft preview calendar keeps low-priority draft after full high-priority backlog", async () => {
+  const document = buildDomFromIndex();
+  const highBacklogDate = dateKeyAfter(1);
+  const draftDate = dateKeyAfter(4);
+  const fetchImpl = async (path) => {
+    if (path === "/api/auth/login") {
+      return jsonResponse({
+        token: "token-sales",
+        user: { id: "user-sales", username: "sales", role: "sales" },
+      });
+    }
+    if (path === "/api/lines") {
+      return jsonResponse({
+        lines: [{ id: "A", name: "Line A", capacityPerDay: 10000, timezone: "Asia/Taipei" }],
+      });
+    }
+    if (path === "/api/orders") {
+      return jsonResponse({ orders: [] });
+    }
+    if (String(path).startsWith("/api/schedules/calendar?")) {
+      return jsonResponse({
+        allocations: [
+          { orderId: "ORD-SCHEDULED-1", customer: "Scheduled", lineId: "A", date: dateKeyAfter(2), quantity: 10000, priority: "high", status: "已排程", dueDate: dateKeyAfter(2), createdAtTimestamp: 1772271700000 },
+          { orderId: "ORD-SCHEDULED-2", customer: "Scheduled", lineId: "A", date: dateKeyAfter(3), quantity: 10000, priority: "low", status: "已排程", dueDate: dateKeyAfter(3), createdAtTimestamp: 1772271701000 },
+        ],
+        pendingAllocations: [],
+      });
+    }
+    if (path === "/api/schedules/preview") {
+      return jsonResponse({
+        previewId: "PREVIEW-DRAFT",
+        currentDate: dateKeyAfter(0),
+        allocations: [
+          { orderId: "ORD-HIGH-1", customer: "ACME", lineId: "A", date: highBacklogDate, quantity: 2500, priority: "high", status: "待排程", dueDate: highBacklogDate, createdAtTimestamp: 1772271711000 },
+          { orderId: "ORD-HIGH-2", customer: "ACME", lineId: "A", date: highBacklogDate, quantity: 2500, priority: "high", status: "待排程", dueDate: highBacklogDate, createdAtTimestamp: 1772271712000 },
+          { orderId: "ORD-HIGH-3", customer: "ACME", lineId: "A", date: highBacklogDate, quantity: 2500, priority: "high", status: "待排程", dueDate: highBacklogDate, createdAtTimestamp: 1772271713000 },
+          { orderId: "ORD-HIGH-4", customer: "ACME", lineId: "A", date: highBacklogDate, quantity: 2500, priority: "high", status: "待排程", dueDate: highBacklogDate, createdAtTimestamp: 1772271714000 },
+          { orderId: "PREVIEW-DRAFT", customer: "ACME", lineId: "A", date: draftDate, quantity: 2500, priority: "low", status: "待排程", dueDate: highBacklogDate, createdAtTimestamp: 1772271715000 },
+        ],
+        conflicts: [],
+      });
+    }
+    throw new Error(`unexpected fetch ${path}`);
+  };
+  const restoreGlobals = installBrowserGlobalsWithFetch(document, fetchImpl);
+  try {
+    await import(appModuleUrl("sales-draft-low-priority-placement"));
+
+    await document.getElementById("login-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+    await document.getElementById("order-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+
+    const highBacklogCell = document.getElementById("preview-calendar-grid").children.find((cell) => cell.dataset.date === highBacklogDate);
+    const draftCell = document.getElementById("preview-calendar-grid").children.find((cell) => cell.dataset.date === draftDate);
+    assert.doesNotMatch(renderedMarkup(highBacklogCell), /PREVIEW-DRAFT/);
+    assert.match(renderedMarkup(highBacklogCell), /ORD-HIGH-1[\s\S]*ORD-HIGH-2[\s\S]*ORD-HIGH-3[\s\S]*ORD-HIGH-4/);
+    assert.match(renderedMarkup(draftCell), /PREVIEW-DRAFT/);
+  } finally {
+    restoreGlobals();
+  }
+});
+
 test("sales draft conflict preview shows successful draft schedule and excludes conflicted pending order", async () => {
   const document = buildDomFromIndex();
   const previewDate = dateKeyAfter(2);
+  let previewCalls = 0;
   const fetchImpl = async (path, options = {}) => {
     if (path === "/api/auth/login") {
       return jsonResponse({
@@ -1491,6 +1555,27 @@ test("sales draft conflict preview shows successful draft schedule and excludes 
     }
     if (path === "/api/schedules/preview") {
       assert.equal(options.method, "POST");
+      previewCalls += 1;
+      const body = JSON.parse(options.body);
+      if (previewCalls === 1) {
+        assert.equal(body.allowLateCompletion, undefined);
+      } else {
+        assert.equal(body.allowLateCompletion, true);
+        assert.deepEqual(body.orderIds, ["PREVIEW-DRAFT"]);
+        assert.deepEqual(body.resolutionOrderIds, []);
+      }
+      if (previewCalls > 1) {
+        return jsonResponse({
+          previewId: "PREVIEW-DRAFT-SOLUTION",
+          currentDate: dateKeyAfter(0),
+          allocations: [
+            { orderId: "ORD-A", customer: "A", lineId: "A", date: previewDate, quantity: 2500, priority: "high", status: "待排程", dueDate: previewDate, createdAtTimestamp: 1772271711000 },
+            { orderId: "ORD-B", customer: "B", lineId: "A", date: previewDate, quantity: 2500, priority: "high", status: "待排程", dueDate: previewDate, createdAtTimestamp: 1772271712000 },
+            { orderId: "PREVIEW-DRAFT", customer: "E", lineId: "A", date: dateKeyAfter(5), quantity: 2500, priority: "low", status: "待排程", dueDate: previewDate, createdAtTimestamp: 1772271715000 },
+          ],
+          conflicts: [],
+        });
+      }
       return jsonResponse({
         previewId: "PREVIEW-DRAFT",
         currentDate: dateKeyAfter(0),
@@ -1505,14 +1590,14 @@ test("sales draft conflict preview shows successful draft schedule and excludes 
             orderId: "ORD-D",
             reason: "capacity cannot satisfy order before due date",
             earliestFinishDate: `${dateKeyAfter(2)}T00:00:00Z`,
-            affectedOrderIds: [],
+            affectedOrderIds: ["ORD-SCHEDULED"],
           },
         ],
       });
     }
     if (path === "/api/orders/preview-confirm") {
       assert.equal(options.method, "POST");
-      assert.deepEqual(JSON.parse(options.body), { previewId: "PREVIEW-DRAFT", deferredOrderIds: ["ORD-D"] });
+      assert.deepEqual(JSON.parse(options.body), { previewId: "PREVIEW-DRAFT-SOLUTION", deferredOrderIds: [] });
       return jsonResponse({ id: "ORD-DRAFT", customer: "E", lineId: "A", quantity: 2500, priority: "high", status: "待排程", dueDate: previewDate, createdBy: "user-sales" });
     }
     throw new Error(`unexpected fetch ${path}`);
@@ -1527,10 +1612,20 @@ test("sales draft conflict preview shows successful draft schedule and excludes 
     await settleApp();
 
     const pendingMarkup = renderedMarkup(document.getElementById("preview-calendar-grid"));
-    assert.match(pendingMarkup, /ORD-A[\s\S]*ORD-B[\s\S]*PREVIEW-DRAFT[\s\S]*ORD-C/);
-    assert.doesNotMatch(pendingMarkup, /ORD-D/);
+    assert.match(pendingMarkup, /ORD-A[\s\S]*ORD-B[\s\S]*ORD-C[\s\S]*ORD-D/);
+    assert.doesNotMatch(pendingMarkup, /PREVIEW-DRAFT/);
     assert.match(document.getElementById("preview-page-list").innerHTML, /ORD-D/);
     assert.match(document.getElementById("preview-page-list").innerHTML, /conflict-preview[\s\S]*ORD-D/);
+    assert.equal(document.getElementById("confirm-preview-order").hidden, true);
+    assert.match(document.getElementById("preview-page-list").innerHTML, /預覽最早完成解法/);
+    assert.match(document.getElementById("preview-page-list").innerHTML, /ORD-SCHEDULED 已排程不可移動/);
+    assert.doesNotMatch(document.getElementById("preview-page-list").innerHTML, /允許移動 ORD-SCHEDULED/);
+
+    await document.getElementById("preview-page-list").dispatchEvent({
+      type: "click",
+      target: document.querySelector('[data-preview-action="preview-conflict-solution"]'),
+    });
+    await settleApp();
 
     const previewCalendarModes = document.getElementById("preview-calendar-mode").children;
     await document.getElementById("preview-calendar-mode").dispatchEvent({
@@ -1539,20 +1634,25 @@ test("sales draft conflict preview shows successful draft schedule and excludes 
     });
     const allMarkup = renderedMarkup(document.getElementById("preview-calendar-grid"));
     assert.match(allMarkup, /ORD-SCHEDULED/);
-    assert.match(allMarkup, /ORD-A[\s\S]*ORD-B[\s\S]*PREVIEW-DRAFT[\s\S]*ORD-C/);
+    assert.match(allMarkup, /ORD-A[\s\S]*ORD-B/);
+    assert.match(allMarkup, /PREVIEW-DRAFT/);
+    assert.doesNotMatch(allMarkup, /移入預覽/);
+    assert.doesNotMatch(allMarkup, /已移出/);
+    assert.equal(allMarkup.match(/ORD-SCHEDULED/g).length, 1);
     assert.doesNotMatch(allMarkup, /ORD-D/);
-    assert.match(document.getElementById("preview-page-list").innerHTML, /衝突處理[\s\S]*改送需業務處理 ORD-D/);
+    assert.equal(document.getElementById("confirm-preview-order").hidden, false);
+    assert.doesNotMatch(document.getElementById("preview-page-list").innerHTML, /改送需業務處理 ORD-D/);
     await document.getElementById("confirm-preview-order").dispatchEvent({ type: "click" });
     await settleApp();
     assert.equal(document.getElementById("message-title").textContent, "已加入待排程", document.getElementById("message-body").textContent);
-    assert.match(document.getElementById("message-body").textContent, /已勾選的衝突訂單會移到需業務處理/);
+    assert.doesNotMatch(document.getElementById("message-body").textContent, /已勾選的衝突訂單會移到需業務處理/);
     assert.doesNotMatch(document.getElementById("message-body").textContent, /已取消選取/);
   } finally {
     restoreGlobals();
   }
 });
 
-test("sales can move the current conflicted draft to follow-up without a rejection reason", async () => {
+test("sales can move the current conflicted draft to follow-up with the default conflict reason", async () => {
   const document = buildDomFromIndex();
   const previewDate = dateKeyAfter(2);
   const calls = [];
@@ -1598,8 +1698,8 @@ test("sales can move the current conflicted draft to follow-up without a rejecti
     }
     if (path === "/api/orders/preview-confirm") {
       assert.equal(options.method, "POST");
-      assert.deepEqual(JSON.parse(options.body), { previewId: "PREVIEW-DRAFT", deferDraft: true });
-      return jsonResponse({ id: "ORD-DRAFT", customer: "Blocked", lineId: "A", quantity: 2500, priority: "high", status: "需業務處理", dueDate: previewDate, createdBy: "user-sales" });
+      assert.deepEqual(JSON.parse(options.body), { previewId: "PREVIEW-DRAFT", deferDraft: true, deferReason: "有衝突需修改" });
+      return jsonResponse({ id: "ORD-DRAFT", customer: "Blocked", lineId: "A", quantity: 2500, priority: "high", status: "需業務處理", dueDate: previewDate, createdBy: "user-sales", rejectionReason: "有衝突需修改" });
     }
     throw new Error(`unexpected fetch ${path}`);
   };
@@ -1628,9 +1728,15 @@ test("sales can move the current conflicted draft to follow-up without a rejecti
     });
     await settleApp();
 
+    assert.equal(document.getElementById("reject-dialog").open, true);
+    assert.equal(document.getElementById("reject-reason").value, "有衝突需修改");
+    assert.equal(calls.filter((call) => call.path === "/api/orders/preview-confirm").length, 0);
+    await document.getElementById("confirm-reject-orders").dispatchEvent({ type: "click" });
+    await settleApp();
+
     assert.equal(calls.filter((call) => call.path === "/api/orders/preview-confirm").length, 1);
     assert.equal(document.getElementById("message-title").textContent, "已移到需業務處理");
-    assert.doesNotMatch(calls.find((call) => call.path === "/api/orders/preview-confirm").options.body, /reason/);
+    assert.match(calls.find((call) => call.path === "/api/orders/preview-confirm").options.body, /有衝突需修改/);
   } finally {
     restoreGlobals();
   }
@@ -2543,13 +2649,6 @@ test("comprehensive event listener integration tests to maximize app.js coverage
     solutionCheckbox.checked = true;
     solutionCheckbox.value = "ORD-PENDING";
     document.body.appendChild(solutionCheckbox);
-
-    const resolutionCheckbox = document.createElement("input");
-    resolutionCheckbox.type = "checkbox";
-    resolutionCheckbox.setAttribute("data-conflict-resolution-order", "");
-    resolutionCheckbox.checked = true;
-    resolutionCheckbox.value = "ORD-SCHEDULED";
-    document.body.appendChild(resolutionCheckbox);
 
     const reasonInput = document.createElement("input");
     reasonInput.id = "conflict-force-reason";
@@ -3468,20 +3567,28 @@ test("role and line configuration covers fallback line and scheduler fixed-line 
   const salesDocument = buildDomFromIndex();
   const salesRestore = installBrowserGlobalsWithFetch(
     salesDocument,
-    createAppCoverageFetch([], { role: "sales", userId: "sales-1" }),
+    createAppCoverageFetch([], {
+      role: "sales",
+      userId: "sales-1",
+      orders: [
+        { id: "ORD-PENDING", customer: "ACME", lineId: "A", quantity: 2500, priority: "high", status: "待排程", dueDate: dateKeyAfter(6), createdBy: "sales-1" },
+        { id: "ORD-REJECTED", customer: "Follow", lineId: "A", quantity: 500, priority: "low", status: "需業務處理", dueDate: dateKeyAfter(7), createdBy: "sales-1" },
+      ],
+    }),
     {
       ...storedSession("sales", { id: "sales-1" }),
       "woms.selectedLine": "Z",
     },
   );
   try {
-    await import(appModuleUrl("sales-default-filter-line"));
+    await import(appModuleUrl("sales-no-default-filter-line"));
     await settleApp();
 
     assert.equal(salesDocument.getElementById("active-line-select").disabled, false);
     assert.equal(salesDocument.getElementById("active-line-select").value, "A");
-    assert.equal(salesDocument.getElementById("orders-heading-eyebrow").textContent, "業務接單");
-    assert.equal(salesDocument.getElementById("orders-heading-title").textContent, "待排程訂單");
+    assert.equal(salesDocument.getElementById("orders-heading-eyebrow").textContent, "訂單任務");
+    assert.equal(salesDocument.getElementById("orders-heading-title").textContent, "訂單");
+    assert.match(renderedMarkup(salesDocument.getElementById("orders-body")), /ORD-PENDING[\s\S]*ORD-REJECTED/);
   } finally {
     salesRestore();
   }

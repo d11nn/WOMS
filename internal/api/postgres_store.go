@@ -15,11 +15,10 @@ import (
 	"github.com/d11nn/woms/internal/auth"
 	"github.com/d11nn/woms/internal/domain"
 	"github.com/d11nn/woms/internal/scheduler"
-	"github.com/lib/pq"
+	_ "github.com/lib/pq"
 )
 
 const userIdPrefix = "AUD-USER-"
-const resolutionOrdersMsg = "resolution orders must be low-priority scheduled orders without locked or completed allocations"
 const bumpProductionLineRevisionSQL = "UPDATE production_lines SET schedule_revision = schedule_revision + 1 WHERE id = $1"
 const orderNotFoundMsg = "order not found"
 
@@ -741,6 +740,9 @@ func (s *PostgresStore) ensurePreviewLoaded(previewID string) error {
 		}
 		record.DraftOrder = &draft
 	}
+	if record.Request.ResubmitOrder != nil {
+		record.ResubmitOrder = record.Request.ResubmitOrder
+	}
 	line, err := s.productionLine(record.LineID)
 	if err != nil {
 		return err
@@ -783,12 +785,13 @@ func (s *PostgresStore) PreviewSchedule(req scheduleRequest, claims auth.Claims)
 		return schedulePreviewResponse{}, err
 	}
 	return schedulePreviewResponse{
-		PreviewID:   preview.ID,
-		CurrentDate: req.CurrentDate,
-		Allocations: result.Allocations,
-		Conflicts:   result.Conflicts,
-		FinishDate:  result.FinishDate,
-		DraftOrder:  req.DraftOrder,
+		PreviewID:     preview.ID,
+		CurrentDate:   req.CurrentDate,
+		Allocations:   result.Allocations,
+		Conflicts:     result.Conflicts,
+		FinishDate:    result.FinishDate,
+		DraftOrder:    req.DraftOrder,
+		ResubmitOrder: req.ResubmitOrder,
 	}, nil
 }
 
@@ -871,7 +874,7 @@ func (s *PostgresStore) postgresPendingBacklogCalendarAllocations(line domain.Pr
 	if err != nil {
 		return nil, err
 	}
-	existing, err := s.existingAllocations(line.ID, nil)
+	existing, err := s.existingAllocations(line.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -883,7 +886,7 @@ func (s *PostgresStore) postgresPendingBacklogCalendarAllocations(line domain.Pr
 }
 
 func (s *PostgresStore) ConfirmPreviewOrder(req confirmPreviewRequest, claims auth.Claims) (domain.Order, error) {
-	preview, draft, err := s.loadPreviewRecordForConfirmation(req.PreviewID)
+	preview, err := s.loadPreviewRecordForConfirmation(req.PreviewID)
 	if err != nil {
 		return domain.Order{}, err
 	}
@@ -897,55 +900,73 @@ func (s *PostgresStore) ConfirmPreviewOrder(req confirmPreviewRequest, claims au
 	if err != nil {
 		return domain.Order{}, err
 	}
-	order, err := s.confirmPreviewOrderTx(req.PreviewID, draft, deferredOrders, req.DeferDraft, claims)
+	if preview.ResubmitOrder != nil {
+		order, err := s.confirmPreviewResubmitTx(req.PreviewID, *preview.ResubmitOrder, deferredOrders, claims)
+		if err != nil {
+			return domain.Order{}, err
+		}
+		return order, nil
+	}
+	order, err := s.confirmPreviewOrderTx(req.PreviewID, *preview.DraftOrder, deferredOrders, req.DeferDraft, strings.TrimSpace(req.DeferReason), claims)
 	if err != nil {
 		return domain.Order{}, err
 	}
 	return order, nil
 }
 
-func (s *PostgresStore) loadPreviewRecordForConfirmation(previewID string) (previewRecord, createOrderRequest, error) {
+func (s *PostgresStore) loadPreviewRecordForConfirmation(previewID string) (previewRecord, error) {
 	var draftRaw sql.NullString
 	var actorID string
 	var actorRole domain.Role
 	var lineID string
 	var conflictsRaw []byte
 	var allocationsRaw []byte
+	var requestRaw []byte
 	err := s.db.QueryRow(`
-		SELECT actor_id, actor_role, line_id, allocations, conflicts, draft_order
+		SELECT actor_id, actor_role, line_id, allocations, conflicts, draft_order, request
 		FROM schedule_previews
 		WHERE id = $1 AND expires_at > NOW()
-	`, previewID).Scan(&actorID, &actorRole, &lineID, &allocationsRaw, &conflictsRaw, &draftRaw)
+	`, previewID).Scan(&actorID, &actorRole, &lineID, &allocationsRaw, &conflictsRaw, &draftRaw, &requestRaw)
 	if errors.Is(err, sql.ErrNoRows) {
-		return previewRecord{}, createOrderRequest{}, errors.New("preview result expired or not found")
+		return previewRecord{}, errors.New("preview result expired or not found")
 	}
 	if err != nil {
-		return previewRecord{}, createOrderRequest{}, err
+		return previewRecord{}, err
 	}
-	if !draftRaw.Valid || draftRaw.String == "" {
-		return previewRecord{}, createOrderRequest{}, errors.New("preview does not contain a draft order")
+	var previewRequest scheduleRequest
+	if err := json.Unmarshal(requestRaw, &previewRequest); err != nil {
+		return previewRecord{}, err
 	}
-	var draft createOrderRequest
-	if err := json.Unmarshal([]byte(draftRaw.String), &draft); err != nil {
-		return previewRecord{}, createOrderRequest{}, err
+	var draft *createOrderRequest
+	if draftRaw.Valid && draftRaw.String != "" {
+		var parsed createOrderRequest
+		if err := json.Unmarshal([]byte(draftRaw.String), &parsed); err != nil {
+			return previewRecord{}, err
+		}
+		draft = &parsed
 	}
 	var allocations []scheduler.Allocation
 	if err := json.Unmarshal(allocationsRaw, &allocations); err != nil {
-		return previewRecord{}, createOrderRequest{}, err
+		return previewRecord{}, err
 	}
 	var conflicts []scheduler.Conflict
 	if err := json.Unmarshal(conflictsRaw, &conflicts); err != nil {
-		return previewRecord{}, createOrderRequest{}, err
+		return previewRecord{}, err
 	}
 	preview := previewRecord{
-		ActorID:     actorID,
-		ActorRole:   actorRole,
-		LineID:      lineID,
-		DraftOrder:  &draft,
-		Allocations: allocations,
-		Conflicts:   conflicts,
+		ActorID:       actorID,
+		ActorRole:     actorRole,
+		LineID:        lineID,
+		Request:       previewRequest,
+		DraftOrder:    draft,
+		ResubmitOrder: previewRequest.ResubmitOrder,
+		Allocations:   allocations,
+		Conflicts:     conflicts,
 	}
-	return preview, draft, nil
+	if preview.DraftOrder == nil && preview.ResubmitOrder == nil {
+		return previewRecord{}, errors.New("preview does not contain a sales order")
+	}
+	return preview, nil
 }
 
 func validatePreviewOwnership(preview previewRecord, claims auth.Claims) error {
@@ -1053,12 +1074,12 @@ func deferConflictOrdersTx(tx *sql.Tx, deferredOrders []domain.Order, claims aut
 	return nil
 }
 
-func (s *PostgresStore) confirmPreviewOrderTx(previewID string, draft createOrderRequest, deferredOrders []domain.Order, deferDraft bool, claims auth.Claims) (domain.Order, error) {
+func (s *PostgresStore) confirmPreviewOrderTx(previewID string, draft createOrderRequest, deferredOrders []domain.Order, deferDraft bool, deferReason string, claims auth.Claims) (domain.Order, error) {
 	order, err := s.prepareConfirmedOrder(draft, claims)
 	if err != nil {
 		return domain.Order{}, err
 	}
-	order = applyDraftDeferState(order, claims, deferDraft)
+	order = applyDraftDeferState(order, claims, deferDraft, deferReason)
 	tx, err := s.db.Begin()
 	if err != nil {
 		return domain.Order{}, err
@@ -1067,7 +1088,7 @@ func (s *PostgresStore) confirmPreviewOrderTx(previewID string, draft createOrde
 	if err := insertConfirmedOrderTx(tx, order); err != nil {
 		return domain.Order{}, err
 	}
-	if err := auditConfirmedOrderTx(tx, order, claims, deferDraft); err != nil {
+	if err := auditConfirmedOrderTx(tx, order, claims, deferDraft, deferReason); err != nil {
 		return domain.Order{}, err
 	}
 	if err := deferConflictOrdersTx(tx, deferredOrders, claims, order.CreatedAt); err != nil {
@@ -1085,9 +1106,10 @@ func (s *PostgresStore) confirmPreviewOrderTx(previewID string, draft createOrde
 	return order, nil
 }
 
-func applyDraftDeferState(order domain.Order, claims auth.Claims, deferDraft bool) domain.Order {
+func applyDraftDeferState(order domain.Order, claims auth.Claims, deferDraft bool, deferReason string) domain.Order {
 	if deferDraft {
 		order.Status = domain.StatusRejected
+		order.RejectionReason = deferReason
 		order.RejectedBy = claims.Subject
 		order.RejectedAt = order.CreatedAt
 	}
@@ -1102,12 +1124,12 @@ func insertConfirmedOrderTx(tx *sql.Tx, order domain.Order) error {
 	return err
 }
 
-func auditConfirmedOrderTx(tx *sql.Tx, order domain.Order, claims auth.Claims, deferDraft bool) error {
+func auditConfirmedOrderTx(tx *sql.Tx, order domain.Order, claims auth.Claims, deferDraft bool, deferReason string) error {
 	if _, err := insertAuditTx(tx, claims.Subject, "order.create", order.ID, ""); err != nil {
 		return err
 	}
 	if deferDraft {
-		_, err := insertAuditTx(tx, claims.Subject, "order.sales_conflict_defer_draft", order.ID, "")
+		_, err := insertAuditTx(tx, claims.Subject, "order.sales_conflict_defer_draft", order.ID, deferReason)
 		return err
 	}
 	return nil
@@ -1119,6 +1141,75 @@ func deleteConfirmedPreviewTx(tx *sql.Tx, previewID string, claims auth.Claims) 
 		return err
 	}
 	return requireOneRowAffected(result, "preview result expired or not found")
+}
+
+func (s *PostgresStore) confirmPreviewResubmitTx(previewID string, req resubmitOrderRequest, deferredOrders []domain.Order, claims auth.Claims) (domain.Order, error) {
+	order, err := s.order(req.OrderID)
+	if err != nil {
+		return domain.Order{}, err
+	}
+	if order.CreatedBy != claims.Subject {
+		return domain.Order{}, errors.New("sales can resubmit only their own orders")
+	}
+	if !canSalesResubmitStatus(order.Status) {
+		return domain.Order{}, errors.New("only pending or rejected orders can be resubmitted")
+	}
+	if strings.TrimSpace(req.Note) != "" {
+		return domain.Order{}, errors.New(errNoteImmutable)
+	}
+	if err := applyOptionalQuantity(&order, req.Quantity); err != nil {
+		return domain.Order{}, err
+	}
+	if req.DueDate != "" {
+		line, err := s.productionLine(order.LineID)
+		if err != nil {
+			return domain.Order{}, err
+		}
+		currentDate, err := currentDateInLineTimezone(line, nowUTC())
+		if err != nil {
+			return domain.Order{}, err
+		}
+		if err := applyOptionalDueDate(&order, req.DueDate, currentDate); err != nil {
+			return domain.Order{}, err
+		}
+	}
+	order.Status = domain.StatusPending
+	resetRejectedState(&order)
+	order.UpdatedAt = time.Now().UTC()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return domain.Order{}, err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`
+		UPDATE orders
+		SET quantity = $2, status = $3, due_date = $4, rejection_reason = NULL,
+		    rejected_by = NULL, rejected_at = NULL, updated_at = $5
+		WHERE id = $1 AND created_by = $6
+	`, order.ID, order.Quantity, order.Status, order.DueDate, order.UpdatedAt, claims.Subject)
+	if err != nil {
+		return domain.Order{}, err
+	}
+	if err := requireOneRowAffected(result, "resubmitted order changed before confirmation"); err != nil {
+		return domain.Order{}, err
+	}
+	if _, err := insertAuditTx(tx, claims.Subject, "order.resubmit", order.ID, ""); err != nil {
+		return domain.Order{}, err
+	}
+	if err := deferConflictOrdersTx(tx, deferredOrders, claims, order.UpdatedAt); err != nil {
+		return domain.Order{}, err
+	}
+	if _, err := tx.Exec(bumpProductionLineRevisionSQL, order.LineID); err != nil {
+		return domain.Order{}, err
+	}
+	if err := deleteConfirmedPreviewTx(tx, previewID, claims); err != nil {
+		return domain.Order{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.Order{}, err
+	}
+	return order, nil
 }
 
 func requireOneRowAffected(result sql.Result, message string) error {
@@ -1729,11 +1820,14 @@ func (s *PostgresStore) previewFromDB(req scheduleRequest, claims auth.Claims) (
 	if err != nil {
 		return scheduler.Result{}, previewFromDBResult{}, err
 	}
+	if err := validateNoResolutionOrderIDs(req); err != nil {
+		return scheduler.Result{}, previewFromDBResult{}, err
+	}
 	inputs, err := s.schedulerInputs(req, claims, lineID)
 	if err != nil {
 		return scheduler.Result{}, previewFromDBResult{}, err
 	}
-	existing, err := s.existingAllocations(lineID, req.ResolutionOrderIDs)
+	existing, err := s.existingAllocations(lineID)
 	if err != nil {
 		return scheduler.Result{}, previewFromDBResult{}, err
 	}
@@ -1799,16 +1893,17 @@ func previewRecordFromDBResult(result scheduler.Result, req scheduleRequest, cla
 	return previewFromDBResult{
 		ID: id,
 		record: previewRecord{
-			ActorID:      claims.Subject,
-			ActorRole:    claims.Role,
-			LineID:       lineID,
-			LineRevision: lineRevision,
-			Request:      normalized,
-			RequestHash:  requestHash(normalized),
-			DraftOrder:   req.DraftOrder,
-			Allocations:  append([]scheduler.Allocation(nil), result.Allocations...),
-			Conflicts:    append([]scheduler.Conflict(nil), result.Conflicts...),
-			CreatedAt:    now,
+			ActorID:       claims.Subject,
+			ActorRole:     claims.Role,
+			LineID:        lineID,
+			LineRevision:  lineRevision,
+			Request:       normalized,
+			RequestHash:   requestHash(normalized),
+			DraftOrder:    req.DraftOrder,
+			ResubmitOrder: req.ResubmitOrder,
+			Allocations:   append([]scheduler.Allocation(nil), result.Allocations...),
+			Conflicts:     append([]scheduler.Conflict(nil), result.Conflicts...),
+			CreatedAt:     now,
 		},
 	}
 }
@@ -1832,15 +1927,15 @@ func (s *PostgresStore) schedulerInputs(req scheduleRequest, claims auth.Claims,
 	if req.DraftOrder != nil {
 		return s.schedulerDraftInputs(req, claims, lineID)
 	}
+	if req.ResubmitOrder != nil {
+		return s.schedulerResubmitInputs(req, claims, lineID)
+	}
 	return s.schedulerSelectedInputs(req, lineID)
 }
 
 func (s *PostgresStore) schedulerDraftInputs(req scheduleRequest, claims auth.Claims, lineID string) ([]scheduler.OrderInput, error) {
 	if claims.Role != domain.RoleSales {
 		return nil, errors.New("only sales can preview draft orders")
-	}
-	if len(req.ResolutionOrderIDs) > 0 {
-		return nil, errors.New("draft previews cannot include resolution orders")
 	}
 	draft := *req.DraftOrder
 	if draft.LineID == "" {
@@ -1883,16 +1978,75 @@ func (s *PostgresStore) schedulerDraftInputs(req scheduleRequest, claims auth.Cl
 	return inputs, nil
 }
 
+func (s *PostgresStore) schedulerResubmitInputs(req scheduleRequest, claims auth.Claims, lineID string) ([]scheduler.OrderInput, error) {
+	if claims.Role != domain.RoleSales {
+		return nil, errors.New("only sales can preview resubmitted orders")
+	}
+	order, err := s.preparePreviewResubmitOrder(*req.ResubmitOrder, claims, lineID)
+	if err != nil {
+		return nil, err
+	}
+	inputs, err := s.pendingOrderInputs(lineID, nil)
+	if err != nil {
+		return nil, err
+	}
+	replaced := false
+	for index := range inputs {
+		if inputs[index].ID == order.ID {
+			inputs[index] = orderInputFromOrder(order)
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		inputs = append(inputs, orderInputFromOrder(order))
+	}
+	return inputs, nil
+}
+
+func (s *PostgresStore) preparePreviewResubmitOrder(req resubmitOrderRequest, claims auth.Claims, lineID string) (domain.Order, error) {
+	order, err := s.order(req.OrderID)
+	if err != nil {
+		return domain.Order{}, err
+	}
+	if order.CreatedBy != claims.Subject {
+		return domain.Order{}, errors.New("sales can resubmit only their own orders")
+	}
+	if order.LineID != lineID {
+		return domain.Order{}, errors.New("resubmit order line must match preview line")
+	}
+	if !canSalesResubmitStatus(order.Status) {
+		return domain.Order{}, errors.New("only pending or rejected orders can be resubmitted")
+	}
+	if strings.TrimSpace(req.Note) != "" {
+		return domain.Order{}, errors.New(errNoteImmutable)
+	}
+	if err := applyOptionalQuantity(&order, req.Quantity); err != nil {
+		return domain.Order{}, err
+	}
+	if req.DueDate != "" {
+		line, err := s.productionLine(order.LineID)
+		if err != nil {
+			return domain.Order{}, err
+		}
+		currentDate, err := currentDateInLineTimezone(line, nowUTC())
+		if err != nil {
+			return domain.Order{}, err
+		}
+		if err := applyOptionalDueDate(&order, req.DueDate, currentDate); err != nil {
+			return domain.Order{}, err
+		}
+	}
+	order.Status = domain.StatusPending
+	resetRejectedState(&order)
+	return order, nil
+}
+
 func (s *PostgresStore) schedulerSelectedInputs(req scheduleRequest, lineID string) ([]scheduler.OrderInput, error) {
 	inputs, err := s.pendingOrderInputs(lineID, selectedOrderIDMap(req.OrderIDs))
 	if err != nil {
 		return nil, err
 	}
-	resolutionInputs, err := s.resolutionOrderInputs(req.ResolutionOrderIDs, lineID)
-	if err != nil {
-		return nil, err
-	}
-	inputs = append(inputs, resolutionInputs...)
 	return inputs, nil
 }
 
@@ -1934,122 +2088,6 @@ func (s *PostgresStore) pendingOrderInputs(lineID string, selected map[string]bo
 	return inputs, nil
 }
 
-func checkInfoisValide(orderLineID string, lineID string, status string, priority domain.Priority) error {
-
-	if orderLineID != lineID {
-		return errors.New("resolution order line must match preview line")
-	}
-	if status != string(domain.StatusScheduled) {
-		return errors.New(resolutionOrdersMsg)
-	}
-	if priority != domain.PriorityLow {
-		return errors.New(resolutionOrdersMsg)
-	}
-	return nil
-}
-
-func (s *PostgresStore) resolutionOrderInputs(resolutionOrderIDs []string, lineID string) ([]scheduler.OrderInput, error) {
-	ids := uniqueOrderIDs(resolutionOrderIDs)
-	if len(ids) == 0 {
-		return nil, nil
-	}
-	rows, err := s.db.Query(`
-		SELECT id, customer, line_id, quantity, priority, status, due_date, created_at
-		FROM orders
-		WHERE id = ANY($1)
-	`, pq.Array(ids))
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	inputs := []scheduler.OrderInput{}
-	found := map[string]bool{}
-	for rows.Next() {
-		var id string
-		var customer string
-		var orderLineID string
-		var quantity int
-		var priority domain.Priority
-		var status string
-		var dueDate time.Time
-		var createdAt time.Time
-		if err := rows.Scan(&id, &customer, &orderLineID, &quantity, &priority, &status, &dueDate, &createdAt); err != nil {
-			return nil, err
-		}
-		if err := checkInfoisValide(orderLineID, lineID, status, priority); err != nil {
-			return nil, err
-		}
-		if err := s.ensureResolutionOrderMovable(id); err != nil {
-			return nil, err
-		}
-		inputs = append(inputs, scheduler.OrderInput{
-			ID:                 id,
-			Customer:           customer,
-			LineID:             orderLineID,
-			Quantity:           quantity,
-			Priority:           priority,
-			Status:             domain.OrderStatus(status),
-			DueDate:            dueDate,
-			CreatedAtTimestamp: unixMilliseconds(createdAt),
-		})
-		found[id] = true
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	for _, id := range ids {
-		if !found[id] {
-			return nil, errors.New("resolution order not found")
-		}
-	}
-	return inputs, nil
-}
-
-func (s *PostgresStore) ensureResolutionOrderMovable(orderID string) error {
-	rows, err := s.db.Query(`
-		SELECT locked, COALESCE(status, $1)
-		FROM schedule_allocations
-		WHERE order_id = $2
-	`, string(domain.StatusScheduled), orderID)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	hasAllocation, blocked, err := scanResolutionAllocationStates(rows)
-	if err != nil {
-		return err
-	}
-	if !hasAllocation || blocked {
-		return errors.New(resolutionOrdersMsg)
-	}
-	return nil
-}
-
-func scanResolutionAllocationStates(rows *sql.Rows) (bool, bool, error) {
-	hasAllocation := false
-	for rows.Next() {
-		var locked bool
-		var status string
-		if err := rows.Scan(&locked, &status); err != nil {
-			return false, false, err
-		}
-		hasAllocation = true
-		if isResolutionAllocationBlocked(locked, status) {
-			return hasAllocation, true, nil
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return false, false, err
-	}
-	return hasAllocation, false, nil
-}
-
-func isResolutionAllocationBlocked(locked bool, status string) bool {
-	return locked || status == string(domain.StatusInProgress) || status == string(domain.StatusCompleted)
-}
-
 func uniqueOrderIDs(values []string) []string {
 	seen := map[string]bool{}
 	result := []string{}
@@ -2064,11 +2102,7 @@ func uniqueOrderIDs(values []string) []string {
 	return result
 }
 
-func (s *PostgresStore) existingAllocations(lineID string, resolutionOrderIDs []string) ([]scheduler.ExistingAllocation, error) {
-	resolution := map[string]bool{}
-	for _, id := range resolutionOrderIDs {
-		resolution[id] = true
-	}
+func (s *PostgresStore) existingAllocations(lineID string) ([]scheduler.ExistingAllocation, error) {
 	rows, err := s.db.Query(`
 		SELECT order_id, line_id, allocation_date, quantity, priority, locked
 		FROM schedule_allocations
@@ -2083,9 +2117,6 @@ func (s *PostgresStore) existingAllocations(lineID string, resolutionOrderIDs []
 		var allocation scheduler.ExistingAllocation
 		if err := rows.Scan(&allocation.OrderID, &allocation.LineID, &allocation.Date, &allocation.Quantity, &allocation.Priority, &allocation.Locked); err != nil {
 			return nil, err
-		}
-		if resolution[allocation.OrderID] {
-			continue
 		}
 		allocations = append(allocations, allocation)
 	}

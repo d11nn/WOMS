@@ -965,10 +965,20 @@ button.calendar-item:focus-visible {
   background: #ecfdf3;
 }
 
+.calendar-item.current-position-preview {
+  border: 1px solid #0f766e;
+  background: #f0fdfa;
+}
+
 .calendar-item.child-order-preview {
   border: 1px solid #f79009;
   box-shadow: 0 0 0 2px rgb(247 144 9 / 18%);
   background: #fffaeb;
+}
+
+.calendar-item.focused-order-preview {
+  border: 2px solid #0f766e;
+  box-shadow: 0 0 0 3px rgb(15 118 110 / 22%);
 }
 
 .calendar-item.conflict-preview,

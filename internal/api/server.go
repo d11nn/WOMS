@@ -55,6 +55,7 @@ const errQuantityRange = "quantity must be between 25 and 2500"
 const errNoteImmutable = "note cannot be updated after order creation"
 const errPreviewExpired = "preview result expired or not found"
 const errPreviewOtherUser = "preview result belongs to another user"
+const errResolutionOrdersUnsupported = "scheduled orders cannot be moved as resolution orders"
 const errRoleInvalid = "role must be admin, sales, or scheduler"
 const errSchedulerLineInvalid = "scheduler lineId must be A, B, C, or D"
 
@@ -910,6 +911,7 @@ type confirmPreviewRequest struct {
 	PreviewID        string   `json:"previewId"`
 	DeferredOrderIDs []string `json:"deferredOrderIds,omitempty"`
 	DeferDraft       bool     `json:"deferDraft,omitempty"`
+	DeferReason      string   `json:"deferReason,omitempty"`
 }
 
 type demoConflictRequest struct {
@@ -955,25 +957,27 @@ type hpaAutoscalingState struct {
 }
 
 type previewRecord struct {
-	ActorID      string
-	ActorRole    domain.Role
-	LineID       string
-	LineRevision int64
-	Request      scheduleRequest
-	RequestHash  string
-	DraftOrder   *createOrderRequest
-	Allocations  []scheduler.Allocation
-	Conflicts    []scheduler.Conflict
-	CreatedAt    time.Time
+	ActorID       string
+	ActorRole     domain.Role
+	LineID        string
+	LineRevision  int64
+	Request       scheduleRequest
+	RequestHash   string
+	DraftOrder    *createOrderRequest
+	ResubmitOrder *resubmitOrderRequest
+	Allocations   []scheduler.Allocation
+	Conflicts     []scheduler.Conflict
+	CreatedAt     time.Time
 }
 
 type schedulePreviewResponse struct {
-	PreviewID   string                 `json:"previewId"`
-	CurrentDate string                 `json:"currentDate"`
-	Allocations []scheduler.Allocation `json:"allocations"`
-	Conflicts   []scheduler.Conflict   `json:"conflicts"`
-	FinishDate  time.Time              `json:"finishDate"`
-	DraftOrder  *createOrderRequest    `json:"draftOrder,omitempty"`
+	PreviewID     string                 `json:"previewId"`
+	CurrentDate   string                 `json:"currentDate"`
+	Allocations   []scheduler.Allocation `json:"allocations"`
+	Conflicts     []scheduler.Conflict   `json:"conflicts"`
+	FinishDate    time.Time              `json:"finishDate"`
+	DraftOrder    *createOrderRequest    `json:"draftOrder,omitempty"`
+	ResubmitOrder *resubmitOrderRequest  `json:"resubmitOrder,omitempty"`
 }
 
 const salesConflictDeferredReason = "Sales 接單衝突處理：改由業務重新確認"
@@ -1433,16 +1437,17 @@ func (s *MemoryStore) disableUserLocked(username string, user domain.User, actor
 }
 
 type scheduleRequest struct {
-	LineID              string              `json:"lineId"`
-	StartDate           string              `json:"startDate"`
-	CurrentDate         string              `json:"currentDate"`
-	OrderIDs            []string            `json:"orderIds"`
-	ResolutionOrderIDs  []string            `json:"resolutionOrderIds,omitempty"`
-	ManualForce         bool                `json:"manualForce"`
-	AllowLateCompletion bool                `json:"allowLateCompletion"`
-	Reason              string              `json:"reason"`
-	PreviewID           string              `json:"previewId"`
-	DraftOrder          *createOrderRequest `json:"draftOrder,omitempty"`
+	LineID              string                `json:"lineId"`
+	StartDate           string                `json:"startDate"`
+	CurrentDate         string                `json:"currentDate"`
+	OrderIDs            []string              `json:"orderIds"`
+	ResolutionOrderIDs  []string              `json:"resolutionOrderIds,omitempty"`
+	ManualForce         bool                  `json:"manualForce"`
+	AllowLateCompletion bool                  `json:"allowLateCompletion"`
+	Reason              string                `json:"reason"`
+	PreviewID           string                `json:"previewId"`
+	DraftOrder          *createOrderRequest   `json:"draftOrder,omitempty"`
+	ResubmitOrder       *resubmitOrderRequest `json:"resubmitOrder,omitempty"`
 }
 
 const previewDraftOrderID = "PREVIEW-DRAFT"
@@ -1468,24 +1473,26 @@ func (s *MemoryStore) PreviewSchedule(req scheduleRequest, claims auth.Claims) (
 	s.nextPreviewID++
 	normalized := normalizedPreviewRequest(req)
 	s.previews[id] = previewRecord{
-		ActorID:      claims.Subject,
-		ActorRole:    claims.Role,
-		LineID:       lineID,
-		LineRevision: s.lines[lineID].ScheduleRevision,
-		Request:      normalized,
-		RequestHash:  requestHash(normalized),
-		DraftOrder:   req.DraftOrder,
-		Allocations:  append([]scheduler.Allocation(nil), result.Allocations...),
-		Conflicts:    append([]scheduler.Conflict(nil), result.Conflicts...),
-		CreatedAt:    now,
+		ActorID:       claims.Subject,
+		ActorRole:     claims.Role,
+		LineID:        lineID,
+		LineRevision:  s.lines[lineID].ScheduleRevision,
+		Request:       normalized,
+		RequestHash:   requestHash(normalized),
+		DraftOrder:    req.DraftOrder,
+		ResubmitOrder: req.ResubmitOrder,
+		Allocations:   append([]scheduler.Allocation(nil), result.Allocations...),
+		Conflicts:     append([]scheduler.Conflict(nil), result.Conflicts...),
+		CreatedAt:     now,
 	}
 	return schedulePreviewResponse{
-		PreviewID:   id,
-		CurrentDate: req.CurrentDate,
-		Allocations: result.Allocations,
-		Conflicts:   result.Conflicts,
-		FinishDate:  result.FinishDate,
-		DraftOrder:  req.DraftOrder,
+		PreviewID:     id,
+		CurrentDate:   req.CurrentDate,
+		Allocations:   result.Allocations,
+		Conflicts:     result.Conflicts,
+		FinishDate:    result.FinishDate,
+		DraftOrder:    req.DraftOrder,
+		ResubmitOrder: req.ResubmitOrder,
 	}, nil
 }
 
@@ -2119,8 +2126,7 @@ func (s *MemoryStore) planLocked(req scheduleRequest, claims auth.Claims) (sched
 	if err != nil {
 		return scheduler.Result{}, err
 	}
-	resolutionOrderIDs, err := s.resolutionOrderIDSetLocked(lineID, req)
-	if err != nil {
+	if err := validateNoResolutionOrderIDs(req); err != nil {
 		return scheduler.Result{}, err
 	}
 	return runSchedulePlan(scheduler.Request{
@@ -2129,7 +2135,7 @@ func (s *MemoryStore) planLocked(req scheduleRequest, claims auth.Claims) (sched
 		StartDate:           startDate,
 		CurrentDate:         currentDate,
 		Orders:              inputs,
-		ExistingAllocations: s.existingAllocationInputsLocked(resolutionOrderIDs),
+		ExistingAllocations: s.existingAllocationInputsLocked(),
 		ManualForce:         req.ManualForce,
 		ForceReason:         req.Reason,
 		AllowLateCompletion: req.AllowLateCompletion,
@@ -2182,6 +2188,9 @@ func (s *MemoryStore) scheduleOrderInputsLocked(lineID string, currentDate time.
 	if req.DraftOrder != nil {
 		return s.draftOrderInputsLocked(lineID, currentDate, req, claims)
 	}
+	if req.ResubmitOrder != nil {
+		return s.resubmitOrderInputsLocked(lineID, currentDate, req, claims)
+	}
 	return s.selectedOrderInputsLocked(lineID, req), nil
 }
 
@@ -2229,6 +2238,55 @@ func draftOrderInput(draft createOrderRequest, dueDate time.Time) scheduler.Orde
 	}
 }
 
+func (s *MemoryStore) resubmitOrderInputsLocked(lineID string, currentDate time.Time, req scheduleRequest, claims auth.Claims) ([]scheduler.OrderInput, error) {
+	if claims.Role != domain.RoleSales {
+		return nil, errors.New("only sales can preview resubmitted orders")
+	}
+	resubmit := *req.ResubmitOrder
+	order, ok := s.orders[resubmit.OrderID]
+	if !ok {
+		return nil, errors.New(errOrderNotFound)
+	}
+	if order.CreatedBy != claims.Subject {
+		return nil, errors.New("sales can resubmit only their own orders")
+	}
+	if order.LineID != lineID {
+		return nil, errors.New("resubmit order line must match preview line")
+	}
+	if !canSalesResubmitStatus(order.Status) {
+		return nil, errors.New("only pending or rejected orders can be resubmitted")
+	}
+	if strings.TrimSpace(resubmit.Note) != "" {
+		return nil, errors.New(errNoteImmutable)
+	}
+	if err := applyOptionalQuantity(&order, resubmit.Quantity); err != nil {
+		return nil, err
+	}
+	if err := applyOptionalDueDate(&order, resubmit.DueDate, effectiveCurrentDate(currentDate)); err != nil {
+		return nil, err
+	}
+	order.Status = domain.StatusPending
+	resetRejectedState(&order)
+
+	inputs := []scheduler.OrderInput{}
+	includedTarget := false
+	for _, existing := range s.orders {
+		if existing.LineID != lineID || existing.Status != domain.StatusPending {
+			continue
+		}
+		if existing.ID == order.ID {
+			inputs = append(inputs, orderInputFromOrder(order))
+			includedTarget = true
+			continue
+		}
+		inputs = append(inputs, orderInputFromOrder(existing))
+	}
+	if !includedTarget {
+		inputs = append(inputs, orderInputFromOrder(order))
+	}
+	return inputs, nil
+}
+
 func (s *MemoryStore) selectedOrderInputsLocked(lineID string, req scheduleRequest) []scheduler.OrderInput {
 	selected := map[string]bool{}
 	for _, id := range req.OrderIDs {
@@ -2239,11 +2297,10 @@ func (s *MemoryStore) selectedOrderInputsLocked(lineID string, req scheduleReque
 		if order.LineID != lineID {
 			continue
 		}
-		if order.Status == domain.StatusPending {
-			if len(selected) > 0 && !selected[order.ID] {
-				continue
-			}
-		} else if !slicesContains(req.ResolutionOrderIDs, order.ID) {
+		if order.Status != domain.StatusPending {
+			continue
+		}
+		if len(selected) > 0 && !selected[order.ID] {
 			continue
 		}
 		inputs = append(inputs, orderInputFromOrder(order))
@@ -2264,36 +2321,16 @@ func orderInputFromOrder(order domain.Order) scheduler.OrderInput {
 	}
 }
 
-func (s *MemoryStore) resolutionOrderIDSetLocked(lineID string, req scheduleRequest) (map[string]bool, error) {
-	resolutionOrderIDs := map[string]bool{}
-	for _, orderID := range req.ResolutionOrderIDs {
-		if orderID == "" {
-			continue
-		}
-		if req.DraftOrder != nil {
-			return nil, errors.New("draft previews cannot include resolution orders")
-		}
-		order, ok := s.orders[orderID]
-		if !ok {
-			return nil, errors.New("resolution order not found")
-		}
-		if order.LineID != lineID {
-			return nil, errors.New("resolution order line must match preview line")
-		}
-		if !s.canMoveScheduledOrderLocked(orderID) {
-			return nil, errors.New("resolution orders must be low-priority scheduled orders without locked or completed allocations")
-		}
-		resolutionOrderIDs[orderID] = true
+func validateNoResolutionOrderIDs(req scheduleRequest) error {
+	if len(uniqueOrderIDs(req.ResolutionOrderIDs)) > 0 {
+		return errors.New(errResolutionOrdersUnsupported)
 	}
-	return resolutionOrderIDs, nil
+	return nil
 }
 
-func (s *MemoryStore) existingAllocationInputsLocked(resolutionOrderIDs map[string]bool) []scheduler.ExistingAllocation {
+func (s *MemoryStore) existingAllocationInputsLocked() []scheduler.ExistingAllocation {
 	existingAllocations := []scheduler.ExistingAllocation{}
 	for _, allocation := range s.allocations {
-		if resolutionOrderIDs[allocation.OrderID] {
-			continue
-		}
 		existingAllocations = append(existingAllocations, scheduler.ExistingAllocation{
 			OrderID:  allocation.OrderID,
 			LineID:   allocation.LineID,
@@ -2484,6 +2521,13 @@ func (s *MemoryStore) ConfirmPreviewOrder(req confirmPreviewRequest, claims auth
 	if err != nil {
 		return domain.Order{}, err
 	}
+	if preview.ResubmitOrder != nil {
+		order, err := s.confirmPreviewResubmitLocked(*preview.ResubmitOrder, deferredOrderIDs, req.PreviewID, claims)
+		if err != nil {
+			return domain.Order{}, err
+		}
+		return order, nil
+	}
 	draft := *preview.DraftOrder
 	order, err := s.createOrderLocked(draft, claims.Subject)
 	if err != nil {
@@ -2491,7 +2535,7 @@ func (s *MemoryStore) ConfirmPreviewOrder(req confirmPreviewRequest, claims auth
 	}
 	now := nowUTC()
 	if req.DeferDraft {
-		order = s.applyDeferredDraftLocked(order, claims, now)
+		order = s.applyDeferredDraftLocked(order, claims, now, strings.TrimSpace(req.DeferReason))
 	}
 	s.deferPreviewConflictOrdersLocked(deferredOrderIDs, claims, now)
 	delete(s.previews, req.PreviewID)
@@ -2506,19 +2550,20 @@ func (s *MemoryStore) loadPreviewForConfirmationLocked(req confirmPreviewRequest
 	if preview.ActorID != claims.Subject || preview.ActorRole != claims.Role {
 		return previewRecord{}, errors.New(errPreviewOtherUser)
 	}
-	if preview.DraftOrder == nil {
-		return previewRecord{}, errors.New("preview does not contain a draft order")
+	if preview.DraftOrder == nil && preview.ResubmitOrder == nil {
+		return previewRecord{}, errors.New("preview does not contain a sales order")
 	}
 	return preview, nil
 }
 
-func (s *MemoryStore) applyDeferredDraftLocked(order domain.Order, claims auth.Claims, now time.Time) domain.Order {
+func (s *MemoryStore) applyDeferredDraftLocked(order domain.Order, claims auth.Claims, now time.Time, reason string) domain.Order {
 	order.Status = domain.StatusRejected
+	order.RejectionReason = reason
 	order.RejectedBy = claims.Subject
 	order.RejectedAt = now
 	order.UpdatedAt = now
 	s.orders[order.ID] = order
-	s.auditLocked(claims.Subject, "order.sales_conflict_defer_draft", order.ID, "")
+	s.auditLocked(claims.Subject, "order.sales_conflict_defer_draft", order.ID, reason)
 	return order
 }
 
@@ -2534,6 +2579,54 @@ func (s *MemoryStore) deferPreviewConflictOrdersLocked(orderIDs []string, claims
 		s.bumpLineRevisionLocked(deferred.LineID)
 		s.auditLocked(claims.Subject, "order.sales_conflict_defer", orderID, salesConflictDeferredReason)
 	}
+}
+
+func (s *MemoryStore) confirmPreviewResubmitLocked(req resubmitOrderRequest, deferredOrderIDs []string, previewID string, claims auth.Claims) (domain.Order, error) {
+	now := nowUTC()
+	order, ok := s.orders[req.OrderID]
+	if !ok {
+		return domain.Order{}, errors.New(errOrderNotFound)
+	}
+	if order.CreatedBy != claims.Subject {
+		return domain.Order{}, errors.New("sales can resubmit only their own orders")
+	}
+	if !canSalesResubmitStatus(order.Status) {
+		return domain.Order{}, errors.New("only pending or rejected orders can be resubmitted")
+	}
+	if strings.TrimSpace(req.Note) != "" {
+		return domain.Order{}, errors.New(errNoteImmutable)
+	}
+	if err := applyOptionalQuantity(&order, req.Quantity); err != nil {
+		return domain.Order{}, err
+	}
+	if req.DueDate != "" {
+		currentDate, err := s.currentDateForLineLocked(order.LineID, now)
+		if err != nil {
+			return domain.Order{}, err
+		}
+		if err := applyOptionalDueDate(&order, req.DueDate, currentDate); err != nil {
+			return domain.Order{}, err
+		}
+	}
+	order.Status = domain.StatusPending
+	resetRejectedState(&order)
+	order.UpdatedAt = now
+	s.orders[order.ID] = order
+	s.bumpLineRevisionLocked(order.LineID)
+	s.auditLocked(claims.Subject, "order.resubmit", order.ID, "")
+	for _, orderID := range deferredOrderIDs {
+		deferred := s.orders[orderID]
+		deferred.Status = domain.StatusRejected
+		deferred.RejectionReason = salesConflictDeferredReason
+		deferred.RejectedBy = claims.Subject
+		deferred.RejectedAt = now
+		deferred.UpdatedAt = now
+		s.orders[orderID] = deferred
+		s.bumpLineRevisionLocked(deferred.LineID)
+		s.auditLocked(claims.Subject, "order.sales_conflict_defer", orderID, salesConflictDeferredReason)
+	}
+	delete(s.previews, previewID)
+	return order, nil
 }
 
 func (s *MemoryStore) validateSalesDeferredOrdersLocked(orderIDs []string, preview previewRecord, claims auth.Claims) ([]string, error) {
@@ -3110,33 +3203,6 @@ func (s *MemoryStore) removeOpenAllocationsForOrdersLocked(orderIDs map[string]b
 	s.allocations = kept
 }
 
-func (s *MemoryStore) canMoveScheduledOrderLocked(orderID string) bool {
-	order, ok := s.orders[orderID]
-	if !ok || order.Status != domain.StatusScheduled || order.Priority != domain.PriorityLow {
-		return false
-	}
-	hasOpenAllocation := false
-	for _, allocation := range s.allocations {
-		if allocation.OrderID != orderID {
-			continue
-		}
-		if allocation.Locked || allocation.Status == domain.StatusInProgress || allocation.Status == domain.StatusCompleted {
-			return false
-		}
-		hasOpenAllocation = true
-	}
-	return hasOpenAllocation
-}
-
-func slicesContains(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
-}
-
 func (s *MemoryStore) productionAllocationLocked(orderID string, productionDate time.Time) (domain.ScheduleAllocation, bool) {
 	date := truncateDate(productionDate)
 	var completed domain.ScheduleAllocation
@@ -3557,6 +3623,7 @@ func zhUserMessage(message string) string {
 		"only sales can preview draft orders":                          "只有業務可以試排草稿訂單。",
 		"draft order line must match preview line":                     "草稿訂單產線必須符合試排產線。",
 		"draft previews cannot include resolution orders":              "草稿試排不能包含解法訂單。",
+		errResolutionOrdersUnsupported:                                 "已排程訂單不可作為解法移動，請改用待排程訂單重試。",
 		"resolution order not found":                                   "找不到解法訂單。",
 		"resolution order line must match preview line":                "解法訂單產線必須符合試排產線。",
 		"resolution orders must be low-priority scheduled orders without locked or completed allocations": "解法訂單必須是低優先級、已排程、且沒有鎖定或已完成分配的訂單。",

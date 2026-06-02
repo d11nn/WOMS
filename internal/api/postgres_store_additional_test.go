@@ -335,10 +335,10 @@ func TestPostgresStore_ConfirmPreviewOrder(t *testing.T) {
 	}
 	draftJSON, _ := json.Marshal(draft)
 
-	mock.ExpectQuery("SELECT actor_id, actor_role, line_id, allocations, conflicts, draft_order FROM schedule_previews").
+	mock.ExpectQuery("SELECT actor_id, actor_role, line_id, allocations, conflicts, draft_order, request FROM schedule_previews").
 		WithArgs("preview-1").
-		WillReturnRows(sqlmock.NewRows([]string{"actor_id", "actor_role", "line_id", "allocations", "conflicts", "draft_order"}).
-			AddRow("sales-1", string(domain.RoleSales), "A", []byte("[]"), []byte("[]"), sql.NullString{String: string(draftJSON), Valid: true}))
+		WillReturnRows(sqlmock.NewRows([]string{"actor_id", "actor_role", "line_id", "allocations", "conflicts", "draft_order", "request"}).
+			AddRow("sales-1", string(domain.RoleSales), "A", []byte("[]"), []byte("[]"), sql.NullString{String: string(draftJSON), Valid: true}, []byte(`{}`)))
 
 	// CreateOrder calls
 	mock.ExpectQuery("SELECT id, name, capacity_per_day").
@@ -385,23 +385,23 @@ func TestPostgresStore_ConfirmPreviewOrderValidationBranches(t *testing.T) {
 	}{
 		{name: "preview expired", err: sql.ErrNoRows, wantError: "preview result expired or not found"},
 		{name: "database error", err: errors.New("preview db error"), wantError: "preview db error"},
-		{name: "other actor", row: sqlmock.NewRows([]string{"actor_id", "actor_role", "line_id", "allocations", "conflicts", "draft_order"}).
-			AddRow("other-sales", string(domain.RoleSales), "A", []byte("[]"), []byte("[]"), sql.NullString{String: validDraft, Valid: true}), wantError: "preview result belongs to another user"},
-		{name: "missing draft", row: sqlmock.NewRows([]string{"actor_id", "actor_role", "line_id", "allocations", "conflicts", "draft_order"}).
-			AddRow("sales-1", string(domain.RoleSales), "A", []byte("[]"), []byte("[]"), sql.NullString{}), wantError: "preview does not contain a draft order"},
-		{name: "invalid draft json", row: sqlmock.NewRows([]string{"actor_id", "actor_role", "line_id", "allocations", "conflicts", "draft_order"}).
-			AddRow("sales-1", string(domain.RoleSales), "A", []byte("[]"), []byte("[]"), sql.NullString{String: "{", Valid: true}), wantError: "unexpected end of JSON input"},
-		{name: "invalid allocations json", row: sqlmock.NewRows([]string{"actor_id", "actor_role", "line_id", "allocations", "conflicts", "draft_order"}).
-			AddRow("sales-1", string(domain.RoleSales), "A", []byte("{"), []byte("[]"), sql.NullString{String: validDraft, Valid: true}), wantError: "unexpected end of JSON input"},
-		{name: "invalid conflicts json", row: sqlmock.NewRows([]string{"actor_id", "actor_role", "line_id", "allocations", "conflicts", "draft_order"}).
-			AddRow("sales-1", string(domain.RoleSales), "A", []byte("[]"), []byte("{"), sql.NullString{String: validDraft, Valid: true}), wantError: "unexpected end of JSON input"},
-		{name: "defer draft with pending ids", row: sqlmock.NewRows([]string{"actor_id", "actor_role", "line_id", "allocations", "conflicts", "draft_order"}).
-			AddRow("sales-1", string(domain.RoleSales), "A", []byte("[]"), []byte(`[{"orderId":"PREVIEW-DRAFT"}]`), sql.NullString{String: validDraft, Valid: true}), wantError: "draft defer cannot include deferred pending orders", deferDraft: true, deferredOrderIDs: []string{"ORD-1"}},
-		{name: "defer draft without conflicts", row: sqlmock.NewRows([]string{"actor_id", "actor_role", "line_id", "allocations", "conflicts", "draft_order"}).
-			AddRow("sales-1", string(domain.RoleSales), "A", []byte("[]"), []byte("[]"), sql.NullString{String: validDraft, Valid: true}), wantError: "draft can be deferred only when preview has conflicts", deferDraft: true},
+		{name: "other actor", row: sqlmock.NewRows([]string{"actor_id", "actor_role", "line_id", "allocations", "conflicts", "draft_order", "request"}).
+			AddRow("other-sales", string(domain.RoleSales), "A", []byte("[]"), []byte("[]"), sql.NullString{String: validDraft, Valid: true}, []byte(`{}`)), wantError: "preview result belongs to another user"},
+		{name: "missing draft", row: sqlmock.NewRows([]string{"actor_id", "actor_role", "line_id", "allocations", "conflicts", "draft_order", "request"}).
+			AddRow("sales-1", string(domain.RoleSales), "A", []byte("[]"), []byte("[]"), sql.NullString{}, []byte(`{}`)), wantError: "preview does not contain a sales order"},
+		{name: "invalid draft json", row: sqlmock.NewRows([]string{"actor_id", "actor_role", "line_id", "allocations", "conflicts", "draft_order", "request"}).
+			AddRow("sales-1", string(domain.RoleSales), "A", []byte("[]"), []byte("[]"), sql.NullString{String: "{", Valid: true}, []byte(`{}`)), wantError: "unexpected end of JSON input"},
+		{name: "invalid allocations json", row: sqlmock.NewRows([]string{"actor_id", "actor_role", "line_id", "allocations", "conflicts", "draft_order", "request"}).
+			AddRow("sales-1", string(domain.RoleSales), "A", []byte("{"), []byte("[]"), sql.NullString{String: validDraft, Valid: true}, []byte(`{}`)), wantError: "unexpected end of JSON input"},
+		{name: "invalid conflicts json", row: sqlmock.NewRows([]string{"actor_id", "actor_role", "line_id", "allocations", "conflicts", "draft_order", "request"}).
+			AddRow("sales-1", string(domain.RoleSales), "A", []byte("[]"), []byte("{"), sql.NullString{String: validDraft, Valid: true}, []byte(`{}`)), wantError: "unexpected end of JSON input"},
+		{name: "defer draft with pending ids", row: sqlmock.NewRows([]string{"actor_id", "actor_role", "line_id", "allocations", "conflicts", "draft_order", "request"}).
+			AddRow("sales-1", string(domain.RoleSales), "A", []byte("[]"), []byte(`[{"orderId":"PREVIEW-DRAFT"}]`), sql.NullString{String: validDraft, Valid: true}, []byte(`{}`)), wantError: "draft defer cannot include deferred pending orders", deferDraft: true, deferredOrderIDs: []string{"ORD-1"}},
+		{name: "defer draft without conflicts", row: sqlmock.NewRows([]string{"actor_id", "actor_role", "line_id", "allocations", "conflicts", "draft_order", "request"}).
+			AddRow("sales-1", string(domain.RoleSales), "A", []byte("[]"), []byte("[]"), sql.NullString{String: validDraft, Valid: true}, []byte(`{}`)), wantError: "draft can be deferred only when preview has conflicts", deferDraft: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			expect := mock.ExpectQuery("SELECT actor_id, actor_role, line_id, allocations, conflicts, draft_order").
+			expect := mock.ExpectQuery("SELECT actor_id, actor_role, line_id, allocations, conflicts, draft_order, request").
 				WithArgs("preview-" + strings.ReplaceAll(tt.name, " ", "-"))
 			if tt.err != nil {
 				expect.WillReturnError(tt.err)
@@ -505,7 +505,7 @@ func TestPostgresStore_ConfirmPreviewOrderTxRejectsStalePreviewDelete(t *testing
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectRollback()
 
-	_, err = store.confirmPreviewOrderTx("preview-1", draft, nil, false, claims)
+	_, err = store.confirmPreviewOrderTx("preview-1", draft, nil, false, "", claims)
 	if err == nil || !strings.Contains(err.Error(), "preview result expired or not found") {
 		t.Fatalf("expected stale preview error, got %v", err)
 	}
@@ -548,7 +548,7 @@ func TestPostgresStore_ConfirmPreviewOrderTxRejectsChangedDeferredOrder(t *testi
 	mock.ExpectExec("UPDATE orders").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectRollback()
 
-	_, err = store.confirmPreviewOrderTx("preview-1", draft, deferredOrders, false, claims)
+	_, err = store.confirmPreviewOrderTx("preview-1", draft, deferredOrders, false, "", claims)
 	if err == nil || !strings.Contains(err.Error(), "deferred order changed before confirmation") {
 		t.Fatalf("expected changed deferred order error, got %v", err)
 	}
@@ -589,7 +589,7 @@ func TestPostgresStore_ConfirmPreviewOrderTxCanDeferDraft(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 
-	order, err := store.confirmPreviewOrderTx("preview-1", draft, nil, true, claims)
+	order, err := store.confirmPreviewOrderTx("preview-1", draft, nil, true, "", claims)
 	if err != nil {
 		t.Fatalf("confirmPreviewOrderTx failed: %v", err)
 	}
@@ -1020,28 +1020,7 @@ func TestPostgresStore_PreviewSchedule_DraftAndResolution(t *testing.T) {
 		t.Errorf("expected draft line mismatch error, got %v", err)
 	}
 
-	// 3. Draft preview cannot include resolution orders
-	resolutionDraftReq := scheduleRequest{
-		LineID: "A",
-		DraftOrder: &createOrderRequest{
-			Customer: "ACME",
-			Quantity: 100,
-			DueDate:  "2026-06-01",
-		},
-		ResolutionOrderIDs: []string{"RES-1"},
-	}
-	// Mock productionLine call
-	mock.ExpectQuery("SELECT id, name, capacity_per_day, COALESCE\\(timezone").
-		WithArgs("A", "Asia/Taipei").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "capacity_per_day", "timezone", "schedule_revision"}).
-			AddRow("A", "Line A", 1000, "Asia/Taipei", 1))
-
-	_, err = store.PreviewSchedule(resolutionDraftReq, salesClaims)
-	if err == nil || !strings.Contains(err.Error(), "draft previews cannot include resolution orders") {
-		t.Errorf("expected draft resolution error, got %v", err)
-	}
-
-	// 4. Successful draft preview with baseline plan
+	// 3. Successful draft preview with baseline plan
 	// It calls productionLine twice: once for previewFromDB and once for schedulerInputs validation.
 	mock.ExpectQuery("SELECT id, name, capacity_per_day, COALESCE\\(timezone").
 		WithArgs("A", "Asia/Taipei").
@@ -1075,7 +1054,7 @@ func TestPostgresStore_PreviewSchedule_DraftAndResolution(t *testing.T) {
 		t.Errorf("unexpected preview response draft: %+v", resp.DraftOrder)
 	}
 
-	// 5. Preview schedule with resolution orders
+	// 4. Preview schedule rejects resolution orders before moving scheduled allocations
 	schedulerClaimsA := auth.Claims{
 		Subject: "scheduler-1",
 		Role:    domain.RoleScheduler,
@@ -1093,38 +1072,9 @@ func TestPostgresStore_PreviewSchedule_DraftAndResolution(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "capacity_per_day", "timezone", "schedule_revision"}).
 			AddRow("A", "Line A", 1000, "Asia/Taipei", 1))
 
-	// pendingOrderInputs query (returns ORD-2)
-	mock.ExpectQuery("SELECT id, customer, line_id, quantity, priority, status, due_date, created_at[\\s\\S]*FROM orders[\\s\\S]*WHERE line_id = \\$1 AND status = '待排程'").
-		WithArgs("A").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "customer", "line_id", "quantity", "priority", "status", "due_date", "created_at"}).
-			AddRow("ORD-2", "C1", "A", 100, "high", "待排程", time.Now().AddDate(0, 0, 2), time.Now()))
-
-	// resolutionOrderInputs query (returns RES-1)
-	mock.ExpectQuery("SELECT id, customer, line_id, quantity, priority, status, due_date, created_at[\\s\\S]*FROM orders").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "customer", "line_id", "quantity", "priority", "status", "due_date", "created_at"}).
-			AddRow("RES-1", "C2", "A", 50, "low", "已排程", time.Now().AddDate(0, 0, 2), time.Now()))
-
-	// ensureResolutionOrderMovable query (returns one unlocked, scheduled allocation to pass)
-	mock.ExpectQuery("SELECT locked, COALESCE\\(status, \\$1\\) FROM schedule_allocations WHERE order_id = \\$2").
-		WithArgs(string(domain.StatusScheduled), "RES-1").
-		WillReturnRows(sqlmock.NewRows([]string{"locked", "status"}).AddRow(false, "已排程"))
-
-	// existingAllocations query (returns one matching RES-1 to test continue path, one non-matching)
-	mock.ExpectQuery("SELECT order_id, line_id, allocation_date, quantity, priority, locked FROM schedule_allocations").
-		WithArgs("A").
-		WillReturnRows(sqlmock.NewRows([]string{"order_id", "line_id", "allocation_date", "quantity", "priority", "locked"}).
-			AddRow("RES-1", "A", time.Now().AddDate(0, 0, 2), 50, "low", false).
-			AddRow("ORD-3", "A", time.Now().AddDate(0, 0, 1), 200, "high", true))
-
-	mock.ExpectExec("INSERT INTO schedule_previews").
-		WillReturnResult(sqlmock.NewResult(1, 1))
-
-	resResp, err := store.PreviewSchedule(resReq, schedulerClaimsA)
-	if err != nil {
-		t.Fatalf("PreviewSchedule for resolution failed: %v", err)
-	}
-	if len(resResp.Allocations) == 0 {
-		t.Errorf("expected allocations, got empty")
+	_, err = store.PreviewSchedule(resReq, schedulerClaimsA)
+	if err == nil || !strings.Contains(err.Error(), errResolutionOrdersUnsupported) {
+		t.Fatalf("expected resolution order IDs to be rejected, got %v", err)
 	}
 }
 

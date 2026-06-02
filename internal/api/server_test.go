@@ -25,6 +25,7 @@ import (
 	"github.com/d11nn/woms/internal/auth"
 	"github.com/d11nn/woms/internal/domain"
 	"github.com/d11nn/woms/internal/metrics"
+	"github.com/d11nn/woms/internal/scheduler"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
@@ -2267,7 +2268,7 @@ func TestSalesConfirmDraftPreviewDefersConflictedPendingOrder(t *testing.T) {
 		t.Fatalf("expected draft preview conflict, got 0 conflicts")
 	}
 	deferredID := conflicts[0]
-	if deferredID == previewDraftOrderID || !slicesContains(conflictedOrderIDs, deferredID) {
+	if deferredID == previewDraftOrderID || !contains(conflictedOrderIDs, deferredID) {
 		t.Fatalf("expected one existing pending order conflict, got %q", deferredID)
 	}
 
@@ -2635,6 +2636,102 @@ func TestSalesDraftPreviewReturnsSuccessfulAllocationsWhenDraftDisplacesPendingO
 	}
 }
 
+func TestSalesDraftPreviewPlacesLowPriorityDraftAfterHighPriorityBacklogAndScheduledCapacity(t *testing.T) {
+	store := NewMemoryStore()
+	server := NewServer("secret", store)
+	salesToken := login(t, server, "sales", "demo")
+	lineID := "A"
+	for range 4 {
+		createOrderWithPriorityAndDue(t, server, salesToken, lineID, "high", "2026-06-03")
+	}
+	store.allocations = append(store.allocations,
+		domain.ScheduleAllocation{OrderID: "ORD-SCHEDULED-0604", LineID: lineID, Date: mustAPIDate(t, "2026-06-04"), Quantity: 10000, Priority: domain.PriorityHigh, Status: domain.StatusScheduled, Locked: true},
+		domain.ScheduleAllocation{OrderID: "ORD-SCHEDULED-0605", LineID: lineID, Date: mustAPIDate(t, "2026-06-05"), Quantity: 10000, Priority: domain.PriorityLow, Status: domain.StatusScheduled},
+	)
+
+	initialPreview := requestSalesDraftPreview(t, server, salesToken, false)
+	if hasSchedulerAllocationOnDate(initialPreview.Allocations, previewDraftOrderID, "2026-06-03") {
+		t.Fatalf("low-priority draft must not appear on full high-priority 2026-06-03 capacity: %+v", initialPreview.Allocations)
+	}
+	if len(initialPreview.Conflicts) != 1 || initialPreview.Conflicts[0].OrderID != previewDraftOrderID || !strings.HasPrefix(initialPreview.Conflicts[0].EarliestFinishDate.Format(dateLayout), "2026-06-06") {
+		t.Fatalf("expected draft conflict with earliest finish on 2026-06-06, got %+v", initialPreview.Conflicts)
+	}
+
+	solutionPreview := requestSalesDraftPreview(t, server, salesToken, true)
+	if hasSchedulerAllocationOnDate(solutionPreview.Allocations, previewDraftOrderID, "2026-06-03") {
+		t.Fatalf("low-priority draft must not be scheduled before high-priority backlog in solution preview: %+v", solutionPreview.Allocations)
+	}
+	if !hasSchedulerAllocationOnDate(solutionPreview.Allocations, previewDraftOrderID, "2026-06-06") {
+		t.Fatalf("expected low-priority draft to use earliest free capacity on 2026-06-06, got %+v", solutionPreview.Allocations)
+	}
+}
+
+func TestSalesDraftPreviewRejectsResolutionOrderIDs(t *testing.T) {
+	store := NewMemoryStore()
+	server := NewServer("secret", store)
+	salesToken := login(t, server, "sales", "demo")
+	lineID := "A"
+	scheduledOrderID := "ORD-SCHEDULED-0605"
+	store.orders[scheduledOrderID] = domain.Order{
+		ID:        scheduledOrderID,
+		Customer:  "ACME",
+		LineID:    lineID,
+		Quantity:  2500,
+		Priority:  domain.PriorityLow,
+		Status:    domain.StatusScheduled,
+		DueDate:   mustAPIDate(t, "2026-06-05"),
+		CreatedAt: time.Unix(1772271715, 0).UTC(),
+		CreatedBy: "sales",
+	}
+	store.allocations = append(store.allocations, domain.ScheduleAllocation{
+		OrderID:  scheduledOrderID,
+		LineID:   lineID,
+		Date:     mustAPIDate(t, "2026-06-05"),
+		Quantity: 2500,
+		Priority: domain.PriorityLow,
+		Status:   domain.StatusScheduled,
+	})
+
+	body := bytes.NewBufferString(`{"lineId":"A","startDate":"2026-06-03","currentDate":"2026-06-02","allowLateCompletion":true,"resolutionOrderIds":["` + scheduledOrderID + `"],"draftOrder":{"customer":"ACME","lineId":"A","quantity":2500,"priority":"low","dueDate":"2026-06-03"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/schedules/preview", body)
+	req.Header.Set("Authorization", "Bearer "+salesToken)
+	res := httptest.NewRecorder()
+	server.ServeHTTP(res, req)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("expected resolution order IDs to be rejected, got %d %s", res.Code, res.Body.String())
+	}
+}
+
+func requestSalesDraftPreview(t *testing.T, server *Server, salesToken string, allowLateCompletion bool) schedulePreviewResponse {
+	t.Helper()
+	late := ""
+	if allowLateCompletion {
+		late = `,"allowLateCompletion":true`
+	}
+	body := bytes.NewBufferString(`{"lineId":"A","startDate":"2026-06-03","currentDate":"2026-06-02"` + late + `,"draftOrder":{"customer":"ACME","lineId":"A","quantity":2500,"priority":"low","dueDate":"2026-06-03"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/schedules/preview", body)
+	req.Header.Set("Authorization", "Bearer "+salesToken)
+	res := httptest.NewRecorder()
+	server.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("sales draft preview failed: %d %s", res.Code, res.Body.String())
+	}
+	var preview schedulePreviewResponse
+	if err := json.Unmarshal(res.Body.Bytes(), &preview); err != nil {
+		t.Fatalf("decode sales draft preview response: %v", err)
+	}
+	return preview
+}
+
+func hasSchedulerAllocationOnDate(allocations []scheduler.Allocation, orderID, date string) bool {
+	for _, allocation := range allocations {
+		if allocation.OrderID == orderID && allocation.Date.Format(dateLayout) == date {
+			return true
+		}
+	}
+	return false
+}
+
 func TestManualForceConflictCanCreateScheduleJobWithAudit(t *testing.T) {
 	store := NewMemoryStore()
 	server := NewServer("secret", store)
@@ -2708,31 +2805,29 @@ func assertManualForceAudit(t *testing.T, store *MemoryStore) {
 	}
 }
 
-func TestConflictSolutionCanMoveScheduledLowPriorityOrder(t *testing.T) {
+func TestConflictSolutionRejectsResolutionOrderIDs(t *testing.T) {
 	store := NewMemoryStore()
 	server := NewServer("secret", store)
 	salesToken := login(t, server, "sales", "demo")
 	schedulerA := login(t, server, "scheduler-a", "demo")
 	newOrderID := setupScheduledLowPriorityConflict(t, server, salesToken, schedulerA)
 	conflictPreview := requestConflictPreview(t, server, schedulerA, newOrderID)
-	movableOrderID := firstAffectedOrderID(t, conflictPreview)
-	solutionPreview := requestConflictSolutionPreview(t, server, schedulerA, newOrderID, movableOrderID)
-	splitOrderID := movableOrderID + "-1"
-	assertConflictSolutionAllocations(t, solutionPreview.Allocations, newOrderID, movableOrderID, splitOrderID)
-	executeConflictSolutionJob(t, server, schedulerA, newOrderID, movableOrderID, solutionPreview.PreviewID)
-	assertSplitResolutionOrders(t, store, movableOrderID, splitOrderID)
+	scheduledOrderID := firstAffectedOrderID(t, conflictPreview)
+
+	body := bytes.NewBufferString(`{"lineId":"A","startDate":"2026-05-01","currentDate":"2026-04-30","orderIds":["` + newOrderID + `"],"resolutionOrderIds":["` + scheduledOrderID + `"],"allowLateCompletion":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/schedules/preview", body)
+	req.Header.Set("Authorization", "Bearer "+schedulerA)
+	res := httptest.NewRecorder()
+	server.ServeHTTP(res, req)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("expected scheduled resolution order to be rejected, got %d %s", res.Code, res.Body.String())
+	}
 }
 
 type conflictPreviewPayload struct {
 	Conflicts []struct {
 		AffectedOrderIDs []string `json:"affectedOrderIds"`
 	} `json:"conflicts"`
-}
-
-type solutionPreviewPayload struct {
-	PreviewID   string              `json:"previewId"`
-	Conflicts   []any               `json:"conflicts"`
-	Allocations []previewAllocation `json:"allocations"`
 }
 
 func setupScheduledLowPriorityConflict(t *testing.T, server *Server, salesToken, schedulerToken string) string {
@@ -2767,64 +2862,6 @@ func firstAffectedOrderID(t *testing.T, preview conflictPreviewPayload) string {
 		t.Fatalf("expected affected movable scheduled orders, got %+v", preview.Conflicts)
 	}
 	return preview.Conflicts[0].AffectedOrderIDs[0]
-}
-
-func requestConflictSolutionPreview(t *testing.T, server *Server, schedulerToken, newOrderID, movableOrderID string) solutionPreviewPayload {
-	t.Helper()
-	body := bytes.NewBufferString(`{"lineId":"A","startDate":"2026-05-01","currentDate":"2026-04-30","orderIds":["` + newOrderID + `"],"resolutionOrderIds":["` + movableOrderID + `"],"allowLateCompletion":true}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/schedules/preview", body)
-	req.Header.Set("Authorization", "Bearer "+schedulerToken)
-	res := httptest.NewRecorder()
-	server.ServeHTTP(res, req)
-	if res.Code != http.StatusOK {
-		t.Fatalf("solution preview failed: %d %s", res.Code, res.Body.String())
-	}
-	var preview solutionPreviewPayload
-	if err := json.Unmarshal(res.Body.Bytes(), &preview); err != nil {
-		t.Fatalf("decode solution preview: %v", err)
-	}
-	if len(preview.Conflicts) != 0 {
-		t.Fatalf("expected conflict-free solution preview, got %+v", preview.Conflicts)
-	}
-	return preview
-}
-
-func assertConflictSolutionAllocations(t *testing.T, allocations []previewAllocation, newOrderID, movableOrderID, splitOrderID string) {
-	t.Helper()
-	if !hasPreviewAllocationOnDate(allocations, newOrderID, "2026-05-01") ||
-		!hasPreviewAllocationOnDate(allocations, movableOrderID, "2026-05-01") ||
-		!hasPreviewAllocationOnDate(allocations, splitOrderID, "2026-05-02") {
-		t.Fatalf("expected high priority order on due date and split low priority order across two independent IDs, got %+v", allocations)
-	}
-}
-
-func executeConflictSolutionJob(t *testing.T, server *Server, schedulerToken, newOrderID, movableOrderID, previewID string) {
-	t.Helper()
-	body := bytes.NewBufferString(`{"lineId":"A","startDate":"2026-05-01","currentDate":"2026-04-30","orderIds":["` + newOrderID + `"],"resolutionOrderIds":["` + movableOrderID + `"],"allowLateCompletion":true,"previewId":"` + previewID + `"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/schedules/jobs", body)
-	req.Header.Set("Authorization", "Bearer "+schedulerToken)
-	res := httptest.NewRecorder()
-	server.ServeHTTP(res, req)
-	if res.Code != http.StatusAccepted {
-		t.Fatalf("solution job failed: %d %s", res.Code, res.Body.String())
-	}
-	var job domain.ScheduleJob
-	if err := json.Unmarshal(res.Body.Bytes(), &job); err != nil {
-		t.Fatalf("decode solution job: %v", err)
-	}
-	if job.Status != domain.JobCompleted {
-		t.Fatalf("expected completed solution job, got %+v", job)
-	}
-}
-
-func assertSplitResolutionOrders(t *testing.T, store *MemoryStore, movableOrderID, splitOrderID string) {
-	t.Helper()
-	if allocationCountForOrder(store.allocations, movableOrderID) != 1 || allocationCountForOrder(store.allocations, splitOrderID) != 1 {
-		t.Fatalf("expected moved order split allocations to use independent IDs, got %+v", store.allocations)
-	}
-	if store.orders[movableOrderID].Quantity != 2000 || store.orders[splitOrderID].Quantity != 500 || store.orders[splitOrderID].SourceOrder != movableOrderID {
-		t.Fatalf("expected independent split order records, source=%+v split=%+v", store.orders[movableOrderID], store.orders[splitOrderID])
-	}
 }
 
 func TestCancelOrdersRemovesScheduledAllocation(t *testing.T) {
@@ -3197,6 +3234,104 @@ func TestSalesCanResubmitOwnPendingOrder(t *testing.T) {
 	}
 }
 
+func TestSalesResubmitPreviewConfirmPersistsModifiedPendingOrder(t *testing.T) {
+	store := NewMemoryStore()
+	server := NewServer("secret", store)
+	salesToken := login(t, server, "sales", "demo")
+	createOrder(t, server, salesToken, "A")
+
+	body := bytes.NewBufferString(`{"lineId":"A","startDate":"2026-05-02","currentDate":"2026-05-01","resubmitOrder":{"orderId":"ORD-0000001","dueDate":"2026-05-06","quantity":1000}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/schedules/preview", body)
+	req.Header.Set("Authorization", "Bearer "+salesToken)
+	res := httptest.NewRecorder()
+	server.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("preview resubmit failed: %d %s", res.Code, res.Body.String())
+	}
+	var preview schedulePreviewResponse
+	if err := json.Unmarshal(res.Body.Bytes(), &preview); err != nil {
+		t.Fatalf("decode preview: %v", err)
+	}
+	if preview.PreviewID == "" || preview.ResubmitOrder == nil || preview.ResubmitOrder.OrderID != "ORD-0000001" {
+		t.Fatalf("expected resubmit preview payload, got %+v", preview)
+	}
+	if got := store.orders["ORD-0000001"]; got.Quantity != 2500 || got.DueDate.Format(dateLayout) == "2026-05-06" {
+		t.Fatalf("preview should not persist order edits before confirmation, got %+v", got)
+	}
+
+	body = bytes.NewBufferString(`{"previewId":"` + preview.PreviewID + `"}`)
+	req = httptest.NewRequest(http.MethodPost, "/api/orders/preview-confirm", body)
+	req.Header.Set("Authorization", "Bearer "+salesToken)
+	res = httptest.NewRecorder()
+	server.ServeHTTP(res, req)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("confirm resubmit preview failed: %d %s", res.Code, res.Body.String())
+	}
+	order := store.orders["ORD-0000001"]
+	if order.Status != domain.StatusPending || order.Quantity != 1000 || order.DueDate.Format(dateLayout) != "2026-05-06" {
+		t.Fatalf("expected confirmed resubmit edits to persist, got %+v", order)
+	}
+}
+
+func TestSalesDraftPreviewRejectsScheduledResolutionOrder(t *testing.T) {
+	store := NewMemoryStore()
+	server := NewServer("secret", store)
+	salesToken := login(t, server, "sales", "demo")
+	movableOrderID := createOrderWithPriorityAndDue(t, server, salesToken, "A", "low", "2026-05-01")
+	for index := 0; index < 3; index++ {
+		createOrderWithPriorityAndDue(t, server, salesToken, "A", "low", "2026-05-01")
+	}
+	schedulerA := login(t, server, "scheduler-a", "demo")
+	createScheduleJob(t, server, schedulerA, "A")
+
+	body := bytes.NewBufferString(`{"lineId":"A","startDate":"2026-05-01","currentDate":"2026-04-30","resolutionOrderIds":["` + movableOrderID + `"],"allowLateCompletion":true,"draftOrder":{"customer":"Draft","lineId":"A","quantity":500,"priority":"high","dueDate":"2026-05-01"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/schedules/preview", body)
+	req.Header.Set("Authorization", "Bearer "+salesToken)
+	res := httptest.NewRecorder()
+	server.ServeHTTP(res, req)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("expected draft resolution order to be rejected, got %d %s", res.Code, res.Body.String())
+	}
+}
+
+func TestSalesResubmitPreviewRejectsScheduledResolutionOrder(t *testing.T) {
+	store := NewMemoryStore()
+	server := NewServer("secret", store)
+	salesToken := login(t, server, "sales", "demo")
+	movableOrderID := createOrderWithPriorityAndDue(t, server, salesToken, "A", "low", "2026-05-01")
+	for index := 0; index < 3; index++ {
+		createOrderWithPriorityAndDue(t, server, salesToken, "A", "low", "2026-05-01")
+	}
+	schedulerA := login(t, server, "scheduler-a", "demo")
+	createScheduleJob(t, server, schedulerA, "A")
+	targetOrderID := createOrderWithPriorityAndDue(t, server, salesToken, "A", "high", "2026-05-02")
+
+	body := bytes.NewBufferString(`{"lineId":"A","startDate":"2026-05-01","currentDate":"2026-04-30","resolutionOrderIds":["` + movableOrderID + `"],"allowLateCompletion":true,"resubmitOrder":{"orderId":"` + targetOrderID + `","dueDate":"2026-05-03","quantity":1000}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/schedules/preview", body)
+	req.Header.Set("Authorization", "Bearer "+salesToken)
+	res := httptest.NewRecorder()
+	server.ServeHTTP(res, req)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("expected resubmit resolution order to be rejected, got %d %s", res.Code, res.Body.String())
+	}
+}
+
+func TestSalesDraftPreviewRejectsPendingResolutionOrder(t *testing.T) {
+	store := NewMemoryStore()
+	server := NewServer("secret", store)
+	salesToken := login(t, server, "sales", "demo")
+	pendingOrderID := createOrderWithPriorityAndDue(t, server, salesToken, "A", "low", "2026-05-01")
+
+	body := bytes.NewBufferString(`{"lineId":"A","startDate":"2026-05-01","currentDate":"2026-04-30","resolutionOrderIds":["` + pendingOrderID + `"],"allowLateCompletion":true,"draftOrder":{"customer":"Draft","lineId":"A","quantity":500,"priority":"high","dueDate":"2026-05-01"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/schedules/preview", body)
+	req.Header.Set("Authorization", "Bearer "+salesToken)
+	res := httptest.NewRecorder()
+	server.ServeHTTP(res, req)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("expected non-movable resolution order to be rejected, got %d %s", res.Code, res.Body.String())
+	}
+}
+
 func TestSalesCanCancelOwnPendingOrder(t *testing.T) {
 	store := NewMemoryStore()
 	server := NewServer("secret", store)
@@ -3444,16 +3579,6 @@ func hasPreviewAllocationOnDate(allocations []previewAllocation, orderID, date s
 		}
 	}
 	return false
-}
-
-func allocationCountForOrder(allocations []domain.ScheduleAllocation, orderID string) int {
-	count := 0
-	for _, allocation := range allocations {
-		if allocation.OrderID == orderID && allocation.Status != domain.StatusCompleted {
-			count++
-		}
-	}
-	return count
 }
 
 func mustAPIDate(t *testing.T, value string) time.Time {

@@ -94,8 +94,9 @@ test("sales status filters map to one matching heading", () => {
   const app = readFileSync(new URL("./app.js", import.meta.url), "utf8");
   assert.match(app, /state\.filters\.status === "待排程"[\s\S]*eyebrow\.textContent = "業務接單";[\s\S]*title\.textContent = "待排程訂單";/);
   assert.match(app, /state\.filters\.status === "需業務處理"[\s\S]*eyebrow\.textContent = "業務處理";[\s\S]*title\.textContent = "需處理訂單";/);
-  assert.match(app, /state\.filters\.status === "需業務處理"[\s\S]*return visibleLineOrders\(\)\.filter\(\(order\) => order\.status === "需業務處理"\);/);
-  assert.match(app, /document\.getElementById\("sales-rejected-panel"\)\.hidden = state\.user\?\.role !== "sales" \|\| state\.filters\.status \|\| rejected\.length === 0;/);
+  assert.match(app, /function visibleOrdersForWorkstation\(\) \{\n\s+return visibleLineOrders\(\);\n\}/);
+  assert.match(app, /document\.getElementById\("sales-rejected-panel"\)\.hidden = true;/);
+  assert.doesNotMatch(app, /state\.filters\.status = "待排程";/);
 });
 
 test("conflict cancel actions route to sales follow-up instead of silent unselect", () => {
@@ -106,8 +107,30 @@ test("conflict cancel actions route to sales follow-up instead of silent unselec
   assert.match(unselectAction, /openRejectDialog\(\[orderId\]\)/);
   assert.doesNotMatch(unselectAction, /retryPreview/);
   assert.match(app, /"defer-sales-draft": handleDeferSalesDraftPreviewAction/);
-  assert.match(app, /JSON\.stringify\(\{ previewId: state\.preview\.previewId, deferDraft: true \}\)/);
+  assert.match(app, /deferReason: reason/);
+  assert.match(app, /有衝突需修改/);
   assert.match(app, /取消選取目前訂單/);
+});
+
+test("sales resubmit routes through schedule preview before confirmation", () => {
+  const app = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+  const resubmitStart = app.indexOf('if (action === "resubmit-order")');
+  const resubmitEnd = app.indexOf('if (action === "cancel-order")', resubmitStart);
+  const resubmitAction = app.slice(resubmitStart, resubmitEnd);
+  assert.match(resubmitAction, /await createPreview\(\{[\s\S]*resubmitOrder: \{ orderId, dueDate, quantity \},[\s\S]*\}, "sales-resubmit"\)/);
+  assert.doesNotMatch(resubmitAction, /\/api\/orders\/resubmit/);
+  assert.match(app, /\["sales-draft", "sales-resubmit"\]\.includes\(state\.preview\?\.kind\)/);
+  assert.match(app, /確認重新送出/);
+});
+
+test("calendar order chips show due dates and focused sales orders are highlighted", () => {
+  const app = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+  const styles = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
+  assert.match(app, /交期 \$\{dateOnly\(allocation\.dueDate \?\? allocation\.date\)\}/);
+  assert.match(app, /function isFocusedCalendarAllocation\(allocation\)/);
+  assert.match(app, /focused-order-preview/);
+  assert.match(styles, /\.calendar-item\.focused-order-preview\s*\{[\s\S]*border:\s+2px solid #0f766e;/);
+  assert.doesNotMatch(styles.slice(styles.indexOf(".calendar-item.focused-order-preview"), styles.indexOf(".calendar-item.conflict-preview")), /background:/);
 });
 
 test("order status badges stay on one line in scheduler and sales cards", () => {
@@ -134,10 +157,14 @@ test("sales draft preview calendar can switch pending draft and scheduled alloca
   assert.match(app, /previewCalendarMode:\s+"all"/);
   assert.match(app, /state\.previewCalendarMode = "all"/);
   assert.match(app, /document\.getElementById\("preview-calendar-mode"\)\.addEventListener\("click"/);
-  assert.match(app, /const isSalesDraft = state\.preview\?\.kind === "sales-draft"/);
-  assert.match(app, /function previewCalendarAllocationsForMode\(mode, pendingAllocations\)/);
-  assert.match(app, /return \[\.\.\.state\.calendarAllocations, \.\.\.pendingAllocations\]/);
-  assert.match(app, /const previewAllocations = conflicts\.length > 0 && !isSalesDraft \? \[\] : allocations;/);
+  assert.match(app, /const isSalesPreview = isSalesOrderPreview\(\)/);
+  assert.match(app, /function isSalesOrderPreview\(\)/);
+  assert.match(app, /function previewCalendarAllocationsForMode\(mode, previewAllocations, pendingAllocations, movedFromAllocations\)/);
+  assert.match(app, /mergePreviewCalendarAllocations\(overlayAllocations, state\.calendarAllocations\)/);
+  assert.doesNotMatch(app, /data-conflict-resolution-order/);
+  assert.doesNotMatch(app, /允許移動/);
+  assert.match(app, /\.\.\.movedFromAllocations/);
+  assert.match(app, /const previewAllocations = conflicts\.length > 0 && !isSalesPreview \? \[\] : allocations;/);
   assert.match(app, /markConflictedPreviewAllocations\(markMovedPreviewAllocations\(previewAllocations\), conflictedOrderIds\)/);
   assert.match(app, /function markConflictedPreviewAllocations\(previewAllocations, conflictedOrderIds\)/);
   assert.match(app, /function salesDraftPendingPreviewAllocations\(markedPreviewAllocations, conflicts = \[\]\)/);
@@ -486,7 +513,7 @@ test("sortCalendarAllocations orders by priority due date and older created time
   );
 });
 
-test("mergePreviewCalendarAllocations replaces touched orders with preview entries", () => {
+test("mergePreviewCalendarAllocations replaces previewed orders with preview entries", () => {
   const calendar = [
     { orderId: "ORD-0000001", date: "2026-05-15", quantity: 2500, status: "已排程" },
     { orderId: "ORD-0000002", date: "2026-05-15", quantity: 2500, status: "已排程" },
@@ -495,10 +522,10 @@ test("mergePreviewCalendarAllocations replaces touched orders with preview entri
     { orderId: "ORD-0000001", date: "2026-05-16", quantity: 2500 },
     { orderId: "ORD-0000003", date: "2026-05-15", quantity: 2500 },
   ];
-  const merged = mergePreviewCalendarAllocations(preview, calendar, ["ORD-0000002"]);
+  const merged = mergePreviewCalendarAllocations(preview, calendar);
 
   assert.equal(merged.some((item) => item.orderId === "ORD-0000001" && item.date === "2026-05-15"), false);
-  assert.equal(merged.some((item) => item.orderId === "ORD-0000002"), false);
+  assert.equal(merged.some((item) => item.orderId === "ORD-0000002"), true);
   assert.equal(merged.filter((item) => item.preview).length, 2);
 });
 

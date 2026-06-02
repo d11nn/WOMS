@@ -1041,7 +1041,7 @@ test("scheduler workspace renders orders calendar history and previews selected 
     assert.equal(document.getElementById("orders-body").children.length, 3);
     assert.equal(document.getElementById("calendar-grid").children.length, 42);
     assert.match(renderedMarkup(document.getElementById("calendar-grid")), /ORD-SCHEDULED/);
-    assert.match(renderedMarkup(document.getElementById("calendar-grid")), new RegExp(`Beta · 1,500 片 · 交期 ${dateKeyAfter(8).replaceAll("-", "/")}`));
+    assert.match(renderedMarkup(document.getElementById("calendar-grid")), new RegExp(`Beta · 1,500 片 · 交期 ${dateKeyAfter(8).slice(5).replaceAll("-", "/")}`));
     assert.match(renderedMarkup(document.getElementById("calendar-grid")), /低 · 已排程/);
     assert.match(renderedMarkup(document.getElementById("schedule-history-list")), /排程成功/);
     assert.equal(document.getElementById("selected-count").textContent, "已選取 0 張訂單");

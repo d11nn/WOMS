@@ -1788,7 +1788,7 @@ function calendarDueDateLabel(value) {
   if (!value) {
     return "";
   }
-  return dateOnly(value).replaceAll("-", "/");
+  return dateOnly(value).slice(5).replaceAll("-", "/");
 }
 
 function isNewChildScheduledAllocation(allocation) {

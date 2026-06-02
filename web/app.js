@@ -514,7 +514,6 @@ function renderWorkspace() {
   renderStatusSidebar();
   renderOrdersHeading();
   renderOrders();
-  renderSalesRejectedOrders();
   renderCalendar();
   renderPreviewSummary();
   renderScheduleHistory();
@@ -560,7 +559,7 @@ async function handleDeferSalesDraftPreviewAction() {
   focusCreatedOrder(order);
   closePreviewPage();
   document.getElementById("order-form").reset();
-  showMessage("已移到需業務處理", "目前訂單已取消選取，Sales 可在需處理訂單中重新確認交期或數量。");
+  showMessage("已移到需業務處理", "目前訂單已取消選取，Sales 可在需業務處理狀態清單中重新確認交期或數量。");
   await refreshWorkspace();
 }
 
@@ -609,7 +608,6 @@ async function loadOrders() {
   renderFilters();
   renderStatusSidebar();
   renderOrders();
-  renderSalesRejectedOrders();
 }
 
 async function loadUsers() {
@@ -748,7 +746,6 @@ function renderAuthState() {
   document.getElementById("monitor-link").hidden = state.user?.role !== "admin";
   document.getElementById("admin-panel").hidden = state.user?.role !== "admin";
   document.getElementById("order-form").hidden = state.user?.role !== "sales";
-  document.getElementById("sales-rejected-panel").hidden = state.user?.role !== "sales";
   document.getElementById("batch-bar").hidden = state.user?.role !== "scheduler";
   document.querySelectorAll(".scheduler-only").forEach((node) => {
     node.hidden = state.user?.role !== "scheduler";
@@ -919,7 +916,7 @@ function renderOrdersHeading() {
   }
   heading.hidden = false;
   eyebrow.textContent = "訂單任務";
-  title.textContent = "訂單";
+  title.textContent = state.filters.status ? `${state.filters.status}訂單` : "訂單";
 }
 
 function renderOrderCard(order) {
@@ -973,25 +970,6 @@ function renderOrderCard(order) {
     attachMouseScheduleDrag(card, order.id);
   }
   return card;
-}
-
-function renderSalesRejectedOrders() {
-  const list = document.getElementById("sales-rejected-list");
-  if (!list) {
-    return;
-  }
-  const rejected = state.user?.role === "sales" ? state.orders.filter((order) => order.status === "需業務處理" && order.createdBy === state.user.id) : [];
-  list.innerHTML = "";
-  for (const order of rejected) {
-    list.appendChild(renderOrderCard(order));
-  }
-  list.querySelectorAll("[data-order-action]").forEach((button) => {
-    button.addEventListener("click", (event) => {
-      event.stopPropagation();
-      handleOrderAction(button.dataset.orderAction, button.dataset.orderId);
-    });
-  });
-  document.getElementById("sales-rejected-panel").hidden = state.user?.role !== "sales" || state.filters.status || rejected.length === 0;
 }
 
 function draggedOrderIds(orderId) {

@@ -3487,6 +3487,49 @@ test("role and line configuration covers fallback line and scheduler fixed-line 
   }
 });
 
+test("sales order status filters use the single orders heading and list", async () => {
+  const document = buildDomFromIndex();
+  const orders = [
+    { id: "ORD-PENDING", customer: "ACME", lineId: "A", quantity: 2500, priority: "high", status: "待排程", dueDate: dateKeyAfter(6), createdBy: "sales-1" },
+    { id: "ORD-REJECTED", customer: "Beta", lineId: "A", quantity: 1500, priority: "low", status: "需業務處理", dueDate: dateKeyAfter(8), createdBy: "sales-1" },
+    { id: "ORD-SCHEDULED", customer: "Gamma", lineId: "A", quantity: 900, priority: "low", status: "已排程", dueDate: dateKeyAfter(9), createdBy: "sales-1" },
+  ];
+  const calls = [];
+  const restoreGlobals = installBrowserGlobalsWithFetch(
+    document,
+    createAppCoverageFetch(calls, { role: "sales", userId: "sales-1", orders, allocations: [] }),
+    storedSession("sales", { id: "sales-1" }),
+  );
+  try {
+    await import(appModuleUrl("sales-single-order-heading"));
+    await settleApp();
+
+    assert.equal(document.getElementById("sales-rejected-panel"), null);
+    assert.equal(document.getElementById("sales-rejected-list"), null);
+    assert.equal(document.getElementById("orders-heading-eyebrow").textContent, "業務接單");
+    assert.equal(document.getElementById("orders-heading-title").textContent, "待排程訂單");
+    assert.deepEqual(document.getElementById("orders-body").children.map((card) => card.dataset.orderId), ["ORD-PENDING"]);
+
+    const rejectedButton = document.getElementById("status-sidebar").children.find((button) => button.innerHTML.includes("需業務處理"));
+    await rejectedButton.dispatchEvent({ type: "click" });
+    await settleApp();
+
+    assert.equal(document.getElementById("orders-heading-eyebrow").textContent, "業務處理");
+    assert.equal(document.getElementById("orders-heading-title").textContent, "需處理訂單");
+    assert.deepEqual(document.getElementById("orders-body").children.map((card) => card.dataset.orderId), ["ORD-REJECTED"]);
+
+    const scheduledButton = document.getElementById("status-sidebar").children.find((button) => button.innerHTML.includes("已排程"));
+    await scheduledButton.dispatchEvent({ type: "click" });
+    await settleApp();
+
+    assert.equal(document.getElementById("orders-heading-eyebrow").textContent, "訂單任務");
+    assert.equal(document.getElementById("orders-heading-title").textContent, "已排程訂單");
+    assert.deepEqual(document.getElementById("orders-body").children.map((card) => card.dataset.orderId), ["ORD-SCHEDULED"]);
+  } finally {
+    restoreGlobals();
+  }
+});
+
 test("dialog fallback branches open and close without native dialog methods", async () => {
   const document = buildDomFromIndex();
   for (const id of ["message-dialog", "schedule-preview-dialog", "production-dialog", "reject-dialog"]) {

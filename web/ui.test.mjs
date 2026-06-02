@@ -92,10 +92,13 @@ test("sales pending order edits are isolated from scheduler pending cards", () =
 
 test("sales status filters map to one matching heading", () => {
   const app = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+  const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
   assert.match(app, /state\.filters\.status === "待排程"[\s\S]*eyebrow\.textContent = "業務接單";[\s\S]*title\.textContent = "待排程訂單";/);
   assert.match(app, /state\.filters\.status === "需業務處理"[\s\S]*eyebrow\.textContent = "業務處理";[\s\S]*title\.textContent = "需處理訂單";/);
+  assert.match(app, /title\.textContent = state\.filters\.status \? `\$\{state\.filters\.status\}訂單` : "訂單";/);
   assert.match(app, /state\.filters\.status === "需業務處理"[\s\S]*return visibleLineOrders\(\)\.filter\(\(order\) => order\.status === "需業務處理"\);/);
-  assert.match(app, /document\.getElementById\("sales-rejected-panel"\)\.hidden = state\.user\?\.role !== "sales" \|\| state\.filters\.status \|\| rejected\.length === 0;/);
+  assert.doesNotMatch(html, /sales-rejected-panel|sales-rejected-list/);
+  assert.doesNotMatch(app, /sales-rejected-panel|sales-rejected-list|renderSalesRejectedOrders/);
 });
 
 test("conflict cancel actions route to sales follow-up instead of silent unselect", () => {

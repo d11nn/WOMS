@@ -24,13 +24,13 @@ INSERT INTO orders (
     updated_at
 )
 VALUES
-    ('ORD-DEMO-1', 'TSMC', 'B', 2500, 'high', '待排程', '2026-06-04', 'user-sales', NOW(), NOW()),
-    ('ORD-DEMO-2', 'ASE', 'A', 2500, 'low', '待排程', '2026-06-05', 'user-sales', NOW(), NOW()),
-    ('ORD-DEMO-3', 'TSMC', 'A', 2500, 'low', '待排程', '2026-06-04', 'user-sales', NOW(), NOW()),
-    ('ORD-DEMO-4', 'TSMC', 'A', 2500, 'low', '待排程', '2026-06-04', 'user-sales', NOW(), NOW()),
-    ('ORD-DEMO-5', 'TSMC', 'A', 2500, 'low', '待排程', '2026-06-04', 'user-sales', NOW(), NOW()),
-    ('ORD-DEMO-6', 'TSMC', 'A', 2500, 'low', '待排程', '2026-06-04', 'user-sales', NOW(), NOW()),
-    ('ORD-DEMO-7', 'ASE', 'A', 2500, 'low', '待排程', '2026-06-05', 'user-sales', NOW(), NOW()),
-    ('ORD-DEMO-8', 'ASE', 'A', 2500, 'low', '待排程', '2026-06-05', 'user-sales', NOW(), NOW()),
+    ('ORD-DEMO-1', 'TSMC', 'A', 2500, 'high', '待排程', '2026-06-03', 'user-sales', NOW(), NOW()), 
+    ('ORD-DEMO-2', 'ASE', 'A', 2500, 'low', '待排程', '2026-06-05', 'user-sales', NOW(), NOW()),   
+    ('ORD-DEMO-3', 'TSMC', 'A', 2500, 'low', '待排程', '2026-06-04', 'user-sales', NOW(), NOW()),  
+    ('ORD-DEMO-4', 'TSMC', 'A', 2500, 'low', '待排程', '2026-06-04', 'user-sales', NOW(), NOW()),  
+    ('ORD-DEMO-5', 'TSMC', 'A', 2500, 'low', '待排程', '2026-06-04', 'user-sales', NOW(), NOW()),  
+    ('ORD-DEMO-6', 'TSMC', 'A', 2500, 'low', '待排程', '2026-06-04', 'user-sales', NOW(), NOW()),  
+    ('ORD-DEMO-7', 'ASE', 'A', 2500, 'low', '待排程', '2026-06-05', 'user-sales', NOW(), NOW()),   
+    ('ORD-DEMO-8', 'ASE', 'A', 2500, 'low', '待排程', '2026-06-05', 'user-sales', NOW(), NOW()),   
     ('ORD-DEMO-9', 'ASE', 'A', 2500, 'low', '待排程', '2026-06-05', 'user-sales', NOW(), NOW())
 ON CONFLICT (id) DO NOTHING;

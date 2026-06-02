@@ -37,7 +37,7 @@ function mergeLcovLine(record, line) {
 
   if (line.startsWith("BRDA:")) {
     const parts = line.slice(5).split(",");
-    const key = parts.slice(0, 3).join(",");
+    const key = [parts[0], 0, parts[2]].join(",");
     const hits = parts[3] === "-" ? 0 : Number(parts[3]);
     addNumber(record.branches, key, hits);
     return;

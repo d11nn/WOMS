@@ -3275,3 +3275,387 @@ test("targeted app.js error and control branches raise runtime coverage", async 
     restoreGlobals();
   }
 });
+
+async function runSchedulerJobPollingCase({ label, jobStatus, polledStatuses = [], expectedTitle, expectedBodyPattern }) {
+  const document = buildDomFromIndex();
+  const calls = [];
+  const fetchImpl = async (path, options = {}) => {
+    calls.push({ path, options });
+    if (path === "/api/lines") {
+      return jsonResponse({
+        lines: [{ id: "A", name: "Line A", capacityPerDay: 10000, timezone: "Asia/Taipei" }],
+      });
+    }
+    if (path === "/api/orders") {
+      return jsonResponse({
+        orders: [
+          { id: "ORD-JOB", customer: "ACME", lineId: "A", quantity: 1200, priority: "high", status: "待排程", dueDate: dateKeyAfter(6), createdBy: "sales-1" },
+        ],
+      });
+    }
+    if (String(path).startsWith("/api/schedules/calendar?")) {
+      return jsonResponse({ allocations: [], pendingAllocations: [] });
+    }
+    if (String(path).startsWith("/api/schedules/history?")) {
+      return jsonResponse({ history: [] });
+    }
+    if (path === "/api/schedules/preview") {
+      return jsonResponse({
+        previewId: `PREVIEW-${label}`,
+        currentDate: dateKeyAfter(0),
+        allocations: [
+          { orderId: "ORD-JOB", customer: "ACME", lineId: "A", date: dateKeyAfter(2), quantity: 1200, priority: "high", status: "已排程" },
+        ],
+        conflicts: [],
+      });
+    }
+    if (path === "/api/schedules/jobs") {
+      return jsonResponse({ id: `JOB-${label}`, status: jobStatus });
+    }
+    if (String(path).startsWith("/api/schedules/jobs/")) {
+      const next = polledStatuses.shift() ?? "running";
+      return jsonResponse({
+        id: `JOB-${label}`,
+        status: next,
+        message: next === "cancelled" ? "cancelled by worker" : undefined,
+      });
+    }
+    throw new Error(`unexpected fetch ${path}`);
+  };
+  const restoreGlobals = installBrowserGlobalsWithFetch(
+    document,
+    fetchImpl,
+    storedSession("scheduler", { lineId: "A" }),
+  );
+  try {
+    await import(appModuleUrl(`scheduler-job-${label}`));
+    await settleApp();
+
+    const card = document.getElementById("orders-body").children.find((item) => item.dataset.orderId === "ORD-JOB");
+    await card.dispatchEvent({ type: "click", target: card });
+    await document.getElementById("preview-selected").dispatchEvent({ type: "click" });
+    await settleApp();
+    await document.getElementById("confirm-schedule-job").dispatchEvent({ type: "click" });
+    await settleApp();
+
+    assert.equal(document.getElementById("message-title").textContent, expectedTitle);
+    assert.match(document.getElementById("message-body").textContent, expectedBodyPattern);
+    return calls;
+  } finally {
+    restoreGlobals();
+  }
+}
+
+test("queued scheduler jobs cover completed failed cancelled and timeout polling outcomes", async () => {
+  const completedCalls = await runSchedulerJobPollingCase({
+    label: "completed",
+    jobStatus: "queued",
+    polledStatuses: ["running", "completed"],
+    expectedTitle: "排程完成",
+    expectedBodyPattern: /JOB-completed 已完成/,
+  });
+  assert.equal(completedCalls.filter((call) => String(call.path).startsWith("/api/schedules/jobs/JOB-completed")).length, 2);
+
+  await runSchedulerJobPollingCase({
+    label: "cancelled",
+    jobStatus: "running",
+    polledStatuses: ["cancelled"],
+    expectedTitle: "排程未完成",
+    expectedBodyPattern: /cancelled by worker/,
+  });
+
+  await runSchedulerJobPollingCase({
+    label: "timeout",
+    jobStatus: "queued",
+    polledStatuses: Array.from({ length: 20 }, () => "running"),
+    expectedTitle: "排程仍在背景執行",
+    expectedBodyPattern: /尚未完成/,
+  });
+});
+
+test("login and startup request failures cover fallback auth messages", async () => {
+  const loginDocument = buildDomFromIndex();
+  const loginRestore = installBrowserGlobalsWithFetch(loginDocument, async (path) => {
+    if (path === "/api/auth/login") {
+      return {
+        ok: false,
+        status: 500,
+        json: async () => {
+          throw new Error("not json");
+        },
+      };
+    }
+    throw new Error(`unexpected fetch ${path}`);
+  });
+  try {
+    await import(appModuleUrl("login-non-json-fallback"));
+    await settleApp();
+    await loginDocument.getElementById("login-form").dispatchEvent({ type: "submit" });
+    await settleApp();
+
+    assert.equal(loginDocument.getElementById("message-title").textContent, "登入失敗");
+    assert.equal(loginDocument.getElementById("message-body").textContent, "請求失敗，請稍後再試。");
+    assert.equal(localStorage.getItem("woms.token"), null);
+  } finally {
+    loginRestore();
+  }
+
+  const startupDocument = buildDomFromIndex();
+  const startupRestore = installBrowserGlobalsWithFetch(
+    startupDocument,
+    async (path) => {
+      if (path === "/api/lines") {
+        return jsonResponse({ error: "server unavailable" }, 503);
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+    storedSession("admin"),
+  );
+  try {
+    await import(appModuleUrl("startup-non-401-failure"));
+    await settleApp();
+
+    assert.equal(startupDocument.getElementById("message-title").textContent, "工作區重新整理失敗");
+    assert.equal(startupDocument.getElementById("message-body").textContent, "server unavailable");
+    assert.equal(startupDocument.body.dataset.role, "admin");
+  } finally {
+    startupRestore();
+  }
+});
+
+test("role and line configuration covers fallback line and scheduler fixed-line branches", async () => {
+  const schedulerDocument = buildDomFromIndex();
+  const schedulerCalls = [];
+  const schedulerRestore = installBrowserGlobalsWithFetch(
+    schedulerDocument,
+    async (path, options = {}) => {
+      schedulerCalls.push({ path, options });
+      if (path === "/api/lines") {
+        return jsonResponse({ lines: [] });
+      }
+      if (path === "/api/orders") {
+        return jsonResponse({
+          orders: [
+            { id: "ORD-D", customer: "London", lineId: "D", quantity: 700, priority: "low", status: "待排程", dueDate: dateKeyAfter(7), createdBy: "sales-1" },
+          ],
+        });
+      }
+      if (String(path).startsWith("/api/schedules/calendar?")) {
+        return jsonResponse({ allocations: [], pendingAllocations: [] });
+      }
+      if (String(path).startsWith("/api/schedules/history?")) {
+        return jsonResponse({ history: [] });
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+    {
+      ...storedSession("scheduler", { lineId: "D" }),
+      "woms.selectedLine": "Z",
+    },
+  );
+  try {
+    await import(appModuleUrl("scheduler-fallback-line"));
+    await settleApp();
+
+    assert.equal(schedulerDocument.getElementById("active-line-select").disabled, true);
+    assert.equal(schedulerDocument.getElementById("active-line-select").value, "D");
+    assert.equal(schedulerDocument.querySelector('#schedule-form input[name="lineId"]').value, "D");
+    assert.equal(schedulerCalls.some((call) => String(call.path).includes("lineId=D")), true);
+  } finally {
+    schedulerRestore();
+  }
+
+  const salesDocument = buildDomFromIndex();
+  const salesRestore = installBrowserGlobalsWithFetch(
+    salesDocument,
+    createAppCoverageFetch([], { role: "sales", userId: "sales-1" }),
+    {
+      ...storedSession("sales", { id: "sales-1" }),
+      "woms.selectedLine": "Z",
+    },
+  );
+  try {
+    await import(appModuleUrl("sales-default-filter-line"));
+    await settleApp();
+
+    assert.equal(salesDocument.getElementById("active-line-select").disabled, false);
+    assert.equal(salesDocument.getElementById("active-line-select").value, "A");
+    assert.equal(salesDocument.getElementById("orders-heading-eyebrow").textContent, "業務接單");
+    assert.equal(salesDocument.getElementById("orders-heading-title").textContent, "待排程訂單");
+  } finally {
+    salesRestore();
+  }
+});
+
+test("dialog fallback branches open and close without native dialog methods", async () => {
+  const document = buildDomFromIndex();
+  for (const id of ["message-dialog", "schedule-preview-dialog", "production-dialog", "reject-dialog"]) {
+    const dialog = document.getElementById(id);
+    dialog.showModal = undefined;
+    dialog.close = undefined;
+  }
+  const fetchImpl = async (path, options = {}) => {
+    if (path === "/api/lines") {
+      return jsonResponse({ lines: [{ id: "A", name: "Line A", capacityPerDay: 10000, timezone: "Asia/Taipei" }] });
+    }
+    if (path === "/api/orders") {
+      if (options.method === "DELETE") {
+        return jsonResponse({ cancelledOrderIds: JSON.parse(options.body).orderIds });
+      }
+      return jsonResponse({
+        orders: [
+          { id: "ORD-PENDING", customer: "ACME", lineId: "A", quantity: 2500, priority: "high", status: "待排程", dueDate: dateKeyAfter(6), createdBy: "sales-1" },
+          { id: "ORD-PROD", customer: "Gamma", lineId: "A", quantity: 900, priority: "low", status: "生產中", dueDate: dateKeyAfter(9), createdBy: "sales-1" },
+        ],
+      });
+    }
+    if (String(path).startsWith("/api/schedules/calendar?")) {
+      return jsonResponse({
+        allocations: [
+          { orderId: "ORD-PROD", customer: "Gamma", lineId: "A", date: dateKeyAfter(3), quantity: 900, priority: "low", status: "生產中" },
+        ],
+        pendingAllocations: [],
+      });
+    }
+    if (String(path).startsWith("/api/schedules/history?")) {
+      return jsonResponse({ history: [] });
+    }
+    if (path === "/api/schedules/preview") {
+      return jsonResponse({
+        previewId: "PREVIEW-FALLBACK",
+        currentDate: dateKeyAfter(0),
+        allocations: [],
+        conflicts: [],
+      });
+    }
+    throw new Error(`unexpected fetch ${path}`);
+  };
+  const restoreGlobals = installBrowserGlobalsWithFetch(
+    document,
+    fetchImpl,
+    storedSession("scheduler", { lineId: "A" }),
+  );
+  try {
+    await import(appModuleUrl("dialog-fallbacks"));
+    await settleApp();
+
+    const card = document.getElementById("orders-body").children.find((item) => item.dataset.orderId === "ORD-PENDING");
+    await card.dispatchEvent({ type: "click", target: card });
+    await document.getElementById("preview-selected").dispatchEvent({ type: "click" });
+    await settleApp();
+    assert.equal(document.getElementById("schedule-preview-dialog").getAttribute("open"), "");
+
+    await document.getElementById("close-preview-page").dispatchEvent({ type: "click" });
+    await settleApp();
+    assert.equal(document.getElementById("schedule-preview-dialog").getAttribute("open"), null);
+
+    await document.getElementById("reject-selected").dispatchEvent({ type: "click" });
+    assert.equal(document.getElementById("reject-dialog").getAttribute("open"), "");
+
+    const productionButton = document.querySelector('button[data-order-action="confirm-production"]');
+    await productionButton.dispatchEvent({ type: "click" });
+    await settleApp();
+    assert.equal(document.getElementById("production-dialog").getAttribute("open"), "");
+    await document.getElementById("cancel-production-report").dispatchEvent({ type: "click" });
+    assert.equal(document.getElementById("production-dialog").getAttribute("open"), null);
+  } finally {
+    restoreGlobals();
+  }
+});
+
+test("calendar order clicks cover authorization missing-order and production action branches", async () => {
+  const salesDocument = buildDomFromIndex();
+  const salesRestore = installBrowserGlobalsWithFetch(
+    salesDocument,
+    async (path) => {
+      if (path === "/api/lines") {
+        return jsonResponse({ lines: [{ id: "A", name: "Line A", capacityPerDay: 10000, timezone: "Asia/Taipei" }] });
+      }
+      if (path === "/api/orders") {
+        return jsonResponse({ orders: [] });
+      }
+      if (String(path).startsWith("/api/schedules/calendar?")) {
+        return jsonResponse({
+          allocations: [
+            { orderId: "ORD-NOT-MINE", customer: "Beta", lineId: "A", date: dateKeyAfter(2), quantity: 300, priority: "low", status: "已排程" },
+          ],
+          pendingAllocations: [],
+        });
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+    storedSession("sales", { id: "sales-1" }),
+  );
+  try {
+    await import(appModuleUrl("calendar-sales-auth"));
+    await settleApp();
+
+    const calendarItem = salesDocument.querySelector("[data-calendar-order-id]");
+    assert.equal(calendarItem, null);
+    assert.match(renderedMarkup(salesDocument.getElementById("calendar-grid")), /ORD-NOT-MINE/);
+  } finally {
+    salesRestore();
+  }
+
+  const schedulerDocument = buildDomFromIndex();
+  const schedulerCalls = [];
+  const schedulerRestore = installBrowserGlobalsWithFetch(
+    schedulerDocument,
+    async (path, options = {}) => {
+      schedulerCalls.push({ path, options });
+      if (path === "/api/lines") {
+        return jsonResponse({ lines: [{ id: "A", name: "Line A", capacityPerDay: 10000, timezone: "Asia/Taipei" }] });
+      }
+      if (path === "/api/orders") {
+        return jsonResponse({
+          orders: [
+            { id: "ORD-SCHEDULED", customer: "Beta", lineId: "A", quantity: 300, priority: "low", status: "已排程", dueDate: dateKeyAfter(5), createdBy: "sales-1" },
+            { id: "ORD-PROD", customer: "Gamma", lineId: "A", quantity: 400, priority: "low", status: "生產中", dueDate: dateKeyAfter(6), createdBy: "sales-1" },
+          ],
+        });
+      }
+      if (path === "/api/production/start") {
+        return jsonResponse({ id: JSON.parse(options.body).orderId });
+      }
+      if (String(path).startsWith("/api/schedules/calendar?")) {
+        return jsonResponse({
+          allocations: [
+            { orderId: "ORD-SCHEDULED", customer: "Beta", lineId: "A", date: dateKeyAfter(2), quantity: 300, priority: "low", status: "已排程" },
+            { orderId: "ORD-PROD", customer: "Gamma", lineId: "A", date: dateKeyAfter(3), quantity: 400, priority: "low", status: "生產中" },
+            { orderId: "ORD-MISSING", customer: "Missing", lineId: "A", date: dateKeyAfter(4), quantity: 500, priority: "low", status: "已排程" },
+          ],
+          pendingAllocations: [],
+        });
+      }
+      if (String(path).startsWith("/api/schedules/history?")) {
+        return jsonResponse({ history: [] });
+      }
+      throw new Error(`unexpected fetch ${path}`);
+    },
+    storedSession("scheduler", { lineId: "A" }),
+  );
+  try {
+    await import(appModuleUrl("calendar-scheduler-actions"));
+    await settleApp();
+
+    const scheduled = Array.from(schedulerDocument.querySelectorAll("[data-calendar-order-id]"))
+      .find((button) => button.dataset.calendarOrderId === "ORD-SCHEDULED");
+    await scheduled.dispatchEvent({ type: "click" });
+    await settleApp();
+    assert.equal(schedulerCalls.some((call) => call.path === "/api/production/start"), true);
+    assert.equal(schedulerDocument.getElementById("message-title").textContent, "已開始生產");
+
+    const producing = Array.from(schedulerDocument.querySelectorAll("[data-calendar-order-id]"))
+      .find((button) => button.dataset.calendarOrderId === "ORD-PROD");
+    await producing.dispatchEvent({ type: "click" });
+    await settleApp();
+    assert.equal(schedulerDocument.getElementById("production-dialog").open, true);
+
+    const missing = Array.from(schedulerDocument.querySelectorAll("[data-calendar-order-id]"))
+      .find((button) => button.dataset.calendarOrderId === "ORD-MISSING");
+    await missing.dispatchEvent({ type: "click" });
+    assert.equal(schedulerDocument.getElementById("message-title").textContent, "找不到訂單");
+  } finally {
+    schedulerRestore();
+  }
+});

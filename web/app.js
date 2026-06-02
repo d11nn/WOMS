@@ -40,6 +40,14 @@ const hpaJobStatusLabels = {
   cancelled: "已取消",
 };
 
+class RequestError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.name = "RequestError";
+    this.status = status;
+  }
+}
+
 const state = {
   token: localStorage.getItem("woms.token") ?? "",
   user: JSON.parse(localStorage.getItem("woms.user") ?? "null"),
@@ -2323,14 +2331,6 @@ async function request(path, options = {}, needsAuth = true) {
     throw new RequestError(payload.error ?? "請求失敗，請稍後再試。", response.status);
   }
   return payload;
-}
-
-class RequestError extends Error {
-  constructor(message, status) {
-    super(message);
-    this.name = "RequestError";
-    this.status = status;
-  }
 }
 
 function saveSession(token, user) {

@@ -170,7 +170,7 @@ SONAR_TOKEN=... npm run sonar
 
 The scanner runs through `sonarsource/sonar-scanner-cli:latest`, reads `sonar-project.properties`, and uses the coverage files produced by the existing test scripts: `coverage.out` for Go and `coverage/lcov.info` for the web tests. The default `SONAR_HOST_URL` is `http://host.docker.internal:9000` because the scanner runs inside a container. Override `SONAR_HOST_URL`, `SONAR_SCANNER_IMAGE`, or set `SONAR_DOCKER_NETWORK` when SonarQube runs on a custom Docker network.
 
-The web coverage script post-processes `coverage/lcov.info` to merge duplicate `SF:` records for the same source file. This keeps repeated dynamic imports in the Node test runner from under-reporting files such as `web/app.js` in SonarQube.
+The web coverage script post-processes `coverage/lcov.info` to merge duplicate `SF:` records for the same source file and normalize repeated branch records produced by dynamic imports. This keeps repeated Node test runner imports from under-reporting line coverage or inflating uncovered conditions for files such as `web/app.js` in SonarQube.
 
 Run the API:
 

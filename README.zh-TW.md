@@ -170,7 +170,7 @@ SONAR_TOKEN=... npm run sonar
 
 scanner 會透過 `sonarsource/sonar-scanner-cli:latest` 執行、讀取 `sonar-project.properties`，並使用既有測試腳本產生的 coverage 檔案：Go 的 `coverage.out`，以及 web 測試的 `coverage/lcov.info`。因為 scanner 在 container 內執行，預設 `SONAR_HOST_URL` 是 `http://host.docker.internal:9000`。若 SonarQube 跑在自訂 Docker network，可覆寫 `SONAR_HOST_URL`、`SONAR_SCANNER_IMAGE`，或設定 `SONAR_DOCKER_NETWORK`。
 
-web coverage script 會後處理 `coverage/lcov.info`，把同一個 source file 的重複 `SF:` records 合併。這可以避免 Node test runner 重複 dynamic import 時，SonarQube 低估 `web/app.js` 這類檔案的 coverage。
+web coverage script 會後處理 `coverage/lcov.info`，把同一個 source file 的重複 `SF:` records 合併，並正規化 dynamic import 產生的重複 branch records。這可以避免 Node test runner 重複 import 時，SonarQube 低估 `web/app.js` 這類檔案的 line coverage，或膨脹 uncovered conditions。
 
 執行 API：
 

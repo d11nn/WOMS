@@ -1004,6 +1004,7 @@ function renderLineOptions() {
 }
 
 function renderOrders() {
+  renderOrderListHeading();
   const visibleOrders =
     state.user?.role === "sales"
       ? visibleLineOrders().filter((order) => order.status !== "需業務處理")
@@ -1012,6 +1013,7 @@ function renderOrders() {
     exactFilterOrders(visibleOrders, state.filters),
   );
   const body = document.getElementById("orders-body");
+  body.hidden = isSalesRejectedStatusSelected();
   body.innerHTML = "";
   for (const order of filtered) {
     body.appendChild(renderOrderCard(order));
@@ -1023,6 +1025,18 @@ function renderOrders() {
     });
   });
   updateSelectedCount();
+}
+
+function renderOrderListHeading() {
+  const title = document.getElementById("order-list-title");
+  if (!title) {
+    return;
+  }
+  title.textContent = orderListTitle(state.filters.status);
+}
+
+function orderListTitle(status) {
+  return status ? `${status}訂單` : "所有訂單";
 }
 
 function renderOrderCard(order) {
@@ -1089,10 +1103,16 @@ function renderSalesRejectedOrders() {
     return;
   }
   const rejected =
-    state.user?.role === "sales"
-      ? state.orders.filter(
-          (order) =>
-            order.status === "需業務處理" && order.createdBy === state.user.id,
+    state.user?.role === "sales" && isSalesRejectedStatusSelected()
+      ? sortOrdersForWorkstation(
+          exactFilterOrders(
+            visibleLineOrders().filter(
+              (order) =>
+                order.status === "需業務處理" &&
+                order.createdBy === state.user.id,
+            ),
+            state.filters,
+          ),
         )
       : [];
   list.innerHTML = "";
@@ -1107,6 +1127,10 @@ function renderSalesRejectedOrders() {
   });
   document.getElementById("sales-rejected-panel").hidden =
     state.user?.role !== "sales" || rejected.length === 0;
+}
+
+function isSalesRejectedStatusSelected() {
+  return state.user?.role === "sales" && state.filters.status === "需業務處理";
 }
 
 function draggedOrderIds(orderId) {
@@ -1330,6 +1354,7 @@ function renderCustomerFilter() {
       toggle.setAttribute("aria-expanded", "false");
       renderCustomerFilter();
       renderOrders();
+      renderSalesRejectedOrders();
     });
     menu.appendChild(button);
   }
@@ -1355,6 +1380,7 @@ function renderCheckboxGroup(containerId, values, selected, labelFor) {
       }
       renderCustomerFilter();
       renderOrders();
+      renderSalesRejectedOrders();
     });
     container.appendChild(label);
   }
@@ -1377,6 +1403,7 @@ function renderStatusSidebar() {
       renderStatusSidebar();
       renderFilters();
       renderOrders();
+      renderSalesRejectedOrders();
     });
     container.appendChild(button);
   }

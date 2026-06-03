@@ -1409,6 +1409,23 @@ test("sales draft conflict preview keeps baseline pending and scheduled calendar
   }
 });
 
+test("order task status headings show matching order labels and rejected list only for rejected status", () => {
+  const app = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+  const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
+  const rejectedRenderStart = app.indexOf("function renderSalesRejectedOrders()");
+  const rejectedRenderEnd = app.indexOf("function draggedOrderIds", rejectedRenderStart);
+  const rejectedRender = app.slice(rejectedRenderStart, rejectedRenderEnd);
+
+  assert.doesNotMatch(html, /<p class="eyebrow">業務處理<\/p>/);
+  assert.match(html, /id="order-list-title"[\s\S]*所有訂單/);
+  assert.doesNotMatch(html, /id="sales-rejected-title"/);
+  assert.doesNotMatch(html, /需業務處理訂單/);
+  assert.match(app, /function orderListTitle\(status\) \{[\s\S]*return status \? `\$\{status\}訂單` : "所有訂單";[\s\S]*\}/);
+  assert.match(app, /function isSalesRejectedStatusSelected\(\) \{[\s\S]*state\.filters\.status === "需業務處理"[\s\S]*\}/);
+  assert.match(rejectedRender, /isSalesRejectedStatusSelected\(\)/);
+  assert.doesNotMatch(rejectedRender, /需處理訂單/);
+});
+
 test("sales draft conflict preview shows successful draft schedule and excludes conflicted pending order", async () => {
   const document = buildDomFromIndex();
   const previewDate = dateKeyAfter(1);

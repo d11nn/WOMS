@@ -1948,6 +1948,7 @@ func TestSalesDraftPreviewReportsPendingOrderConflictCausedByDraft(t *testing.T)
 		t.Fatalf("preview failed: %d %s", res.Code, res.Body.String())
 	}
 	var payload struct {
+		PreviewID string `json:"previewId"`
 		Conflicts []struct {
 			OrderID            string `json:"orderId"`
 			Reason             string `json:"reason"`
@@ -1962,6 +1963,21 @@ func TestSalesDraftPreviewReportsPendingOrderConflictCausedByDraft(t *testing.T)
 	}
 	if payload.Conflicts[0].OrderID != pendingOrderID || payload.Conflicts[0].Reason != "capacity cannot satisfy order before due date" || !strings.HasPrefix(payload.Conflicts[0].EarliestFinishDate, "2026-05-02") {
 		t.Fatalf("unexpected draft-caused pending conflict: %+v", payload.Conflicts)
+	}
+
+	confirmReq := httptest.NewRequest(http.MethodPost, "/api/orders/preview-confirm", bytes.NewBufferString(fmt.Sprintf(`{"previewId":%q}`, payload.PreviewID)))
+	confirmReq.Header.Set("Authorization", "Bearer "+salesToken)
+	confirmRes := httptest.NewRecorder()
+	server.ServeHTTP(confirmRes, confirmReq)
+	if confirmRes.Code != http.StatusCreated {
+		t.Fatalf("confirm failed: %d %s", confirmRes.Code, confirmRes.Body.String())
+	}
+	var created domain.Order
+	if err := json.Unmarshal(confirmRes.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created order: %v", err)
+	}
+	if created.Status != domain.StatusRejected || store.orders[created.ID].Status != domain.StatusRejected {
+		t.Fatalf("expected conflicted draft confirmation to create rejected order, got response=%+v stored=%+v", created, store.orders[created.ID])
 	}
 }
 

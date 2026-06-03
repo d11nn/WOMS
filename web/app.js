@@ -466,10 +466,13 @@ document
       focusCreatedOrder(order);
       closePreviewPage();
       document.getElementById("order-form").reset();
-      showMessage("已加入待排程", "新訂單已正式放入待排程訂單。");
+      showMessage(
+        previewOrderSuccessTitle(order),
+        previewOrderSuccessMessage(order),
+      );
       await refreshWorkspace();
     } catch (error) {
-      showMessage("無法加入待排程", error.message, "warn");
+      showMessage(`無法加入${previewOrderTargetName()}`, error.message, "warn");
     }
   });
 
@@ -1584,10 +1587,37 @@ function renderPreviewPage() {
       ),
     ].join("") || "沒有可顯示的結果";
 
-  document.getElementById("confirm-preview-order").hidden =
-    state.preview?.kind !== "sales-draft";
+  const confirmPreviewOrder = document.getElementById("confirm-preview-order");
+  confirmPreviewOrder.hidden = state.preview?.kind !== "sales-draft";
+  confirmPreviewOrder.textContent = previewOrderConfirmationLabel();
   document.getElementById("confirm-schedule-job").hidden = !canConfirmSchedule;
   renderPreviewCalendar(allocations);
+}
+
+function isSalesDraftConflictPreview() {
+  return (
+    state.preview?.kind === "sales-draft" &&
+    (state.preview?.conflicts?.length ?? 0) > 0
+  );
+}
+
+function previewOrderTargetName() {
+  return isSalesDraftConflictPreview() ? "需處理" : "待排程";
+}
+
+function previewOrderConfirmationLabel() {
+  return `放到${previewOrderTargetName()}訂單`;
+}
+
+function previewOrderSuccessTitle(order) {
+  return order?.status === "需業務處理" ? "已加入需處理" : "已加入待排程";
+}
+
+function previewOrderSuccessMessage(order) {
+  if (order?.status === "需業務處理") {
+    return "新訂單已正式放入需處理訂單。";
+  }
+  return "新訂單已正式放入待排程訂單。";
 }
 
 function renderPreviewCalendar(allocations) {

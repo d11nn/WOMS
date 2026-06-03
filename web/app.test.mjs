@@ -888,6 +888,7 @@ test.skip("sales order form previews valid drafts and rejects non-future due dat
     assert.equal(previewCalls.length, 1);
     assert.equal(document.getElementById("schedule-preview-dialog").open, true);
     assert.equal(document.getElementById("confirm-preview-order").hidden, false);
+    assert.equal(document.getElementById("confirm-preview-order").textContent, "放到待排程訂單");
     assert.equal(document.getElementById("confirm-schedule-job").hidden, true);
     assert.equal(document.getElementById("preview-page-title").textContent, "訂單分配預覽");
     assert.match(document.getElementById("preview-page-list").innerHTML, /ORD-DRAFT/);
@@ -1384,6 +1385,7 @@ test("sales draft conflict preview keeps baseline pending and scheduled calendar
     assert.match(pendingMarkup, /ORD-PENDING/);
     assert.doesNotMatch(pendingMarkup, /PREVIEW-DRAFT/);
     assert.match(document.getElementById("preview-page-list").innerHTML, /conflict-preview[\s\S]*PREVIEW-DRAFT/);
+    assert.equal(document.getElementById("confirm-preview-order").textContent, "放到需處理訂單");
 
     const previewCalendarModes = document.getElementById("preview-calendar-mode").children;
     await document.getElementById("preview-calendar-mode").dispatchEvent({

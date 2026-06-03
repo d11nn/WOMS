@@ -334,11 +334,14 @@ func TestPostgresStore_ConfirmPreviewOrder(t *testing.T) {
 		DueDate:  "2026-06-01",
 	}
 	draftJSON, _ := json.Marshal(draft)
+	conflictsJSON, _ := json.Marshal([]scheduler.Conflict{
+		{OrderID: "PREVIEW-DRAFT", Reason: "capacity cannot satisfy order before due date"},
+	})
 
-	mock.ExpectQuery("SELECT actor_id, actor_role, draft_order FROM schedule_previews").
+	mock.ExpectQuery("SELECT actor_id, actor_role, draft_order, conflicts FROM schedule_previews").
 		WithArgs("preview-1").
-		WillReturnRows(sqlmock.NewRows([]string{"actor_id", "actor_role", "draft_order"}).
-			AddRow("sales-1", string(domain.RoleSales), sql.NullString{String: string(draftJSON), Valid: true}))
+		WillReturnRows(sqlmock.NewRows([]string{"actor_id", "actor_role", "draft_order", "conflicts"}).
+			AddRow("sales-1", string(domain.RoleSales), sql.NullString{String: string(draftJSON), Valid: true}, conflictsJSON))
 
 	// CreateOrder calls
 	mock.ExpectQuery("SELECT id, name, capacity_per_day").
@@ -360,7 +363,7 @@ func TestPostgresStore_ConfirmPreviewOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ConfirmPreviewOrder failed: %v", err)
 	}
-	if order.Customer != "ACME" {
+	if order.Customer != "ACME" || order.Status != domain.StatusRejected {
 		t.Errorf("unexpected order: %+v", order)
 	}
 }

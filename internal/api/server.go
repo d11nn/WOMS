@@ -1045,6 +1045,13 @@ func (s *MemoryStore) UpdateOrderDueDate(id string, req updateOrderRequest, clai
 }
 
 func (s *MemoryStore) createOrderLocked(req createOrderRequest, actorID string) (domain.Order, error) {
+	return s.createOrderLockedWithStatus(req, actorID, domain.StatusPending)
+}
+
+func (s *MemoryStore) createOrderLockedWithStatus(req createOrderRequest, actorID string, status domain.OrderStatus) (domain.Order, error) {
+	if status != domain.StatusPending && status != domain.StatusRejected {
+		return domain.Order{}, errors.New("preview orders can be created only as pending or rejected")
+	}
 	now := nowUTC()
 	currentDate, err := s.currentDateForLineLocked(req.LineID, now)
 	if err != nil {
@@ -1063,7 +1070,7 @@ func (s *MemoryStore) createOrderLocked(req createOrderRequest, actorID string) 
 		LineID:    req.LineID,
 		Quantity:  req.Quantity,
 		Priority:  req.Priority,
-		Status:    domain.StatusPending,
+		Status:    status,
 		DueDate:   dueDate,
 		Note:      strings.TrimSpace(req.Note),
 		CreatedBy: actorID,
@@ -2315,12 +2322,19 @@ func (s *MemoryStore) ConfirmPreviewOrder(previewID string, claims auth.Claims) 
 		return domain.Order{}, errors.New("preview does not contain a draft order")
 	}
 	draft := *preview.DraftOrder
-	order, err := s.createOrderLocked(draft, claims.Subject)
+	order, err := s.createOrderLockedWithStatus(draft, claims.Subject, previewConfirmationStatus(preview.Conflicts))
 	if err != nil {
 		return domain.Order{}, err
 	}
 	delete(s.previews, previewID)
 	return order, nil
+}
+
+func previewConfirmationStatus(conflicts []scheduler.Conflict) domain.OrderStatus {
+	if len(conflicts) > 0 {
+		return domain.StatusRejected
+	}
+	return domain.StatusPending
 }
 
 func (s *MemoryStore) CreateDemoConflictOrders(req demoConflictRequest, claims auth.Claims) ([]domain.Order, error) {

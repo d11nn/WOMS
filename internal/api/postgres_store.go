@@ -174,6 +174,13 @@ func (s *PostgresStore) ListOrders(claims auth.Claims) []domain.Order {
 }
 
 func (s *PostgresStore) CreateOrder(req createOrderRequest, actorID string) (domain.Order, error) {
+	return s.createOrderWithStatus(req, actorID, domain.StatusPending)
+}
+
+func (s *PostgresStore) createOrderWithStatus(req createOrderRequest, actorID string, status domain.OrderStatus) (domain.Order, error) {
+	if status != domain.StatusPending && status != domain.StatusRejected {
+		return domain.Order{}, errors.New("preview orders can be created only as pending or rejected")
+	}
 	if err := validateOrderFields(req.Customer, req.Quantity, req.Note); err != nil {
 		return domain.Order{}, err
 	}
@@ -203,7 +210,7 @@ func (s *PostgresStore) CreateOrder(req createOrderRequest, actorID string) (dom
 		LineID:    req.LineID,
 		Quantity:  req.Quantity,
 		Priority:  req.Priority,
-		Status:    domain.StatusPending,
+		Status:    status,
 		DueDate:   dueDate,
 		Note:      strings.TrimSpace(req.Note),
 		CreatedBy: actorID,
@@ -813,13 +820,14 @@ func (s *PostgresStore) ScheduleCalendar(lineID, month string, claims auth.Claim
 
 func (s *PostgresStore) ConfirmPreviewOrder(previewID string, claims auth.Claims) (domain.Order, error) {
 	var draftRaw sql.NullString
+	var conflictsRaw []byte
 	var actorID string
 	var actorRole domain.Role
 	err := s.db.QueryRow(`
-		SELECT actor_id, actor_role, draft_order
+		SELECT actor_id, actor_role, draft_order, conflicts
 		FROM schedule_previews
 		WHERE id = $1 AND expires_at > NOW()
-	`, previewID).Scan(&actorID, &actorRole, &draftRaw)
+	`, previewID).Scan(&actorID, &actorRole, &draftRaw, &conflictsRaw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Order{}, errors.New("preview result expired or not found")
 	}
@@ -836,7 +844,13 @@ func (s *PostgresStore) ConfirmPreviewOrder(previewID string, claims auth.Claims
 	if err := json.Unmarshal([]byte(draftRaw.String), &draft); err != nil {
 		return domain.Order{}, err
 	}
-	order, err := s.CreateOrder(draft, claims.Subject)
+	conflicts := []scheduler.Conflict{}
+	if len(conflictsRaw) > 0 {
+		if err := json.Unmarshal(conflictsRaw, &conflicts); err != nil {
+			return domain.Order{}, err
+		}
+	}
+	order, err := s.createOrderWithStatus(draft, claims.Subject, previewConfirmationStatus(conflicts))
 	if err != nil {
 		return domain.Order{}, err
 	}

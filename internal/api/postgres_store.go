@@ -850,12 +850,40 @@ func (s *PostgresStore) ConfirmPreviewOrder(previewID string, claims auth.Claims
 			return domain.Order{}, err
 		}
 	}
-	order, err := s.createOrderWithStatus(draft, claims.Subject, previewConfirmationStatus(conflicts))
+	order, err := s.createOrderWithStatus(draft, claims.Subject, draftConfirmationStatus(conflicts))
 	if err != nil {
+		return domain.Order{}, err
+	}
+	if err := s.rejectPreviewConflictOrders(conflicts, claims.Subject); err != nil {
 		return domain.Order{}, err
 	}
 	_, _ = s.db.Exec("DELETE FROM schedule_previews WHERE id = $1", previewID)
 	return order, nil
+}
+
+func (s *PostgresStore) rejectPreviewConflictOrders(conflicts []scheduler.Conflict, actorID string) error {
+	now := time.Now().UTC()
+	for _, conflict := range conflicts {
+		if conflict.OrderID == "" || conflict.OrderID == previewDraftOrderID {
+			continue
+		}
+		order, err := s.order(conflict.OrderID)
+		if err != nil {
+			return err
+		}
+		if order.Status != domain.StatusPending {
+			continue
+		}
+		order.Status = domain.StatusRejected
+		order.RejectionReason = salesDraftConflictReason
+		order.RejectedBy = actorID
+		order.RejectedAt = now
+		order.UpdatedAt = now
+		if err := s.updateOrderAndRevision(order, actorID, "order.sales_draft_conflict", salesDraftConflictReason); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *PostgresStore) GetScheduleJob(id string) (domain.ScheduleJob, bool) {

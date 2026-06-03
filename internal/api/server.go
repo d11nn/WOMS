@@ -54,6 +54,7 @@ const errPreviewExpired = "preview result expired or not found"
 const errPreviewOtherUser = "preview result belongs to another user"
 const errRoleInvalid = "role must be admin, sales, or scheduler"
 const errSchedulerLineInvalid = "scheduler lineId must be A, B, C, or D"
+const salesDraftConflictReason = "新訂單排程衝突，請業務處理。"
 
 var nowUTC = func() time.Time {
 	return time.Now().UTC()
@@ -2322,19 +2323,49 @@ func (s *MemoryStore) ConfirmPreviewOrder(previewID string, claims auth.Claims) 
 		return domain.Order{}, errors.New("preview does not contain a draft order")
 	}
 	draft := *preview.DraftOrder
-	order, err := s.createOrderLockedWithStatus(draft, claims.Subject, previewConfirmationStatus(preview.Conflicts))
+	order, err := s.createOrderLockedWithStatus(draft, claims.Subject, draftConfirmationStatus(preview.Conflicts))
 	if err != nil {
+		return domain.Order{}, err
+	}
+	if err := s.rejectPreviewConflictOrdersLocked(preview.Conflicts, claims.Subject); err != nil {
 		return domain.Order{}, err
 	}
 	delete(s.previews, previewID)
 	return order, nil
 }
 
-func previewConfirmationStatus(conflicts []scheduler.Conflict) domain.OrderStatus {
-	if len(conflicts) > 0 {
-		return domain.StatusRejected
+func draftConfirmationStatus(conflicts []scheduler.Conflict) domain.OrderStatus {
+	for _, conflict := range conflicts {
+		if conflict.OrderID == previewDraftOrderID {
+			return domain.StatusRejected
+		}
 	}
 	return domain.StatusPending
+}
+
+func (s *MemoryStore) rejectPreviewConflictOrdersLocked(conflicts []scheduler.Conflict, actorID string) error {
+	now := nowUTC()
+	for _, conflict := range conflicts {
+		if conflict.OrderID == "" || conflict.OrderID == previewDraftOrderID {
+			continue
+		}
+		order, ok := s.orders[conflict.OrderID]
+		if !ok {
+			return errors.New(errOrderNotFoundPrefix + conflict.OrderID)
+		}
+		if order.Status != domain.StatusPending {
+			continue
+		}
+		order.Status = domain.StatusRejected
+		order.RejectionReason = salesDraftConflictReason
+		order.RejectedBy = actorID
+		order.RejectedAt = now
+		order.UpdatedAt = now
+		s.orders[order.ID] = order
+		s.bumpLineRevisionLocked(order.LineID)
+		s.auditLocked(actorID, "order.sales_draft_conflict", order.ID, salesDraftConflictReason)
+	}
+	return nil
 }
 
 func (s *MemoryStore) CreateDemoConflictOrders(req demoConflictRequest, claims auth.Claims) ([]domain.Order, error) {

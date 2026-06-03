@@ -459,6 +459,7 @@ document
       return;
     }
     try {
+      const conflictPreview = isSalesDraftConflictPreview();
       const order = await request("/api/orders/preview-confirm", {
         method: "POST",
         body: JSON.stringify({ previewId: state.preview.previewId }),
@@ -467,8 +468,8 @@ document
       closePreviewPage();
       document.getElementById("order-form").reset();
       showMessage(
-        previewOrderSuccessTitle(order),
-        previewOrderSuccessMessage(order),
+        previewOrderSuccessTitle(order, conflictPreview),
+        previewOrderSuccessMessage(order, conflictPreview),
       );
       await refreshWorkspace();
     } catch (error) {
@@ -1636,13 +1637,19 @@ function previewOrderConfirmationLabel() {
   return `放到${previewOrderTargetName()}訂單`;
 }
 
-function previewOrderSuccessTitle(order) {
+function previewOrderSuccessTitle(order, conflictPreview = false) {
+  if (conflictPreview && order?.status !== "需業務處理") {
+    return "已處理衝突";
+  }
   return order?.status === "需業務處理" ? "已加入需處理" : "已加入待排程";
 }
 
-function previewOrderSuccessMessage(order) {
+function previewOrderSuccessMessage(order, conflictPreview = false) {
   if (order?.status === "需業務處理") {
     return "新訂單已正式放入需處理訂單。";
+  }
+  if (conflictPreview) {
+    return "新訂單已正式放入待排程訂單，衝突訂單已移到需處理訂單。";
   }
   return "新訂單已正式放入待排程訂單。";
 }

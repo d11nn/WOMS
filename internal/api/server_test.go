@@ -1976,8 +1976,11 @@ func TestSalesDraftPreviewReportsPendingOrderConflictCausedByDraft(t *testing.T)
 	if err := json.Unmarshal(confirmRes.Body.Bytes(), &created); err != nil {
 		t.Fatalf("decode created order: %v", err)
 	}
-	if created.Status != domain.StatusRejected || store.orders[created.ID].Status != domain.StatusRejected {
-		t.Fatalf("expected conflicted draft confirmation to create rejected order, got response=%+v stored=%+v", created, store.orders[created.ID])
+	if created.Status != domain.StatusPending || store.orders[created.ID].Status != domain.StatusPending {
+		t.Fatalf("expected accepted draft to create pending order, got response=%+v stored=%+v", created, store.orders[created.ID])
+	}
+	if store.orders[pendingOrderID].Status != domain.StatusRejected || store.orders[pendingOrderID].RejectionReason == "" {
+		t.Fatalf("expected displaced pending order to move to sales handling, got %+v", store.orders[pendingOrderID])
 	}
 }
 
@@ -2015,6 +2018,79 @@ func TestSalesDraftPreviewReturnsSuccessfulAllocationsWhenDraftDisplacesPendingO
 	}
 	if len(preview.Conflicts) != 1 || preview.Conflicts[0].OrderID != "ORD-D" {
 		t.Fatalf("expected ORD-D conflict, got %+v", preview.Conflicts)
+	}
+
+	confirmReq := httptest.NewRequest(http.MethodPost, "/api/orders/preview-confirm", bytes.NewBufferString(fmt.Sprintf(`{"previewId":%q}`, preview.PreviewID)))
+	confirmReq.Header.Set("Authorization", "Bearer "+salesToken)
+	confirmRes := httptest.NewRecorder()
+	server.ServeHTTP(confirmRes, confirmReq)
+	if confirmRes.Code != http.StatusCreated {
+		t.Fatalf("confirm failed: %d %s", confirmRes.Code, confirmRes.Body.String())
+	}
+	var created domain.Order
+	if err := json.Unmarshal(confirmRes.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created order: %v", err)
+	}
+	if created.Status != domain.StatusPending || store.orders[created.ID].Status != domain.StatusPending {
+		t.Fatalf("expected draft E to enter pending orders, got response=%+v stored=%+v", created, store.orders[created.ID])
+	}
+	if store.orders["ORD-D"].Status != domain.StatusRejected || store.orders["ORD-D"].RejectionReason == "" {
+		t.Fatalf("expected displaced ORD-D to move to sales handling, got %+v", store.orders["ORD-D"])
+	}
+}
+
+func TestSalesDraftPreviewConfirmRejectsDraftWhenDraftIsConflict(t *testing.T) {
+	store := NewMemoryStore()
+	server := NewServer("secret", store)
+	salesToken := login(t, server, "sales", "demo")
+	lineID := "A"
+	dueDate := mustAPIDate(t, "2026-05-30")
+	store.orders["ORD-A"] = domain.Order{ID: "ORD-A", Customer: "A", LineID: lineID, Quantity: 2500, Priority: domain.PriorityLow, Status: domain.StatusPending, DueDate: dueDate, CreatedBy: "user-sales", CreatedAt: time.UnixMilli(1772271711000).UTC()}
+	store.orders["ORD-B"] = domain.Order{ID: "ORD-B", Customer: "B", LineID: lineID, Quantity: 2500, Priority: domain.PriorityLow, Status: domain.StatusPending, DueDate: dueDate, CreatedBy: "user-sales", CreatedAt: time.UnixMilli(1772271712000).UTC()}
+	store.orders["ORD-C"] = domain.Order{ID: "ORD-C", Customer: "C", LineID: lineID, Quantity: 2500, Priority: domain.PriorityLow, Status: domain.StatusPending, DueDate: dueDate, CreatedBy: "user-sales", CreatedAt: time.UnixMilli(1772271713000).UTC()}
+	store.orders["ORD-D"] = domain.Order{ID: "ORD-D", Customer: "D", LineID: lineID, Quantity: 2500, Priority: domain.PriorityLow, Status: domain.StatusPending, DueDate: dueDate, CreatedBy: "user-sales", CreatedAt: time.UnixMilli(1772271714000).UTC()}
+
+	body := bytes.NewBufferString(`{"lineId":"A","startDate":"2026-05-30","currentDate":"2026-05-29","draftOrder":{"customer":"E","lineId":"A","quantity":2500,"priority":"low","dueDate":"2026-05-30"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/schedules/preview", body)
+	req.Header.Set("Authorization", "Bearer "+salesToken)
+	res := httptest.NewRecorder()
+	server.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("preview failed: %d %s", res.Code, res.Body.String())
+	}
+	var preview schedulePreviewResponse
+	if err := json.Unmarshal(res.Body.Bytes(), &preview); err != nil {
+		t.Fatalf("decode preview response: %v", err)
+	}
+	got := make([]string, 0, len(preview.Allocations))
+	for _, allocation := range preview.Allocations {
+		got = append(got, allocation.OrderID)
+	}
+	if !reflect.DeepEqual(got, []string{"ORD-A", "ORD-B", "ORD-C", "ORD-D"}) {
+		t.Fatalf("expected existing low-priority orders to keep preview capacity, got %+v", got)
+	}
+	if len(preview.Conflicts) != 1 || preview.Conflicts[0].OrderID != previewDraftOrderID {
+		t.Fatalf("expected draft E to be the conflict, got %+v", preview.Conflicts)
+	}
+
+	confirmReq := httptest.NewRequest(http.MethodPost, "/api/orders/preview-confirm", bytes.NewBufferString(fmt.Sprintf(`{"previewId":%q}`, preview.PreviewID)))
+	confirmReq.Header.Set("Authorization", "Bearer "+salesToken)
+	confirmRes := httptest.NewRecorder()
+	server.ServeHTTP(confirmRes, confirmReq)
+	if confirmRes.Code != http.StatusCreated {
+		t.Fatalf("confirm failed: %d %s", confirmRes.Code, confirmRes.Body.String())
+	}
+	var created domain.Order
+	if err := json.Unmarshal(confirmRes.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created order: %v", err)
+	}
+	if created.Status != domain.StatusRejected || store.orders[created.ID].Status != domain.StatusRejected {
+		t.Fatalf("expected conflicting draft E to enter sales handling, got response=%+v stored=%+v", created, store.orders[created.ID])
+	}
+	for _, id := range []string{"ORD-A", "ORD-B", "ORD-C", "ORD-D"} {
+		if store.orders[id].Status != domain.StatusPending {
+			t.Fatalf("existing order %s should stay pending, got %+v", id, store.orders[id])
+		}
 	}
 }
 

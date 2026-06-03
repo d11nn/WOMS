@@ -368,6 +368,76 @@ func TestPostgresStore_ConfirmPreviewOrder(t *testing.T) {
 	}
 }
 
+func TestPostgresStore_ConfirmPreviewOrderRejectsExistingConflicts(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+	mock.MatchExpectationsInOrder(false)
+
+	store := &PostgresStore{
+		MemoryStore: NewMemoryStore(),
+		db:          db,
+	}
+
+	claims := auth.Claims{
+		Subject: "sales-1",
+		Role:    domain.RoleSales,
+	}
+	tNow := time.Now().UTC()
+	draft := createOrderRequest{
+		Customer: "E",
+		LineID:   "A",
+		Quantity: 2500,
+		Priority: domain.PriorityHigh,
+		DueDate:  "2026-06-01",
+	}
+	draftJSON, _ := json.Marshal(draft)
+	conflictsJSON, _ := json.Marshal([]scheduler.Conflict{
+		{OrderID: "ORD-D", Reason: "capacity cannot satisfy order before due date"},
+	})
+
+	mock.ExpectQuery("SELECT actor_id, actor_role, draft_order, conflicts FROM schedule_previews").
+		WithArgs("preview-2").
+		WillReturnRows(sqlmock.NewRows([]string{"actor_id", "actor_role", "draft_order", "conflicts"}).
+			AddRow("sales-1", string(domain.RoleSales), sql.NullString{String: string(draftJSON), Valid: true}, conflictsJSON))
+	mock.ExpectQuery("SELECT id, name, capacity_per_day").
+		WithArgs("A", "Asia/Taipei").
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "capacity_per_day", "timezone", "schedule_revision"}).
+			AddRow("A", "Line A", 1000, "Asia/Taipei", 1))
+	mock.ExpectBegin()
+	mock.ExpectExec("INSERT INTO orders").WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("UPDATE production_lines").WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO audit_logs").WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	mock.ExpectQuery("SELECT id, customer, line_id.* FROM orders").
+		WithArgs("ORD-D").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "customer", "line_id", "quantity", "priority", "status", "due_date", "note", "created_by", "source_order", "rejection_reason", "rejected_by", "rejected_at", "created_at", "updated_at",
+		}).AddRow("ORD-D", "D", "A", 2500, string(domain.PriorityLow), string(domain.StatusPending), tNow, "", "sales-1", "", "", "", nil, tNow, tNow))
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE orders").WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("UPDATE production_lines").WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("INSERT INTO audit_logs").WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+	mock.ExpectExec("DELETE FROM schedule_previews").
+		WithArgs("preview-2").
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	order, err := store.ConfirmPreviewOrder("preview-2", claims)
+	if err != nil {
+		t.Fatalf("ConfirmPreviewOrder failed: %v", err)
+	}
+	if order.Customer != "E" || order.Status != domain.StatusPending {
+		t.Errorf("draft should be pending when existing order is the conflict: %+v", order)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
 func TestPostgresStore_ScheduleHistoryAndStartProduction(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {

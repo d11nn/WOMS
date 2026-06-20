@@ -20,6 +20,10 @@
 
 ---
 
+## 簡報
+
+[![WOMS 簡報預覽](preview.png)](presentation.pdf)
+
 WOMS 是以最終部署型態建置的晶圓訂單管理與排程系統。業務使用者建立與追蹤訂單，排程工程師管理產線排程與每日生產回報，Kafka、Redis、KEDA 與 Kubernetes 支援非同步重排與擴縮。
 
 實務上，WOMS 會接收晶圓訂單，把排程請求轉成非同步任務，在 worker 計算 allocation 時鎖定各 production line，把月曆產能結果保存到 PostgreSQL，並把營運決策寫入 audit history。這個 repository 的目標是能以真實服務型態部署，不只是本機 prototype。
